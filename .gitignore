@@ -1,0 +1,29 @@
+# 仮想環境
+.venv/
+venv/
+env/
+
+# APIキー・秘密情報
+.env
+*.env
+secrets.toml
+.streamlit/secrets.toml
+
+# Python キャッシュ
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 出力ファイル（Gitには含めない）
+output/
+*.xlsx
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/settings.json
+.idea/
