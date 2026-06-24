@@ -1,6 +1,7 @@
 """
 CSV読み込みモジュール
 UTF-8 / UTF-8 BOM / Shift_JIS に自動対応
+区切り文字（カンマ / タブ / セミコロン）も自動判定
 """
 import io
 import chardet
@@ -11,43 +12,79 @@ def detect_encoding(file_bytes: bytes) -> str:
     """chardet でバイト列の文字コードを推定する"""
     result = chardet.detect(file_bytes)
     enc = result.get("encoding") or "utf-8"
-    # cp932 / shift_jis 系を統一
     if enc.lower().replace("-", "_") in ("shift_jis", "sjis", "cp932", "ms932"):
         return "cp932"
     return enc
 
 
+def _detect_separator(text: str) -> str:
+    """
+    先頭数行を見て区切り文字を推定する。
+    NUENDO はバージョンによりタブ区切りで書き出す場合がある。
+    """
+    head = "\n".join(text.splitlines()[:5])
+    tab_count   = head.count("\t")
+    comma_count = head.count(",")
+    semi_count  = head.count(";")
+
+    if tab_count >= comma_count and tab_count >= semi_count:
+        return "\t"
+    if semi_count > comma_count:
+        return ";"
+    return ","
+
+
 def read_csv_auto(file) -> tuple[pd.DataFrame, str]:
     """
-    アップロードされたファイルを文字コード自動判定で読み込む。
-    Returns: (DataFrame, 判定した文字コード名)
+    アップロードされたファイルを文字コード・区切り文字ともに自動判定して読み込む。
+    Returns: (DataFrame, "文字コード / 区切り文字" の説明文字列)
     """
     file_bytes = file.read()
     enc = detect_encoding(file_bytes)
 
-    # 推定コードで試みて、失敗したらフォールバック順に再試行
-    fallbacks = ["utf-8-sig", "utf-8", "cp932", "shift_jis", "latin-1"]
-    if enc not in fallbacks:
-        fallbacks.insert(0, enc)
+    enc_candidates = ["utf-8-sig", "utf-8", "cp932", "shift_jis", "euc-jp", "latin-1"]
+    if enc not in enc_candidates:
+        enc_candidates.insert(0, enc)
 
     last_error = None
-    for candidate in fallbacks:
+
+    for candidate_enc in enc_candidates:
+        # まずデコードできるか確認
         try:
-            df = pd.read_csv(io.BytesIO(file_bytes), encoding=candidate)
-            return df, candidate
-        except (UnicodeDecodeError, pd.errors.ParserError) as e:
-            last_error = e
+            text = file_bytes.decode(candidate_enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+        sep = _detect_separator(text)
+
+        # sep と python エンジンで読む（C エンジンより寛容）
+        for sep_try in [sep, ",", "\t", ";"]:
+            try:
+                df = pd.read_csv(
+                    io.BytesIO(file_bytes),
+                    encoding=candidate_enc,
+                    sep=sep_try,
+                    engine="python",      # C エンジンより列数ゆれに強い
+                    on_bad_lines="warn",  # 壊れた行はスキップして続行
+                )
+                # 1列しか取れなかった場合は区切り文字ミス
+                if len(df.columns) <= 1:
+                    continue
+                sep_label = {"," : "カンマ", "\t": "タブ", ";": "セミコロン"}.get(sep_try, sep_try)
+                return df, f"{candidate_enc} / {sep_label}区切り"
+            except Exception as e:
+                last_error = e
 
     raise ValueError(
-        f"CSVの文字コードを判定できませんでした。"
-        f"UTF-8 または Shift_JIS で保存されているか確認してください。\n詳細: {last_error}"
+        f"CSV を読み込めませんでした。\n"
+        f"・NUENDO から書き出した CSV をそのまま使っているか確認してください\n"
+        f"・Excel で開いて保存し直すと解決する場合があります\n"
+        f"詳細: {last_error}"
     )
 
 
 # ---- 列バリデーション ----
 
-# NUENDOのCSVは書き出しバージョンで列名が微妙に異なる場合があるため、
-# 「絶対必要」な列だけ厳格にチェックし、後処理で別名を吸収する。
 CUE_REQUIRED = ["イベント名", "ファイル名"]
 WAV_REQUIRED = ["FileName"]
 
@@ -68,15 +105,14 @@ def normalize_cue_columns(df: pd.DataFrame) -> pd.DataFrame:
     既存列名はそのまま保持し、見つかった別名だけ正規名に変換する。
     """
     alias_map = {
-        # 正規名: [別名候補...]
         "トラック名": ["トラック", "Track Name", "Track"],
         "イベント名": ["Event Name", "Name", "クリップ名"],
         "ファイル名": ["File Name", "Source File", "Audio File"],
         "START TIME": ["スタートタイム", "Start", "開始時間", "Position"],
-        "終了時間": ["End Time", "End"],
-        "イン時間": ["Clip In", "In"],
+        "終了時間":   ["End Time", "End"],
+        "イン時間":   ["Clip In", "In"],
         "アウト時間": ["Clip Out", "Out"],
-        "長さ": ["Duration", "デュレーション", "Length"],
+        "長さ":       ["Duration", "デュレーション", "Length"],
     }
     rename = {}
     for canonical, aliases in alias_map.items():
