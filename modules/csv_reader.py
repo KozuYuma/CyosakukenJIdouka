@@ -9,11 +9,16 @@ import chardet
 import pandas as pd
 
 
-# ヘッダー行の判定に使うキーワード（日本語・英語）
+# ヘッダー行の判定・列名の検証に使うキーワード（日本語・英語）
 _HEADER_KEYWORDS = [
+    # 日本語
     "イベント名", "ファイル名", "トラック名", "トラック",
-    "Event Name", "File Name", "Track Name", "Track",
-    "START TIME", "Duration", "Length",
+    "終了時間", "イン時間", "アウト時間", "長さ",
+    # 英語
+    "Event Name", "Event", "File Name", "Track Name", "Track",
+    "START TIME", "Start", "End", "Duration", "Length", "In", "Out",
+    # WAV/MP3一覧
+    "FileName", "FullPath", "Folder", "SizeMB",
 ]
 
 
@@ -27,7 +32,7 @@ def detect_encoding(file_bytes: bytes) -> str:
 
 
 def _detect_separator(text: str) -> str:
-    """先頭数行を見て区切り文字を推定する"""
+    """先頭10行を見て区切り文字を推定する"""
     head = "\n".join(text.splitlines()[:10])
     counts = {"\t": head.count("\t"), ",": head.count(","), ";": head.count(";")}
     return max(counts, key=counts.get)
@@ -39,25 +44,37 @@ def _find_header_row(lines: list[str], sep: str) -> int:
 
     NUENDOのCue CSVは先頭に「プロジェクト名,値」のような
     2列のメタデータが数百行続いた後に本体テーブルが始まる場合がある。
-    キーワードマッチ → フィールド数の変化点の順で探す。
+    キーワードマッチ → フィールド数変化点の順で探す。
     """
-    # 1. ヘッダーキーワードを含む行を優先（最も確実）
+    # 1. ヘッダーキーワードを含む行を優先
     for i, line in enumerate(lines):
         if any(kw in line for kw in _HEADER_KEYWORDS):
             return i
 
-    # 2. フィールド数が急増する行を探す（メタデータ終端 → データ開始）
+    # 2. フィールド数が急増する行（メタデータ終端 → データ開始）
     prev_count = 0
     for i, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped:
+        if not line.strip():
             continue
-        count = len(stripped.split(sep))
+        count = len(line.strip().split(sep))
         if count >= 3 and count > prev_count + 1:
             return i
         prev_count = count
 
     return 0
+
+
+def _columns_look_valid(columns) -> bool:
+    """
+    列名が文字化けしていないか確認する。
+    latin-1でUTF-8ファイルを読んだ場合、列名が「ã\x82¤...」のようになる。
+    既知のキーワードが1つも含まれなければ文字化けと判定する。
+    """
+    for col in columns:
+        col_str = str(col)
+        if any(kw in col_str for kw in _HEADER_KEYWORDS):
+            return True
+    return False
 
 
 def read_csv_auto(file) -> tuple[pd.DataFrame, str]:
@@ -70,6 +87,7 @@ def read_csv_auto(file) -> tuple[pd.DataFrame, str]:
     file_bytes = file.read()
     enc_guess = detect_encoding(file_bytes)
 
+    # latin-1 は最後にする（日本語ファイルでは必ず誤検出になるため）
     enc_candidates = ["utf-8-sig", "utf-8", "cp932", "shift_jis", "euc-jp", "latin-1"]
     if enc_guess not in enc_candidates:
         enc_candidates.insert(0, enc_guess)
@@ -87,10 +105,12 @@ def read_csv_auto(file) -> tuple[pd.DataFrame, str]:
         skiprows = _find_header_row(lines, sep)
 
         sep_label = {",": "カンマ", "\t": "タブ", ";": "セミコロン"}.get(sep, sep)
-        desc = f"{enc} / {sep_label}区切り / {skiprows}行スキップ"
+
+        # skiprowsが見つかった場合と0の両方を試す
+        skip_candidates = [skiprows] if skiprows == 0 else [skiprows, 0]
 
         for sep_try in [sep, ",", "\t", ";"]:
-            for skip in ([skiprows] if skiprows > 0 else [0]):
+            for skip in skip_candidates:
                 try:
                     df = pd.read_csv(
                         io.BytesIO(file_bytes),
@@ -100,14 +120,19 @@ def read_csv_auto(file) -> tuple[pd.DataFrame, str]:
                         engine="python",
                         on_bad_lines="warn",
                     )
+                    # 列数チェック
                     if len(df.columns) <= 1:
                         continue
-                    # 空列・無名列が多すぎる場合は除外
-                    named = [c for c in df.columns if not str(c).startswith("Unnamed")]
-                    if len(named) < 2:
+                    # 列名の文字化けチェック（最重要）
+                    if not _columns_look_valid(df.columns):
                         continue
+
                     sep_label2 = {",": "カンマ", "\t": "タブ", ";": "セミコロン"}.get(sep_try, sep_try)
-                    return df, f"{enc} / {sep_label2}区切り" + (f" / 先頭{skip}行スキップ" if skip else "")
+                    desc = f"{enc} / {sep_label2}区切り"
+                    if skip:
+                        desc += f" / 先頭{skip}行スキップ"
+                    return df, desc
+
                 except Exception as e:
                     last_error = e
 
