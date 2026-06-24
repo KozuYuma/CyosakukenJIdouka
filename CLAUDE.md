@@ -75,36 +75,33 @@ WAV で照合できなかった場合のみ MP3 を補助として使う。
 
 ## 📅 最新の作業状態
 
-### 最終更新：2026-06-22
+### 最終更新：2026-06-25
 **やったこと**
-- 仕様書をもとに MVP を実装
-  - `app.py`：Streamlit 5 タブ構成（読み込み / 楽曲まとめ / イベント一覧 / 検索補助 / Excel 出力）
-  - `modules/csv_reader.py`：UTF-8 / Shift_JIS / UTF-8 BOM 自動判定、列名ゆれ吸収
-  - `modules/number_parser.py`：ライブラリ管理番号・Audiostock 番号の分解
-  - `modules/normalizer.py`：照合用文字列正規化、ファイル名からのタイトル検出
-  - `modules/matcher.py`：優先度6段階の照合ロジック、楽曲まとめ・イベント一覧生成
-  - `modules/excel_exporter.py`：6 シート Excel 出力（色分け・フィルター・列幅自動調整）
-  - `modules/search_helper.py`：検索語生成（J-WID / NexTone / Google URL）
-  - `scripts/Get-WavList.ps1`・`Get-Mp3List.ps1`：WAV/MP3 一覧取得スクリプト
-  - `samples/`：サンプル CSV 3 種
-  - `README.md`：日本語セットアップガイド
-  - `run.bat`：ワンクリック起動バッチ
-  - `.gitignore`：.venv / API キー除外設定
+- MVP 実装（前回）
+- サンプル CSV による動作確認 → 全 6 曲「正規化一致」・イベント 7→楽曲 6 件集約を確認
+- J-WID / NexTone 自動スクレイピング機能を追加
+  - `modules/scraper.py`：requests + BeautifulSoup4 による HTML スクレイピング
+    - J-WID: EUC-JP 対応、テーブルパース、デバッグ HTML 表示
+    - NexTone: JSON API → HTML の順でフォールバック、カード/テーブル両対応
+    - レート制限（2 秒間隔）・タイムアウト設定済み
+  - `app.py` 検索補助タブ：自動調査ボタン、結果表示、「適用」ボタンで楽曲まとめに反映
+  - `requirements.txt`：requests / beautifulsoup4 / lxml を追加
 
 **次にやること**
-- 実際の NUENDO Cue CSV でテスト・列名ゆれの確認と吸収
+- 実際の J-WID / NexTone でスクレイパーをテスト（HTML 構造確認・パーサー調整）
+- 実際の NUENDO Cue CSV でテスト・列名ゆれの確認
 - 既存 Excel 再読み込み機能（手入力情報の引き継ぎ）
-- Git 初期化・GitHub リポジトリ作成
 - 類似一致の精度向上（表記ゆれ対応の拡充）
-- MP3 自動収集補助 PowerShell スクリプトの追加
 
 **未解決の問題**
-- 実際の NUENDO Cue CSV の列名が想定と異なる可能性あり（normalize_cue_columns で吸収予定）
-- J-WID は直接 URL パラメータを渡せない（トップページへ誘導 → 手動検索）
+- J-WID / NexTone のスクレイパーは実サイトで HTML 構造を確認するまで動作保証なし
+  → パース失敗時は「デバッグ: 取得 HTML」エキスパンダーで生 HTML を確認して調整
+- J-WID は EUC-JP エンコーディング前提（サイト変更で文字化けの可能性）
+- NexTone は Next.js 製で内部 API パスが変わると JSON 取得に失敗する可能性
 - Duration の形式が環境により異なる可能性（PowerShell の Shell API 依存）
 
 **重要な決定事項**
 - 技術スタック: Python + Streamlit（複数人共有・初心者保守性・ローカル処理を優先）
 - MP3 は補助のみ（主軸は WAV）・MP3 タグ情報は前提にしない
-- J-WID / NexTone の自動スクレイピングは行わない
+- J-WID / NexTone 自動スクレイピングを実装（個人業務用ツールとして使用）
 - 既存 Excel 読み込みは将来実装（MVP 外）

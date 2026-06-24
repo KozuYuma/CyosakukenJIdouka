@@ -18,6 +18,7 @@ from modules.csv_reader import (
 )
 from modules.excel_exporter import export_to_excel
 from modules.matcher import build_song_list
+from modules.scraper import search_all
 from modules.search_helper import JWID_BASE, generate_search_terms
 
 # =====================================================================
@@ -358,65 +359,51 @@ with tabs[2]:
 # タブ 4: 検索補助
 # =====================================================================
 with tabs[3]:
-    st.header("検索補助（J-WID / NexTone / Google）")
-    st.caption(
-        "楽曲を選択すると検索語と各サイトへのリンクを表示します。"
-        " J-WID は直接検索 URL が提供されていないためトップページへ誘導します。"
-    )
+    st.header("検索補助（J-WID / NexTone 自動調査）")
 
     if st.session_state.songs_df is None:
         st.info("「ファイル読み込み」タブで照合を実行してください。")
     else:
         songs_df = st.session_state.songs_df
 
-        # 楽曲選択
-        song_labels = (
-            songs_df["No"].astype(str) + ". " + songs_df["イベント名"]
-        ).tolist()
-        selected_label = st.selectbox("楽曲を選択", options=song_labels, key="search_song_select")
+        # ---- 楽曲選択 ----
+        song_labels = (songs_df["No"].astype(str) + ". " + songs_df["イベント名"]).tolist()
+        selected_label = st.selectbox("調査する楽曲を選択", options=song_labels, key="search_song_select")
 
         if selected_label:
             selected_no = int(selected_label.split(".")[0])
-            row = songs_df[songs_df["No"] == selected_no].iloc[0]
+            row_idx = songs_df[songs_df["No"] == selected_no].index[0]
+            row = songs_df.loc[row_idx]
 
-            # 検索語候補を収集
+            # 検索語を収集（優先度順）
             term_candidates: list[tuple[str, str]] = []
-            if str(row.get("WAV検出タイトル", "")).strip():
-                term_candidates.append(("WAV検出タイトル", str(row["WAV検出タイトル"]).strip()))
-            if str(row.get("曲名", "")).strip():
-                term_candidates.append(("管理番号除去後曲名", str(row["曲名"]).strip()))
-            if str(row.get("ライブラリ盤番号", "")).strip():
-                term_candidates.append(("ライブラリ盤番号", str(row["ライブラリ盤番号"]).strip()))
-            if str(row.get("CD番号", "")).strip():
-                term_candidates.append(("CD番号", str(row["CD番号"]).strip()))
+            for field, label in [
+                ("WAV検出タイトル", "WAV検出タイトル"),
+                ("曲名",           "管理番号除去後曲名"),
+                ("ライブラリ盤番号", "ライブラリ盤番号"),
+                ("CD番号",         "CD番号"),
+            ]:
+                val = str(row.get(field, "")).strip()
+                if val and val.lower() != "nan":
+                    term_candidates.append((label, val))
             if not term_candidates:
                 term_candidates.append(("イベント名", str(row.get("イベント名", "")).strip()))
 
-            st.subheader(f"No.{selected_no} ： {row.get('イベント名', '')}")
+            main_term = term_candidates[0][1]
+            encoded = urllib.parse.quote(main_term)
 
+            st.subheader(f"No.{selected_no} ／ {row.get('イベント名', '')}")
+
+            # ---- 検索語と手動リンク ----
             col_terms, col_links = st.columns([3, 2])
-
             with col_terms:
-                st.markdown("**検索語候補**")
+                st.markdown("**検索語候補**（クリックして選択＆コピー）")
                 for label, term in term_candidates:
-                    st.text_input(
-                        label,
-                        value=term,
-                        key=f"term_input_{selected_no}_{label}",
-                        help="テキストを選択してコピーしてください",
-                    )
+                    st.text_input(label, value=term, key=f"term_{selected_no}_{label}")
 
             with col_links:
-                st.markdown("**検索リンク**")
-                main_term = term_candidates[0][1] if term_candidates else ""
-                encoded = urllib.parse.quote(main_term)
-
-                st.link_button(
-                    "🔍 J-WID（JASRAC）トップへ",
-                    JWID_BASE,
-                    help="J-WID を開いて上記の検索語で手動検索してください",
-                    use_container_width=True,
-                )
+                st.markdown("**手動検索リンク**")
+                st.link_button("🔍 J-WID トップ", JWID_BASE, use_container_width=True)
                 st.link_button(
                     "🔍 NexTone で検索",
                     f"https://search.nex-tone.co.jp/search?keyword={encoded}",
@@ -428,15 +415,134 @@ with tabs[3]:
                     use_container_width=True,
                 )
 
-            st.caption("💡 J-WID は検索ページに直接パラメータを渡せないため、トップページを開いて手動で検索語を入力してください。")
+            st.divider()
 
-        # 全検索語一覧
+            # ---- 自動調査セクション ----
+            st.markdown("#### 🤖 J-WID / NexTone 自動調査")
+
+            # 検索語を選択できるようにする
+            search_term = st.selectbox(
+                "使用する検索語",
+                options=[t for _, t in term_candidates],
+                key=f"auto_term_{selected_no}",
+            )
+
+            if st.button(
+                f'🔍 「{search_term}」で J-WID / NexTone を自動検索',
+                key=f"auto_search_{selected_no}",
+                type="primary",
+                use_container_width=True,
+            ):
+                with st.spinner("J-WID / NexTone を検索中... (各サイト約2秒待機します)"):
+                    results = search_all(search_term)
+                    st.session_state[f"scrape_results_{selected_no}"] = results
+
+            # ---- 結果表示 ----
+            results = st.session_state.get(f"scrape_results_{selected_no}")
+            if results:
+                jwid_res   = results["jwid"]
+                nextone_res = results["nextone"]
+
+                tab_j, tab_n = st.tabs(["📋 J-WID 結果", "📋 NexTone 結果"])
+
+                # ---- J-WID 結果 ----
+                with tab_j:
+                    st.caption(f"検索URL: {jwid_res['search_url']}")
+
+                    if jwid_res["error"]:
+                        st.error(f"エラー: {jwid_res['error']}")
+                        with st.expander("デバッグ: 取得 HTML（先頭 3000 文字）"):
+                            st.code(jwid_res.get("debug_html", ""), language="html")
+
+                    elif not jwid_res["results"]:
+                        st.warning("J-WID: 該当なし（または HTML パース失敗）")
+                        with st.expander("デバッグ: 取得 HTML（先頭 3000 文字）"):
+                            st.code(jwid_res.get("debug_html", ""), language="html")
+
+                    else:
+                        st.success(f"{len(jwid_res['results'])} 件見つかりました")
+                        for i, item in enumerate(jwid_res["results"]):
+                            with st.expander(
+                                f"候補 {i+1}: {item.get('作品名', '(作品名不明)')} ／ {item.get('作品コード', '')}",
+                                expanded=(i == 0),
+                            ):
+                                c1, c2 = st.columns(2)
+                                c1.text_input("作品コード（JASRAC）", value=item.get("作品コード", ""), key=f"j_code_{selected_no}_{i}", disabled=True)
+                                c1.text_input("作品名",   value=item.get("作品名", ""),  key=f"j_title_{selected_no}_{i}",    disabled=True)
+                                c1.text_input("作曲者",   value=item.get("作曲者", ""),  key=f"j_comp_{selected_no}_{i}",     disabled=True)
+                                c2.text_input("作詞者",   value=item.get("作詞者", ""),  key=f"j_lyric_{selected_no}_{i}",    disabled=True)
+                                c2.text_input("編曲者",   value=item.get("編曲者", ""),  key=f"j_arr_{selected_no}_{i}",      disabled=True)
+                                c2.text_input("出版者",   value=item.get("出版者", ""),  key=f"j_pub_{selected_no}_{i}",      disabled=True)
+
+                                if st.button(
+                                    "✅ このデータを楽曲まとめに適用",
+                                    key=f"apply_jwid_{selected_no}_{i}",
+                                    use_container_width=True,
+                                ):
+                                    _apply_fields = {
+                                        "作曲者":         item.get("作曲者", ""),
+                                        "作詞者":         item.get("作詞者", ""),
+                                        "アーティスト":   item.get("アーティスト", ""),
+                                        "JASRAC作品コード": item.get("作品コード", ""),
+                                        "確認ステータス": "J-WID要確認" if not item.get("作品コード") else "候補あり",
+                                    }
+                                    for col, val in _apply_fields.items():
+                                        if val:
+                                            st.session_state.songs_df.at[row_idx, col] = val
+                                    st.success("楽曲まとめに反映しました。「楽曲まとめ」タブで確認してください。")
+
+                # ---- NexTone 結果 ----
+                with tab_n:
+                    st.caption(f"検索URL: {nextone_res['search_url']}")
+
+                    if nextone_res["error"]:
+                        st.error(f"エラー: {nextone_res['error']}")
+                        with st.expander("デバッグ: 取得 HTML（先頭 3000 文字）"):
+                            st.code(nextone_res.get("debug_html", ""), language="html")
+
+                    elif not nextone_res["results"]:
+                        st.warning("NexTone: 該当なし（または HTML パース失敗）")
+                        with st.expander("デバッグ: 取得 HTML（先頭 3000 文字）"):
+                            st.code(nextone_res.get("debug_html", ""), language="html")
+
+                    else:
+                        st.success(f"{len(nextone_res['results'])} 件見つかりました")
+                        for i, item in enumerate(nextone_res["results"]):
+                            with st.expander(
+                                f"候補 {i+1}: {item.get('作品名', '(作品名不明)')} ／ {item.get('管理番号', '')}",
+                                expanded=(i == 0),
+                            ):
+                                c1, c2 = st.columns(2)
+                                c1.text_input("管理番号（NexTone）", value=item.get("管理番号", ""),    key=f"n_id_{selected_no}_{i}",    disabled=True)
+                                c1.text_input("作品名",              value=item.get("作品名", ""),      key=f"n_title_{selected_no}_{i}", disabled=True)
+                                c1.text_input("作曲者",              value=item.get("作曲者", ""),      key=f"n_comp_{selected_no}_{i}",  disabled=True)
+                                c2.text_input("作詞者",              value=item.get("作詞者", ""),      key=f"n_lyric_{selected_no}_{i}", disabled=True)
+                                c2.text_input("アーティスト",        value=item.get("アーティスト", ""), key=f"n_art_{selected_no}_{i}",   disabled=True)
+                                c2.text_input("アルバム",            value=item.get("アルバム", ""),    key=f"n_alb_{selected_no}_{i}",   disabled=True)
+
+                                if st.button(
+                                    "✅ このデータを楽曲まとめに適用",
+                                    key=f"apply_nt_{selected_no}_{i}",
+                                    use_container_width=True,
+                                ):
+                                    _apply_fields = {
+                                        "作曲者":          item.get("作曲者", ""),
+                                        "作詞者":          item.get("作詞者", ""),
+                                        "アーティスト":    item.get("アーティスト", ""),
+                                        "NexTone管理番号": item.get("管理番号", ""),
+                                        "確認ステータス":  "NexTone要確認" if not item.get("管理番号") else "候補あり",
+                                    }
+                                    for col, val in _apply_fields.items():
+                                        if val:
+                                            st.session_state.songs_df.at[row_idx, col] = val
+                                    st.success("楽曲まとめに反映しました。「楽曲まとめ」タブで確認してください。")
+
+        # ---- 全検索語一覧 ----
         st.divider()
         st.subheader("全検索語一覧")
         if st.session_state.search_df is not None and len(st.session_state.search_df) > 0:
-            display_cols = ["No", "イベント名", "検索語ラベル", "検索語"]
             st.dataframe(
-                st.session_state.search_df[display_cols],
+                st.session_state.search_df[["No", "イベント名", "検索語ラベル", "検索語"]],
                 use_container_width=True,
                 hide_index=True,
             )
