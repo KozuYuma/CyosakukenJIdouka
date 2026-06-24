@@ -2,10 +2,19 @@
 CSV読み込みモジュール
 UTF-8 / UTF-8 BOM / Shift_JIS に自動対応
 区切り文字（カンマ / タブ / セミコロン）も自動判定
+NUENDOのCue CSVに含まれるメタデータ行を自動スキップ
 """
 import io
 import chardet
 import pandas as pd
+
+
+# ヘッダー行の判定に使うキーワード（日本語・英語）
+_HEADER_KEYWORDS = [
+    "イベント名", "ファイル名", "トラック名", "トラック",
+    "Event Name", "File Name", "Track Name", "Track",
+    "START TIME", "Duration", "Length",
+]
 
 
 def detect_encoding(file_bytes: bytes) -> str:
@@ -18,68 +27,96 @@ def detect_encoding(file_bytes: bytes) -> str:
 
 
 def _detect_separator(text: str) -> str:
-    """
-    先頭数行を見て区切り文字を推定する。
-    NUENDO はバージョンによりタブ区切りで書き出す場合がある。
-    """
-    head = "\n".join(text.splitlines()[:5])
-    tab_count   = head.count("\t")
-    comma_count = head.count(",")
-    semi_count  = head.count(";")
+    """先頭数行を見て区切り文字を推定する"""
+    head = "\n".join(text.splitlines()[:10])
+    counts = {"\t": head.count("\t"), ",": head.count(","), ";": head.count(";")}
+    return max(counts, key=counts.get)
 
-    if tab_count >= comma_count and tab_count >= semi_count:
-        return "\t"
-    if semi_count > comma_count:
-        return ";"
-    return ","
+
+def _find_header_row(lines: list[str], sep: str) -> int:
+    """
+    実際のデータが始まるヘッダー行の行番号を返す。
+
+    NUENDOのCue CSVは先頭に「プロジェクト名,値」のような
+    2列のメタデータが数百行続いた後に本体テーブルが始まる場合がある。
+    キーワードマッチ → フィールド数の変化点の順で探す。
+    """
+    # 1. ヘッダーキーワードを含む行を優先（最も確実）
+    for i, line in enumerate(lines):
+        if any(kw in line for kw in _HEADER_KEYWORDS):
+            return i
+
+    # 2. フィールド数が急増する行を探す（メタデータ終端 → データ開始）
+    prev_count = 0
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        count = len(stripped.split(sep))
+        if count >= 3 and count > prev_count + 1:
+            return i
+        prev_count = count
+
+    return 0
 
 
 def read_csv_auto(file) -> tuple[pd.DataFrame, str]:
     """
-    アップロードされたファイルを文字コード・区切り文字ともに自動判定して読み込む。
-    Returns: (DataFrame, "文字コード / 区切り文字" の説明文字列)
+    アップロードされたファイルを文字コード・区切り文字・ヘッダー行を
+    すべて自動判定して読み込む。
+
+    Returns: (DataFrame, 判定内容の説明文字列)
     """
     file_bytes = file.read()
-    enc = detect_encoding(file_bytes)
+    enc_guess = detect_encoding(file_bytes)
 
     enc_candidates = ["utf-8-sig", "utf-8", "cp932", "shift_jis", "euc-jp", "latin-1"]
-    if enc not in enc_candidates:
-        enc_candidates.insert(0, enc)
+    if enc_guess not in enc_candidates:
+        enc_candidates.insert(0, enc_guess)
 
     last_error = None
 
-    for candidate_enc in enc_candidates:
-        # まずデコードできるか確認
+    for enc in enc_candidates:
         try:
-            text = file_bytes.decode(candidate_enc)
+            text = file_bytes.decode(enc)
         except (UnicodeDecodeError, LookupError):
             continue
 
         sep = _detect_separator(text)
+        lines = text.splitlines()
+        skiprows = _find_header_row(lines, sep)
 
-        # sep と python エンジンで読む（C エンジンより寛容）
+        sep_label = {",": "カンマ", "\t": "タブ", ";": "セミコロン"}.get(sep, sep)
+        desc = f"{enc} / {sep_label}区切り / {skiprows}行スキップ"
+
         for sep_try in [sep, ",", "\t", ";"]:
-            try:
-                df = pd.read_csv(
-                    io.BytesIO(file_bytes),
-                    encoding=candidate_enc,
-                    sep=sep_try,
-                    engine="python",      # C エンジンより列数ゆれに強い
-                    on_bad_lines="warn",  # 壊れた行はスキップして続行
-                )
-                # 1列しか取れなかった場合は区切り文字ミス
-                if len(df.columns) <= 1:
-                    continue
-                sep_label = {"," : "カンマ", "\t": "タブ", ";": "セミコロン"}.get(sep_try, sep_try)
-                return df, f"{candidate_enc} / {sep_label}区切り"
-            except Exception as e:
-                last_error = e
+            for skip in ([skiprows] if skiprows > 0 else [0]):
+                try:
+                    df = pd.read_csv(
+                        io.BytesIO(file_bytes),
+                        encoding=enc,
+                        sep=sep_try,
+                        skiprows=skip,
+                        engine="python",
+                        on_bad_lines="warn",
+                    )
+                    if len(df.columns) <= 1:
+                        continue
+                    # 空列・無名列が多すぎる場合は除外
+                    named = [c for c in df.columns if not str(c).startswith("Unnamed")]
+                    if len(named) < 2:
+                        continue
+                    sep_label2 = {",": "カンマ", "\t": "タブ", ";": "セミコロン"}.get(sep_try, sep_try)
+                    return df, f"{enc} / {sep_label2}区切り" + (f" / 先頭{skip}行スキップ" if skip else "")
+                except Exception as e:
+                    last_error = e
 
     raise ValueError(
-        f"CSV を読み込めませんでした。\n"
-        f"・NUENDO から書き出した CSV をそのまま使っているか確認してください\n"
-        f"・Excel で開いて保存し直すと解決する場合があります\n"
-        f"詳細: {last_error}"
+        "CSV を読み込めませんでした。\n\n"
+        "【確認してください】\n"
+        "・NUENDOから書き出したCSVをそのまま使っているか\n"
+        "・Excelで開いて「名前を付けて保存」→「CSV UTF-8（コンマ区切り）」で保存し直す\n"
+        f"\n詳細: {last_error}"
     )
 
 
