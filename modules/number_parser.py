@@ -13,12 +13,22 @@ VALID_LIBRARY_SERIES: dict[str, set[int]] = {
     "VJ": {1, 2},
 }
 
-# ライブラリ管理番号パターン: 数字1桁 + 英字2文字 - 3桁 - 2桁
+# ライブラリ管理番号パターン（厳密版）: 数字1桁 + 英字2文字 - 3桁 - 2桁
 # 例: 6ST-653-09
 LIBRARY_PATTERN = re.compile(
     r"\b([1-7])(ST|AN|VO|VJ)-(\d{3})-(\d{2})\b",
     re.IGNORECASE,
 )
+
+# 広義ライブラリ管理番号パターン: 数字1桁 + 大文字英字2文字 - 3桁数字 (+ 省略可能な -2桁)
+# 例: 1AN-146, 2MX-033-04, 3BG-512 など系列問わず
+# ファイル名からのタイトル抽出用（parse_number では厳密版を使う）
+BROAD_LIBRARY_PATTERN = re.compile(
+    r"\b\d[A-Z]{2}-\d{3}(?:-\d{2})?\b",
+)
+
+# BPM・コード サフィックスパターン: _BPM_KEY (例: _113_C, _120_Am, _95_F#m)
+_BPM_KEY_SUFFIX = re.compile(r"_\d+_[A-Ga-g][#b]?m?$")
 
 # Audiostock 管理番号パターン
 # 例: audiostock_856447（末尾は _ または文字列終端 or 非数字文字）
@@ -32,7 +42,8 @@ AUDIOSTOCK_PATTERN = re.compile(
 def _strip_id(text: str, id_str: str) -> str:
     """テキストから管理番号文字列を除去して曲名部分だけ返す"""
     cleaned = text.replace(id_str, "")
-    return re.sub(r"^[\s\-_]+|[\s\-_]+$", "", cleaned).strip()
+    title = re.sub(r"^[\s\-_]+|[\s\-_]+$", "", cleaned).strip()
+    return _BPM_KEY_SUFFIX.sub("", title).strip()
 
 
 def parse_library_number(text: str) -> dict | None:
