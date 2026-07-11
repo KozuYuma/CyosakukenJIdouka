@@ -402,10 +402,10 @@ with tabs[0]:
                             st.session_state.songs_df.at[_mb_idx, "作曲者"] = _rn["作曲者"]
                         if _rn.get("管理番号"):
                             st.session_state.songs_df.at[_mb_idx, "NexTone管理番号"] = _rn["管理番号"]
-                        if st.session_state.songs_df.at[_mb_idx, "確認ステータス"] == "未調査":
+                        if st.session_state.songs_df.at[_mb_idx, "確認ステータス"] in ("未調査", "MP3補助確認"):
                             st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
                     elif _nt_r:
-                        if st.session_state.songs_df.at[_mb_idx, "確認ステータス"] == "未調査":
+                        if st.session_state.songs_df.at[_mb_idx, "確認ステータス"] in ("未調査", "MP3補助確認"):
                             st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
                 except Exception:
                     _mb_stats["エラー"] += 1
@@ -572,10 +572,16 @@ with tabs[0]:
 
         st.info("「楽曲まとめ」タブで内容を確認・編集してください。")
         if st.session_state.get("mp3_is_finder") and st.session_state.mp3_df is not None:
-            st.info(
-                "💡 ④ MP3 CSV タブの「ID3タグ情報を楽曲まとめに取り込む」ボタンで"
-                " MP3 のメタデータ（アーティスト・作曲者・アルバム）を補完できます。"
+            _auto_songs, _auto_upd = _import_mp3finder_id3(
+                st.session_state.mp3_df,
+                st.session_state.songs_df.copy(),
             )
+            st.session_state.songs_df = _auto_songs
+            if _auto_upd > 0:
+                st.success(
+                    f"💿 MP3 ID3タグ情報（アーティスト・作曲者・アルバム）を"
+                    f" {_auto_upd} 件自動補完しました。"
+                )
 
 
 # =====================================================================
