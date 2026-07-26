@@ -15,9 +15,12 @@ __pycache__/
 *.pyo
 *.pyd
 
-# 出力ファイル（Gitには含めない）
+# 出力ファイル・ユーザーデータ（Gitには含めない）
 output/
 *.xlsx
+data/
+debug_output.txt
+recovered_claude_session*
 
 # OS
 .DS_Store

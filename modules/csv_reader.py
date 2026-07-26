@@ -2,24 +2,22 @@
 CSV読み込みモジュール
 UTF-8 / UTF-8 BOM / Shift_JIS に自動対応
 区切り文字（カンマ / タブ / セミコロン）も自動判定
-NUENDOのCue CSVに含まれるメタデータ行を自動スキップ
+
+NUENDOのCue CSVは独自のマルチセクション形式のため専用パーサーを使用する。
+構造:
+  [プロジェクト情報]  2列のメタデータ
+  [ファイルリスト]    2列の名前-パス一覧
+  [オーディオトラックリスト]
+    トラック - M1-1
+      イベント名,ファイル名,START TIME,...  ← 各トラックに個別のヘッダー
+      データ行...
+    トラック - M2-1
+      イベント名,...
+      データ行...
 """
 import io
 import chardet
 import pandas as pd
-
-
-# ヘッダー行の判定・列名の検証に使うキーワード（日本語・英語）
-_HEADER_KEYWORDS = [
-    # 日本語
-    "イベント名", "ファイル名", "トラック名", "トラック",
-    "終了時間", "イン時間", "アウト時間", "長さ",
-    # 英語
-    "Event Name", "Event", "File Name", "Track Name", "Track",
-    "START TIME", "Start", "End", "Duration", "Length", "In", "Out",
-    # WAV/MP3一覧
-    "FileName", "FullPath", "Folder", "SizeMB",
-]
 
 
 def detect_encoding(file_bytes: bytes) -> str:
@@ -38,56 +36,110 @@ def _detect_separator(text: str) -> str:
     return max(counts, key=counts.get)
 
 
-def _find_header_row(lines: list[str], sep: str) -> int:
+def _is_cue_header(line: str) -> bool:
     """
-    実際のデータが始まるヘッダー行の行番号を返す。
-
-    NUENDOのCue CSVは先頭に「プロジェクト名,値」のような
-    2列のメタデータが数百行続いた後に本体テーブルが始まる場合がある。
-    キーワードマッチ → フィールド数変化点の順で探す。
+    Cueデータのヘッダー行かどうか判定する。
+    「イベント名」と「ファイル名」が両方含まれる行のみを対象にする。
+    「長さ」単独などのメタデータ行を誤検出しないようにするため
+    2つのキーワードを必須とする。
     """
-    # 1. ヘッダーキーワードを含む行を優先
-    for i, line in enumerate(lines):
-        if any(kw in line for kw in _HEADER_KEYWORDS):
-            return i
+    return "イベント名" in line and "ファイル名" in line
 
-    # 2. フィールド数が急増する行（メタデータ終端 → データ開始）
-    prev_count = 0
-    for i, line in enumerate(lines):
-        if not line.strip():
+
+def _parse_nuendo_multitrack(text: str, sep: str) -> pd.DataFrame | None:
+    """
+    NUENDOのマルチトラックCue CSV専用パーサー。
+    複数の「トラック - Mxx」セクションを統合して1つのDataFrameを返す。
+    どのセクションにもCueデータがなければ None を返す。
+    """
+    lines = text.splitlines()
+    all_rows: list[dict] = []
+    current_headers: list[str] | None = None
+    current_track: str = ""
+    n_expected: int = 0
+
+    for line in lines:
+        stripped = line.strip()
+
+        # --- トラック名行の検出 ---
+        # 例: "トラック - M1-1"（カンマなし・" - " あり）
+        if " - " in stripped and "," not in stripped:
+            parts = stripped.split(" - ", 1)
+            if len(parts) == 2:
+                candidate = parts[1].strip()
+                # スペース区切りのセクションタイトル（文字間にスペース）は除外
+                # 例: "ト ラ ッ ク  リ ス ト" は除外、"M1-1" は採用
+                if len(candidate) > 0 and " " not in candidate.replace("-", ""):
+                    current_track = candidate
+                    current_headers = None
             continue
-        count = len(line.strip().split(sep))
-        if count >= 3 and count > prev_count + 1:
-            return i
-        prev_count = count
 
-    return 0
+        # --- Cueヘッダー行の検出 ---
+        if _is_cue_header(stripped):
+            current_headers = [f.strip() for f in stripped.split(sep)]
+            n_expected = len(current_headers)
+            continue
+
+        # --- データ行の処理 ---
+        if current_headers and stripped and "," in stripped:
+            # n_expected 列に合わせて分割（最後の列にカンマが含まれても壊れないよう maxsplit 指定）
+            fields = [f.strip() for f in stripped.split(sep, n_expected - 1)]
+
+            # 列数が少なすぎる行（メタデータ行等）はスキップ
+            if len(fields) < n_expected - 1:
+                continue
+
+            row: dict = {}
+            for i, h in enumerate(current_headers):
+                row[h] = fields[i] if i < len(fields) else ""
+
+            # トラック名を付加
+            if current_track:
+                row["トラック名"] = current_track
+
+            # イベント名が空でない行だけ採用
+            first_col = current_headers[0]
+            if row.get(first_col, "").strip():
+                all_rows.append(row)
+
+    if not all_rows:
+        return None
+
+    df = pd.DataFrame(all_rows)
+
+    # トラック名列を先頭に移動
+    if "トラック名" in df.columns:
+        cols = ["トラック名"] + [c for c in df.columns if c != "トラック名"]
+        df = df[cols]
+
+    return df.reset_index(drop=True)
 
 
 def _columns_look_valid(columns) -> bool:
     """
     列名が文字化けしていないか確認する。
-    latin-1でUTF-8ファイルを読んだ場合、列名が「ã\x82¤...」のようになる。
-    既知のキーワードが1つも含まれなければ文字化けと判定する。
+    CueCSVなら「イベント名+ファイル名」、WAV一覧なら「FileName」が含まれるはず。
     """
-    for col in columns:
-        col_str = str(col)
-        if any(kw in col_str for kw in _HEADER_KEYWORDS):
-            return True
-    return False
+    col_str = " ".join(str(c) for c in columns)
+    return (
+        ("イベント名" in col_str and "ファイル名" in col_str)
+        or "FileName" in col_str
+        or "Event" in col_str
+    )
 
 
 def read_csv_auto(file) -> tuple[pd.DataFrame, str]:
     """
     アップロードされたファイルを文字コード・区切り文字・ヘッダー行を
     すべて自動判定して読み込む。
+    NUENDOのマルチセクション形式にも対応。
 
     Returns: (DataFrame, 判定内容の説明文字列)
     """
     file_bytes = file.read()
     enc_guess = detect_encoding(file_bytes)
 
-    # latin-1 は最後にする（日本語ファイルでは必ず誤検出になるため）
+    # latin-1 は最後（日本語ファイルでは必ず文字化けするため）
     enc_candidates = ["utf-8-sig", "utf-8", "cp932", "shift_jis", "euc-jp", "latin-1"]
     if enc_guess not in enc_candidates:
         enc_candidates.insert(0, enc_guess)
@@ -101,13 +153,17 @@ def read_csv_auto(file) -> tuple[pd.DataFrame, str]:
             continue
 
         sep = _detect_separator(text)
-        lines = text.splitlines()
-        skiprows = _find_header_row(lines, sep)
 
-        sep_label = {",": "カンマ", "\t": "タブ", ";": "セミコロン"}.get(sep, sep)
+        # --- NUENDOマルチセクション形式を最初に試みる ---
+        if _is_cue_header_in_text(text):
+            df = _parse_nuendo_multitrack(text, sep)
+            if df is not None and len(df.columns) > 1:
+                sep_label = {",": "カンマ", "\t": "タブ", ";": "セミコロン"}.get(sep, sep)
+                return df, f"{enc} / {sep_label}区切り / NUENDOマルチセクション形式"
 
-        # skiprowsが見つかった場合と0の両方を試す
-        skip_candidates = [skiprows] if skiprows == 0 else [skiprows, 0]
+        # --- 通常のCSVとして読む ---
+        skip_candidates = [_find_simple_header_row(text.splitlines()), 0]
+        skip_candidates = list(dict.fromkeys(skip_candidates))  # 重複除去
 
         for sep_try in [sep, ",", "\t", ";"]:
             for skip in skip_candidates:
@@ -120,19 +176,15 @@ def read_csv_auto(file) -> tuple[pd.DataFrame, str]:
                         engine="python",
                         on_bad_lines="warn",
                     )
-                    # 列数チェック
                     if len(df.columns) <= 1:
                         continue
-                    # 列名の文字化けチェック（最重要）
                     if not _columns_look_valid(df.columns):
                         continue
-
                     sep_label2 = {",": "カンマ", "\t": "タブ", ";": "セミコロン"}.get(sep_try, sep_try)
                     desc = f"{enc} / {sep_label2}区切り"
                     if skip:
                         desc += f" / 先頭{skip}行スキップ"
                     return df, desc
-
                 except Exception as e:
                     last_error = e
 
@@ -143,6 +195,27 @@ def read_csv_auto(file) -> tuple[pd.DataFrame, str]:
         "・Excelで開いて「名前を付けて保存」→「CSV UTF-8（コンマ区切り）」で保存し直す\n"
         f"\n詳細: {last_error}"
     )
+
+
+def _is_cue_header_in_text(text: str) -> bool:
+    """テキスト全体にCueヘッダー行が含まれるか確認する"""
+    for line in text.splitlines():
+        if _is_cue_header(line):
+            return True
+    return False
+
+
+def _find_simple_header_row(lines: list[str]) -> int:
+    """
+    通常CSV用: イベント名とファイル名が共存するヘッダー行を探す。
+    見つからなければ0を返す。
+    """
+    for i, line in enumerate(lines):
+        if _is_cue_header(line):
+            return i
+        if "FileName" in line:
+            return i
+    return 0
 
 
 # ---- 列バリデーション ----

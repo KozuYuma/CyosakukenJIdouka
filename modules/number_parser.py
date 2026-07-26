@@ -24,11 +24,27 @@ LIBRARY_PATTERN = re.compile(
 # 例: 1AN-146, 2MX-033-04, 3BG-512 など系列問わず
 # ファイル名からのタイトル抽出用（parse_number では厳密版を使う）
 BROAD_LIBRARY_PATTERN = re.compile(
-    r"\b\d[A-Z]{2}-\d{3}(?:-\d{2})?\b",
+    r"\b(?:\d[A-Z]{2}-\d{3}(?:-\d{2})?|\d{2}[A-Z]-\d{4}(?:[-\s]\d{2})?)\b",
+)
+
+# 旧形式管理番号パターン: 2桁数字 + 1文字英字 - 4桁 (+ 省略可能なトラック番号)
+# トラック番号はハイフンまたはスペース区切りで2桁
+# 例: 57A-0023 01 タイトル, 57A-0023-01 タイトル
+_LEGACY_PATTERN = re.compile(
+    r"\b(\d{2}[A-Z])-(\d{4})(?:([-\s])(\d{2}))?"
 )
 
 # BPM・コード サフィックスパターン: _BPM_KEY (例: _113_C, _120_Am, _95_F#m)
 _BPM_KEY_SUFFIX = re.compile(r"_\d+_[A-Ga-g][#b]?m?$")
+
+# NUENDOバージョン番号サフィックス: -02 のようにハイフン＋2桁数字が末尾につく
+_NUENDO_VERSION_SUFFIX = re.compile(r"-\d{2}$")
+
+# 盤名付きライブラリ管理番号形式
+# {管理番号}_{盤名}_{トラック番号} {曲名}[-{バージョン}]
+# 例: 1AN-768_劇場版 カードキャプターさくら O.S.T._25 反撃開始!-02
+_ALBUM_DISC_MGMT = re.compile(r"^([1-7])(ST|AN|VO|VJ)-(\d{3})$", re.IGNORECASE)
+_ALBUM_DISC_TRACK = re.compile(r"^(\d{1,3})\s+(.+?)$")
 
 # Audiostock 管理番号パターン
 # 例: audiostock_856447（末尾は _ または文字列終端 or 非数字文字）
@@ -39,11 +55,65 @@ AUDIOSTOCK_PATTERN = re.compile(
 )
 
 
+def _clean_title(title: str) -> str:
+    """曲名から末尾サフィックス（BPM/キー、NUENDOバージョン番号）を除去する"""
+    title = _BPM_KEY_SUFFIX.sub("", title).strip()
+    title = _NUENDO_VERSION_SUFFIX.sub("", title).strip()
+    return title
+
+
 def _strip_id(text: str, id_str: str) -> str:
     """テキストから管理番号文字列を除去して曲名部分だけ返す"""
     cleaned = text.replace(id_str, "")
     title = re.sub(r"^[\s\-_]+|[\s\-_]+$", "", cleaned).strip()
-    return _BPM_KEY_SUFFIX.sub("", title).strip()
+    return _clean_title(title)
+
+
+def parse_album_number(text: str) -> dict | None:
+    """
+    盤名付きライブラリ管理番号形式を検出・分解する。
+    形式: {管理番号}_{盤名}_{トラック番号} {曲名}[-{NUENDOバージョン}]
+    例: "1AN-768_劇場版 カードキャプターさくら O.S.T._25 反撃開始!-02"
+    見つからなければ None を返す。
+    """
+    # アンダースコアで3分割: [管理番号, 盤名, トラック+曲名]
+    parts = text.split("_", 2)
+    if len(parts) < 3:
+        return None
+
+    m_mgmt = _ALBUM_DISC_MGMT.match(parts[0].strip())
+    if not m_mgmt:
+        return None
+
+    digit = int(m_mgmt.group(1))
+    series_code = m_mgmt.group(2).upper()
+    disc_num = m_mgmt.group(3)
+
+    if series_code not in VALID_LIBRARY_SERIES:
+        return None
+    if digit not in VALID_LIBRARY_SERIES[series_code]:
+        return None
+
+    # 3パート目: "{トラック番号} {曲名}[-バージョン]"
+    m_track = _ALBUM_DISC_TRACK.match(parts[2].strip())
+    if not m_track:
+        return None
+
+    track_num = m_track.group(1).zfill(2)
+    title = _clean_title(m_track.group(2).strip())
+
+    disc_id = f"{digit}{series_code}-{disc_num}"
+    management_id = f"{digit}{series_code}-{disc_num}-{track_num}"
+
+    return {
+        "管理番号種別": "ライブラリ管理番号",
+        "元管理番号": management_id,
+        "管理系列": f"{digit}{series_code}",
+        "ライブラリ盤番号": disc_id,
+        "トラック番号": track_num,
+        "Audiostock管理番号": "",
+        "検出曲名": title,
+    }
 
 
 def parse_library_number(text: str) -> dict | None:
@@ -77,6 +147,38 @@ def parse_library_number(text: str) -> dict | None:
         "トラック番号": track_num,
         "Audiostock管理番号": "",
         "検出曲名": _strip_id(text, management_id),
+    }
+
+
+def parse_legacy_number(text: str) -> dict | None:
+    """
+    旧形式管理番号 (57A-0023形式) を検出・分解する。
+    トラック番号はハイフンまたはスペース区切りで2桁。
+    例: "57A-0023 01 タイトル", "57A-0023-01 タイトル"
+    見つからなければ None を返す。
+    """
+    m = _LEGACY_PATTERN.search(text)
+    if not m:
+        return None
+
+    prefix = m.group(1)      # "57A"
+    disc_num = m.group(2)    # "0023"
+    track_num = m.group(4) if m.group(4) else ""  # "01" or ""
+
+    disc_id = f"{prefix}-{disc_num}"
+    if track_num:
+        management_id = f"{prefix}-{disc_num}-{track_num}"
+    else:
+        management_id = disc_id
+
+    return {
+        "管理番号種別": "ライブラリ管理番号",
+        "元管理番号": management_id,
+        "管理系列": prefix,
+        "ライブラリ盤番号": disc_id,
+        "トラック番号": track_num,
+        "Audiostock管理番号": "",
+        "検出曲名": _strip_id(text, m.group(0)),
     }
 
 
@@ -118,7 +220,15 @@ def parse_number(text: str) -> dict:
     if result:
         return result
 
+    result = parse_album_number(text)
+    if result:
+        return result
+
     result = parse_library_number(text)
+    if result:
+        return result
+
+    result = parse_legacy_number(text)
     if result:
         return result
 

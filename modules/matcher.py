@@ -7,6 +7,33 @@ import pandas as pd
 from .normalizer import normalize_for_match, detect_title_from_filename
 from .number_parser import parse_number
 
+
+def duration_to_min_sec(duration_str: str) -> tuple[int, int]:
+    """
+    "HH:MM:SS:FF"（タイムコード）/ "HH:MM:SS.mmm" / "MM:SS.mmm" / "SS.mmm" → (分, 秒)。
+    HH:MM:SS:FF 形式はフレーム部分を切り捨て（フレームが1以上あれば1秒繰り上げ）。
+    申告フォーマットの使用時間（分）・使用時間（秒）算出用。
+    """
+    s = str(duration_str).strip()
+    if not s or s.lower() == "nan":
+        return 0, 0
+    try:
+        parts = s.split(":")
+        if len(parts) == 4:
+            # HH:MM:SS:FF タイムコード形式
+            hh, mm, ss, ff = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+            total_sec = hh * 3600 + mm * 60 + ss + (1 if ff > 0 else 0)
+        elif len(parts) == 3:
+            total_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        elif len(parts) == 2:
+            total_sec = int(parts[0]) * 60 + float(parts[1])
+        else:
+            total_sec = float(parts[0])
+        total_int = int(total_sec)
+        return total_int // 60, total_int % 60
+    except (ValueError, TypeError):
+        return 0, 0
+
 # 照合ステータスの定義（優先度順）
 MATCH_EXACT = "完全一致"
 MATCH_NORMALIZED = "正規化一致"
@@ -21,10 +48,13 @@ def _build_lookup(df: pd.DataFrame) -> dict[str, dict]:
     """
     WAV/MP3 DataFrame から照合用ルックアップを構築する。
     キー: 正規化済みファイル名 → 値: 行データ（dict）
+    WAV CSV は "FileName" 列、mp3finder CSV は "ファイル名" 列を使用。
     """
+    # FileName (WAV形式) or ファイル名 (mp3finder形式) を許容
+    col = "FileName" if "FileName" in df.columns else "ファイル名"
     lookup: dict[str, dict] = {}
     for _, row in df.iterrows():
-        filename = str(row.get("FileName", ""))
+        filename = str(row.get(col, ""))
         if not filename or filename.lower() == "nan":
             continue
         # 完全一致用（拡張子あり）
@@ -49,6 +79,9 @@ def _match_single(
     event_str = str(event_name).strip()
     file_str = str(nuendo_filename).strip()
 
+    # WAV CSV は "FileName"、mp3finder CSV は "ファイル名" 列を使用
+    fn_col = "FileName" if (len(audio_df) > 0 and "FileName" in audio_df.columns) else "ファイル名"
+
     # --- 優先度1: イベント名とファイル名の完全一致 ---
     key_exact = event_str.lower()
     if key_exact in lookup:
@@ -64,7 +97,7 @@ def _match_single(
     event_mgmt_id = event_parsed.get("元管理番号", "")
     if event_mgmt_id:
         for _, row in audio_df.iterrows():
-            wav_parsed = parse_number(str(row.get("FileName", "")))
+            wav_parsed = parse_number(str(row.get(fn_col, "")))
             if wav_parsed.get("元管理番号") == event_mgmt_id:
                 return row.to_dict(), MATCH_NUMBER
 
@@ -73,7 +106,7 @@ def _match_single(
     event_title_norm = normalize_for_match(event_title)
     if event_title_norm:
         for _, row in audio_df.iterrows():
-            wav_title = detect_title_from_filename(str(row.get("FileName", "")))
+            wav_title = detect_title_from_filename(str(row.get(fn_col, "")))
             if event_title_norm == normalize_for_match(wav_title):
                 return row.to_dict(), MATCH_TITLE
 
@@ -85,7 +118,7 @@ def _match_single(
     # --- 優先度6: 部分一致 ---
     if event_norm:
         for _, row in audio_df.iterrows():
-            wav_norm = normalize_for_match(str(row.get("FileName", "")))
+            wav_norm = normalize_for_match(str(row.get(fn_col, "")))
             if wav_norm and (event_norm in wav_norm or wav_norm in event_norm):
                 return row.to_dict(), MATCH_PARTIAL
 
@@ -94,7 +127,7 @@ def _match_single(
 
 def build_song_list(
     cue_df: pd.DataFrame,
-    wav_df: pd.DataFrame,
+    wav_df: pd.DataFrame | None = None,
     mp3_df: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -141,18 +174,29 @@ def build_song_list(
         # --- 管理番号分解（イベント名から） ---
         parsed = parse_number(event_name)
 
+        # イベント名の検出曲名（管理番号除去済み）からさらにトラック番号プレフィックスを除去する
+        # 例: "1-01 回レ!雪月花" → "回レ!雪月花"、"05 It's a Happening!" → "It's a Happening!"
+        _raw_title = parsed.get("検出曲名", "")
+        # イベント名は末尾マーカー除去不要（ファイル名用の ⑥⑦ をスキップ）
+        _clean_title = detect_title_from_filename(_raw_title, strip_trailing=False) or _raw_title
+
         # --- WAV 情報抽出 ---
         wav_filename = matched_wav.get("FileName", "") if matched_wav else ""
         wav_duration = matched_wav.get("Duration", "") if matched_wav else ""
         wav_title = (
             detect_title_from_filename(wav_filename)
             if wav_filename
-            else parsed.get("検出曲名", "")
+            else _clean_title
         )
 
         # --- MP3 情報抽出（補助） ---
-        mp3_filename = matched_mp3.get("FileName", "") if matched_mp3 else ""
-        mp3_duration = matched_mp3.get("Duration", "") if matched_mp3 else ""
+        # WAV形式は "FileName"/"Duration"、mp3finder形式は "ファイル名"/"再生時間" を使用
+        if matched_mp3:
+            mp3_filename = matched_mp3.get("FileName") or matched_mp3.get("ファイル名", "")
+            mp3_duration = matched_mp3.get("Duration") or matched_mp3.get("再生時間", "")
+        else:
+            mp3_filename = ""
+            mp3_duration = ""
 
         # --- 確認ステータス初期値 ---
         if wav_status == MATCH_NONE and not matched_mp3:
@@ -161,6 +205,7 @@ def build_song_list(
             confirm_status = "未調査"
 
         # --- イベント一覧に追加 ---
+        _min, _sec = duration_to_min_sec(duration)
         events.append(
             {
                 "トラック": track,
@@ -171,6 +216,8 @@ def build_song_list(
                 "イン時間": in_time,
                 "アウト時間": out_time,
                 "使用尺": duration,
+                "使用時間（分）": _min,
+                "使用時間（秒）": _sec,
                 "照合ステータス": wav_status,
             }
         )
@@ -182,7 +229,7 @@ def build_song_list(
                 "元管理番号": parsed.get("元管理番号", ""),
                 "ライブラリ盤番号": parsed.get("ライブラリ盤番号", ""),
                 "トラック番号": parsed.get("トラック番号", ""),
-                "曲名": parsed.get("検出曲名", ""),
+                "曲名": _clean_title,
                 "イベント名": event_name,
                 "NUENDOファイル名": nuendo_filename,
                 "WAV一致ファイル名": wav_filename,
@@ -191,13 +238,24 @@ def build_song_list(
                 "WAV照合ステータス": wav_status,
                 "MP3一致ファイル名": mp3_filename,
                 "MP3フル尺": mp3_duration,
+                "使用形態": "背景",
+                "音源区分": "CD",
+                "I/V区分": "",
+                "邦洋区分": "",
+                "原訳詞区分": "",
                 "作曲者": "",
                 "作詞者": "",
+                "編曲者": "",
+                "訳詞者": "",
                 "アーティスト": "",
+                "レコード会社名": "",
                 "CD番号": "",
+                "CD名": "",
                 "JASRAC作品コード": "",
                 "NexTone管理番号": "",
+                "委任者": "",
                 "確認ステータス": confirm_status,
+                "自社楽曲ID": "",
                 "メモ": "",
             }
 

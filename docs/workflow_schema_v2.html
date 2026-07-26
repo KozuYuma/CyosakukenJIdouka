@@ -1,0 +1,532 @@
+<title>著作権調査支援ツール — ワークフロー＆DBスキーマ</title>
+<style>
+:root {
+  --bg:       #F5F3EE;
+  --bg-alt:   #EDEAE2;
+  --surface:  #FFFFFF;
+  --border:   #D6D1C4;
+  --text:     #1C1A16;
+  --sub:      #6B6456;
+  --accent:   #B5811A;
+  --acc-bg:   #FBF3E2;
+  --navy:     #1E2640;
+  --blue:     #4E6EA3;
+  --green:    #1E6B45;
+  --green-bg: #E6F5ED;
+  --orange:   #9C5A28;
+  --ora-bg:   #FBF0E6;
+  --red:      #834050;
+  --red-bg:   #F9EAED;
+  --purple:   #5A4B82;
+  --purp-bg:  #EEE9F8;
+  --font-serif: 'Palatino Linotype',Palatino,'Book Antiqua',Georgia,serif;
+  --font-sans: system-ui,-apple-system,'Segoe UI',sans-serif;
+  --font-mono: Consolas,'Cascadia Code','Courier New',monospace;
+  --r: 5px; --r-lg: 9px;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg:#111318;--bg-alt:#191C25;--surface:#1E2230;--border:#2E3348;
+  --text:#E6E2D8;--sub:#8A8370;--accent:#D4A030;--acc-bg:#1E1A0E;
+  --navy:#D0CCBE;--blue:#7090C8;
+  --green:#4EA87C;--green-bg:#0D2018;
+  --orange:#D08050;--ora-bg:#1E1208;
+  --red:#C07080;--red-bg:#200A10;
+  --purple:#9080C8;--purp-bg:#150F28;
+}}
+:root[data-theme="light"] {
+  --bg:#F5F3EE;--bg-alt:#EDEAE2;--surface:#FFFFFF;--border:#D6D1C4;--text:#1C1A16;--sub:#6B6456;--accent:#B5811A;--acc-bg:#FBF3E2;--navy:#1E2640;--blue:#4E6EA3;--green:#1E6B45;--green-bg:#E6F5ED;--orange:#9C5A28;--ora-bg:#FBF0E6;--red:#834050;--red-bg:#F9EAED;--purple:#5A4B82;--purp-bg:#EEE9F8;
+}
+:root[data-theme="dark"] {
+  --bg:#111318;--bg-alt:#191C25;--surface:#1E2230;--border:#2E3348;--text:#E6E2D8;--sub:#8A8370;--accent:#D4A030;--acc-bg:#1E1A0E;--navy:#D0CCBE;--blue:#7090C8;--green:#4EA87C;--green-bg:#0D2018;--orange:#D08050;--ora-bg:#1E1208;--red:#C07080;--red-bg:#200A10;--purple:#9080C8;--purp-bg:#150F28;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--text);font-family:var(--font-sans);font-size:13.5px;line-height:1.65;}
+
+/* ── Nav ── */
+.topnav{background:var(--navy);padding:0 32px;display:flex;align-items:center;gap:0;position:sticky;top:0;z-index:100;}
+.topnav-logo{font-family:var(--font-serif);color:#C8B880;font-size:13px;padding:14px 20px 14px 0;border-right:1px solid #2E3A5C;margin-right:4px;white-space:nowrap;}
+.topnav a{color:#A8B8D8;font-size:12px;padding:14px 16px;text-decoration:none;white-space:nowrap;transition:color .15s;}
+.topnav a:hover{color:#fff;}
+
+/* ── Layout ── */
+.wrap{max-width:960px;margin:0 auto;padding:44px 36px 80px;}
+
+/* ── Section headers ── */
+.sec-eyebrow{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:8px;}
+.sec-title{font-family:var(--font-serif);font-size:22px;font-weight:normal;text-wrap:balance;margin-bottom:6px;}
+.sec-desc{color:var(--sub);font-size:13px;max-width:68ch;margin-bottom:28px;}
+.section{margin-bottom:60px;}
+
+hr.div{border:none;border-top:1px solid var(--border);margin:48px 0;}
+
+/* ── Coverage pills ── */
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;white-space:nowrap;}
+.pill-auto  {background:var(--green-bg);color:var(--green);}
+.pill-semi  {background:var(--ora-bg);color:var(--orange);}
+.pill-manual{background:var(--red-bg);color:var(--red);}
+.pill-todo  {background:var(--purp-bg);color:var(--purple);}
+
+/* ── Output column mapping table ── */
+.mapping-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--r-lg);margin-bottom:20px;}
+.mapping-wrap table{width:100%;border-collapse:collapse;min-width:700px;}
+.mapping-wrap thead th{background:var(--bg-alt);font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--sub);padding:9px 14px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;}
+.mapping-wrap tbody tr{border-bottom:1px solid var(--border);}
+.mapping-wrap tbody tr:last-child{border-bottom:none;}
+.mapping-wrap tbody tr:hover{background:var(--bg-alt);}
+.mapping-wrap td{padding:8px 14px;vertical-align:middle;font-size:12.5px;}
+.col-jp{font-weight:600;white-space:nowrap;}
+.col-src{color:var(--sub);font-size:12px;font-family:var(--font-mono);}
+
+/* ── Workflow diagram ── */
+.flow{display:flex;flex-direction:column;gap:0;}
+.flow-row{display:flex;align-items:stretch;gap:12px;margin-bottom:0;}
+.flow-step{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:14px 16px;min-width:0;}
+.flow-step.hi{border-color:var(--accent);background:var(--acc-bg);}
+.flow-step.done{border-color:var(--green);background:var(--green-bg);}
+.flow-step.todo{border-color:var(--purple);background:var(--purp-bg);}
+.flow-step.manual{border-color:var(--red);background:var(--red-bg);}
+.step-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--sub);margin-bottom:4px;}
+.step-title{font-size:13.5px;font-weight:600;margin-bottom:4px;}
+.step-detail{font-size:11.5px;color:var(--sub);line-height:1.5;}
+.flow-arrow{display:flex;align-items:center;justify-content:center;color:var(--sub);font-size:18px;padding:4px 0;flex-shrink:0;}
+.flow-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:12px;}
+.flow-wide{grid-column:1/-1;}
+
+/* ── DB schema cards ── */
+.schema-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;}
+.schema-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;}
+.schema-card.new{border-color:var(--accent);}
+.card-head{padding:12px 16px;background:var(--bg-alt);border-bottom:1px solid var(--border);display:flex;align-items:baseline;gap:10px;}
+.card-tname{font-family:var(--font-mono);font-size:13px;font-weight:700;color:var(--text);}
+.card-tlabel{font-size:12px;color:var(--sub);}
+.card-new-badge{font-size:10px;background:var(--accent);color:#fff;padding:2px 7px;border-radius:20px;font-weight:700;margin-left:auto;}
+.card-add-badge{font-size:10px;background:var(--blue);color:#fff;padding:2px 7px;border-radius:20px;font-weight:700;margin-left:auto;}
+.card-body{padding:12px 0;}
+.col-row{display:flex;align-items:baseline;gap:8px;padding:4px 16px;font-size:12px;}
+.col-row:hover{background:var(--bg-alt);}
+.cn{font-family:var(--font-mono);font-size:11.5px;color:var(--text);flex:0 0 auto;}
+.ct{font-size:10px;color:var(--sub);border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-family:var(--font-mono);}
+.cd{color:var(--sub);font-size:11.5px;flex:1;}
+.ct-pk{border-color:var(--red);color:var(--red);}
+.ct-fk{border-color:var(--blue);color:var(--blue);}
+.ct-new{color:var(--accent);font-size:11px;font-weight:600;}
+
+/* ── Legend ── */
+.legend{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px;font-size:12px;}
+
+@media(max-width:660px){
+  .schema-grid{grid-template-columns:1fr;}
+  .flow-cols{grid-template-columns:1fr;}
+  .topnav a:nth-child(n+4){display:none;}
+}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;}}
+</style>
+
+<nav class="topnav">
+  <div class="topnav-logo">著作権調査支援ツール</div>
+  <a href="#output">最終アウトプット</a>
+  <a href="#schema">DBスキーマ</a>
+  <a href="#workflow">ワークフロー</a>
+</nav>
+
+<div class="wrap">
+
+  <!-- ══ SECTION 1: 最終アウトプット仕様 ══ -->
+  <section class="section" id="output">
+    <div class="sec-eyebrow">Section 1</div>
+    <h2 class="sec-title">最終アウトプット仕様（JASRAC申告用Cueシート）</h2>
+    <p class="sec-desc">提出フォーマットの各列が「どこから来るか」「現在のアプリで自動取得できるか」を整理する。出力単位は<strong>イベント（使用）ごと</strong>なので、同一楽曲が複数回使われれば複数行になる。</p>
+
+    <div class="legend">
+      <span class="pill pill-auto">● 自動取得済み</span>
+      <span class="pill pill-semi">● 半自動（検索＋手動確認）</span>
+      <span class="pill pill-manual">● 手動入力が必要</span>
+      <span class="pill pill-todo">● 未実装（今後対応）</span>
+    </div>
+
+    <div class="mapping-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>列名</th>
+            <th>取得元</th>
+            <th>現状</th>
+            <th>備考</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="col-jp">使用形態</td>
+            <td class="col-src">手動入力</td>
+            <td><span class="pill pill-manual">手動</span></td>
+            <td style="color:var(--sub);font-size:12px">背景BGM・オープニング・挿入歌など。NUENDOのトラック名から推測可能だが確認が必要</td>
+          </tr>
+          <tr>
+            <td class="col-jp">楽曲名</td>
+            <td class="col-src">songs.song_title</td>
+            <td><span class="pill pill-auto">自動</span></td>
+            <td style="color:var(--sub);font-size:12px">管理番号・BPMサフィックス除去済みの曲名</td>
+          </tr>
+          <tr>
+            <td class="col-jp">音源区分</td>
+            <td class="col-src">手動入力 / mp3_files.id3_album推測</td>
+            <td><span class="pill pill-manual">手動</span></td>
+            <td style="color:var(--sub);font-size:12px">CD・デジタル配信・自社制作など。現状フィールドなし</td>
+          </tr>
+          <tr>
+            <td class="col-jp">レコード会社名</td>
+            <td class="col-src">master_db / MusicBrainz / Spotify</td>
+            <td><span class="pill pill-todo">未実装</span></td>
+            <td style="color:var(--sub);font-size:12px">CD品番からMusicBrainzのlabel-info APIで取得可能。現状songs未保持</td>
+          </tr>
+          <tr>
+            <td class="col-jp">レコード番号</td>
+            <td class="col-src">songs.cd_number / mp3_files.id3_album</td>
+            <td><span class="pill pill-semi">半自動</span></td>
+            <td style="color:var(--sub);font-size:12px">MP3のID3 Albumタグ or マスターDBから補完。確認は必要</td>
+          </tr>
+          <tr>
+            <td class="col-jp">使用時間（分）</td>
+            <td class="col-src">nuendo_events.usage_duration</td>
+            <td><span class="pill pill-todo">未実装</span></td>
+            <td style="color:var(--sub);font-size:12px">Cue CSVの「長さ」列を分・秒に分解する処理が必要</td>
+          </tr>
+          <tr>
+            <td class="col-jp">使用時間（秒）</td>
+            <td class="col-src">nuendo_events.usage_duration</td>
+            <td><span class="pill pill-todo">未実装</span></td>
+            <td style="color:var(--sub);font-size:12px">同上。HH:MM:SS.mmm形式を変換</td>
+          </tr>
+          <tr>
+            <td class="col-jp">I/V区分</td>
+            <td class="col-src">手動 / mp3_files.id3_title推測</td>
+            <td><span class="pill pill-manual">手動</span></td>
+            <td style="color:var(--sub);font-size:12px">インスト / ヴォーカル。ライブラリ曲はほぼインスト。現状フィールドなし</td>
+          </tr>
+          <tr>
+            <td class="col-jp">邦・洋区分</td>
+            <td class="col-src">手動 / アーティスト名から推測</td>
+            <td><span class="pill pill-manual">手動</span></td>
+            <td style="color:var(--sub);font-size:12px">邦楽 / 洋楽。アーティスト名の文字種から自動判定も可能</td>
+          </tr>
+          <tr>
+            <td class="col-jp">原・訳詞区分</td>
+            <td class="col-src">手動入力</td>
+            <td><span class="pill pill-manual">手動</span></td>
+            <td style="color:var(--sub);font-size:12px">原詞 / 訳詞。ヴォーカル曲のみ記載</td>
+          </tr>
+          <tr>
+            <td class="col-jp">JASRACコード</td>
+            <td class="col-src">songs.jasrac_code（J-WID検索）</td>
+            <td><span class="pill pill-semi">半自動</span></td>
+            <td style="color:var(--sub);font-size:12px">一括検索または個別パイプラインで取得。複数候補は手動確認</td>
+          </tr>
+          <tr>
+            <td class="col-jp">作詞</td>
+            <td class="col-src">songs.lyricist（J-WID詳細）</td>
+            <td><span class="pill pill-semi">半自動</span></td>
+            <td style="color:var(--sub);font-size:12px">「詳細取得」ボタンで役割別取得済み</td>
+          </tr>
+          <tr>
+            <td class="col-jp">作曲</td>
+            <td class="col-src">songs.composer（J-WID / ID3タグ）</td>
+            <td><span class="pill pill-semi">半自動</span></td>
+            <td style="color:var(--sub);font-size:12px">ID3タグからも補完。複数候補時は手動確認</td>
+          </tr>
+          <tr>
+            <td class="col-jp">アーティスト</td>
+            <td class="col-src">songs.artist（ID3 / MusicBrainz）</td>
+            <td><span class="pill pill-semi">半自動</span></td>
+            <td style="color:var(--sub);font-size:12px">MP3 ID3タグ・MusicBrainz・Spotifyから自動補完</td>
+          </tr>
+          <tr>
+            <td class="col-jp">編曲</td>
+            <td class="col-src">songs.arranger（J-WID詳細）</td>
+            <td><span class="pill pill-semi">半自動</span></td>
+            <td style="color:var(--sub);font-size:12px">詳細取得ボタンで取得済みだが、songsテーブルへの保存が未実装</td>
+          </tr>
+          <tr>
+            <td class="col-jp">訳詞</td>
+            <td class="col-src">songs.translator（J-WID詳細）</td>
+            <td><span class="pill pill-todo">未実装</span></td>
+            <td style="color:var(--sub);font-size:12px">J-WID詳細ページに情報あり。取得・保存ともに未実装</td>
+          </tr>
+          <tr>
+            <td class="col-jp">自社楽曲ID</td>
+            <td class="col-src">songs.original_management_number</td>
+            <td><span class="pill pill-semi">半自動</span></td>
+            <td style="color:var(--sub);font-size:12px">ライブラリ曲は管理番号（3ST-755-03）をそのまま使用。Audiostock IDも該当</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <hr class="div">
+
+  <!-- ══ SECTION 2: DBスキーマ追加 ══ -->
+  <section class="section" id="schema">
+    <div class="sec-eyebrow">Section 2</div>
+    <h2 class="sec-title">DB追加・変更が必要なテーブル</h2>
+    <p class="sec-desc">最終アウトプットを生成するために、既存スキーマへの<strong>カラム追加</strong>と<strong>新テーブル1件</strong>が必要。</p>
+
+    <div class="schema-grid">
+
+      <!-- songs 追加カラム -->
+      <div class="schema-card" style="border-color:var(--blue);">
+        <div class="card-head">
+          <span class="card-tname">songs</span>
+          <span class="card-tlabel">楽曲まとめ</span>
+          <span class="card-add-badge">カラム追加</span>
+        </div>
+        <div class="card-body">
+          <div class="col-row"><span class="cn">arranger</span><span class="ct">TEXT</span><span class="cd ct-new">編曲者（J-WID詳細から）</span></div>
+          <div class="col-row"><span class="cn">translator</span><span class="ct">TEXT</span><span class="cd ct-new">訳詞者（J-WID詳細から）</span></div>
+          <div class="col-row"><span class="cn">source_type</span><span class="ct">ENUM</span><span class="cd ct-new">音源区分: CD / 配信 / 自社</span></div>
+          <div class="col-row"><span class="cn">record_company</span><span class="ct">TEXT</span><span class="cd ct-new">レコード会社名</span></div>
+          <div class="col-row"><span class="cn">iv_type</span><span class="ct">ENUM</span><span class="cd ct-new">I/V区分: インスト / ヴォーカル</span></div>
+          <div class="col-row"><span class="cn">ja_foreign</span><span class="ct">ENUM</span><span class="cd ct-new">邦・洋区分: 邦楽 / 洋楽</span></div>
+          <div class="col-row"><span class="cn">lyrics_type</span><span class="ct">ENUM</span><span class="cd ct-new">原・訳詞区分: 原詞 / 訳詞</span></div>
+          <div class="col-row"><span class="cn">internal_song_id</span><span class="ct">TEXT</span><span class="cd ct-new">自社楽曲ID（管理番号 or 独自ID）</span></div>
+        </div>
+      </div>
+
+      <!-- cue_sheet_outputs 新テーブル -->
+      <div class="schema-card new">
+        <div class="card-head">
+          <span class="card-tname">cue_sheet_outputs</span>
+          <span class="card-tlabel">申告用Cueシート</span>
+          <span class="card-new-badge">NEW</span>
+        </div>
+        <div class="card-body">
+          <div class="col-row"><span class="cn">id</span><span class="ct ct-pk">PK</span><span class="cd">自動採番</span></div>
+          <div class="col-row"><span class="cn">project_id</span><span class="ct ct-fk">FK</span><span class="cd">プロジェクト</span></div>
+          <div class="col-row"><span class="cn">nuendo_event_id</span><span class="ct ct-fk">FK</span><span class="cd">NUENDOイベント（使用単位）</span></div>
+          <div class="col-row"><span class="cn">song_id</span><span class="ct ct-fk">FK</span><span class="cd">楽曲まとめ（権利情報）</span></div>
+          <div class="col-row"><span class="cn">usage_type</span><span class="ct">TEXT</span><span class="cd">使用形態（背景BGM等）</span></div>
+          <div class="col-row"><span class="cn">source_type</span><span class="ct">ENUM</span><span class="cd">音源区分</span></div>
+          <div class="col-row"><span class="cn">usage_minutes</span><span class="ct">INT</span><span class="cd">使用時間（分）</span></div>
+          <div class="col-row"><span class="cn">usage_seconds</span><span class="ct">INT</span><span class="cd">使用時間（秒）</span></div>
+          <div class="col-row"><span class="cn">iv_type</span><span class="ct">ENUM</span><span class="cd">I/V区分</span></div>
+          <div class="col-row"><span class="cn">ja_foreign</span><span class="ct">ENUM</span><span class="cd">邦・洋区分</span></div>
+          <div class="col-row"><span class="cn">lyrics_type</span><span class="ct">ENUM</span><span class="cd">原・訳詞区分</span></div>
+          <div class="col-row"><span class="cn">jasrac_code</span><span class="ct">TEXT</span><span class="cd">JASRACコード（songs から複写）</span></div>
+          <div class="col-row"><span class="cn">lyricist</span><span class="ct">TEXT</span><span class="cd">作詞者</span></div>
+          <div class="col-row"><span class="cn">composer</span><span class="ct">TEXT</span><span class="cd">作曲者</span></div>
+          <div class="col-row"><span class="cn">artist</span><span class="ct">TEXT</span><span class="cd">アーティスト</span></div>
+          <div class="col-row"><span class="cn">arranger</span><span class="ct">TEXT</span><span class="cd">編曲者</span></div>
+          <div class="col-row"><span class="cn">translator</span><span class="ct">TEXT</span><span class="cd">訳詞者</span></div>
+          <div class="col-row"><span class="cn">internal_song_id</span><span class="ct">TEXT</span><span class="cd">自社楽曲ID</span></div>
+          <div class="col-row"><span class="cn">generated_at</span><span class="ct">TIMESTAMP</span><span class="cd">生成日時</span></div>
+        </div>
+      </div>
+
+      <!-- nuendo_events 追加 -->
+      <div class="schema-card" style="border-color:var(--blue);">
+        <div class="card-head">
+          <span class="card-tname">nuendo_events</span>
+          <span class="card-tlabel">NUENDOイベント</span>
+          <span class="card-add-badge">カラム追加</span>
+        </div>
+        <div class="card-body">
+          <div class="col-row"><span class="cn">usage_minutes</span><span class="ct">INT</span><span class="cd ct-new">使用尺（分）← 長さ列から分解</span></div>
+          <div class="col-row"><span class="cn">usage_seconds</span><span class="ct">INT</span><span class="cd ct-new">使用尺（秒）← 長さ列から分解</span></div>
+          <div class="col-row"><span class="cn">usage_type</span><span class="ct">TEXT</span><span class="cd ct-new">使用形態（トラック名から推測or手動）</span></div>
+        </div>
+      </div>
+
+      <!-- 関係サマリー -->
+      <div class="schema-card">
+        <div class="card-head">
+          <span class="card-tname">テーブル関係</span>
+          <span class="card-tlabel">重要な点</span>
+        </div>
+        <div class="card-body" style="padding:14px 16px;">
+          <p style="font-size:12.5px;color:var(--sub);margin-bottom:10px;"><strong style="color:var(--text)">出力の単位はイベント</strong>（使用ごと）</p>
+          <p style="font-size:12px;color:var(--sub);margin-bottom:10px;">同一楽曲が3回使われると<code style="font-family:var(--font-mono);font-size:11px;background:var(--bg-alt);padding:1px 4px;border-radius:3px;">cue_sheet_outputs</code>は3行になる。</p>
+          <p style="font-size:12.5px;color:var(--sub);margin-bottom:10px;"><strong style="color:var(--text)">songs は楽曲単位の権利情報</strong></p>
+          <p style="font-size:12px;color:var(--sub);margin-bottom:10px;">JASRAC コード・作曲者などは songs に1回保持し、cue_sheet_outputs に複写する。</p>
+          <p style="font-size:12.5px;color:var(--sub);margin-bottom:10px;"><strong style="color:var(--text)">使用時間は nuendo_events から</strong></p>
+          <p style="font-size:12px;color:var(--sub);">現在の「長さ」列（HH:MM:SS.mmm）を分・秒に変換して持つ。</p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <hr class="div">
+
+  <!-- ══ SECTION 3: ワークフロー ══ -->
+  <section class="section" id="workflow">
+    <div class="sec-eyebrow">Section 3</div>
+    <h2 class="sec-title">アウトプット完成までのワークフロー</h2>
+    <p class="sec-desc">現在のアプリで対応しているステップと、手動作業・未実装のステップを色分けで示す。</p>
+
+    <div class="legend" style="margin-bottom:20px;">
+      <span class="pill pill-auto">● アプリが自動処理</span>
+      <span class="pill pill-semi">● アプリ補助＋手動確認</span>
+      <span class="pill pill-manual">● 現状ほぼ手動</span>
+      <span class="pill pill-todo">● 未実装（今後）</span>
+    </div>
+
+    <div class="flow">
+
+      <!-- Step 1 -->
+      <div class="flow-row">
+        <div class="flow-step done">
+          <div class="step-label"><span class="pill pill-auto" style="font-size:10px;">自動</span></div>
+          <div class="step-title">① NUENDO Cue CSV 読み込み</div>
+          <div class="step-detail">Tab 1 ①にCSVをアップロード。イベント名・ファイル名・使用尺・トラック名を取込む。エンコーディング自動検出（UTF-8 / Shift-JIS）。</div>
+        </div>
+      </div>
+      <div class="flow-arrow">↓</div>
+
+      <!-- Step 2 -->
+      <div class="flow-row">
+        <div class="flow-cols">
+          <div class="flow-step done">
+            <div class="step-label"><span class="pill pill-auto" style="font-size:10px;">自動</span></div>
+            <div class="step-title">② WAVファイル一覧取得</div>
+            <div class="step-detail">フォルダスキャンまたはCSV。ファイル名・再生時間を取込む。任意。</div>
+          </div>
+          <div class="flow-step done">
+            <div class="step-label"><span class="pill pill-auto" style="font-size:10px;">自動</span></div>
+            <div class="step-title">③ MP3ファイル一覧取得</div>
+            <div class="step-detail">nuendo_mp3_finder CSV をアップロード。マッチ種別＋ID3タグ（作曲者・アーティスト・アルバム）を含む。</div>
+          </div>
+          <div class="flow-step done">
+            <div class="step-label"><span class="pill pill-auto" style="font-size:10px;">自動</span></div>
+            <div class="step-title">④ マスターDB CSV</div>
+            <div class="step-detail">社内AccessDBをCSVエクスポートして読込。曲名マッチングでJASRAC・NexTone等を補完。</div>
+          </div>
+        </div>
+      </div>
+      <div class="flow-arrow">↓</div>
+
+      <!-- Step 3 -->
+      <div class="flow-row">
+        <div class="flow-step done">
+          <div class="step-label"><span class="pill pill-auto" style="font-size:10px;">自動</span></div>
+          <div class="step-title">⑤ 照合実行 → 楽曲まとめ生成</div>
+          <div class="step-detail">
+            Cue CSV × WAV × MP3 を照合（完全一致→正規化→管理番号→タイトル→部分の優先度）。<br>
+            イベント名単位でユニーク化した <strong>songs</strong> テーブルを生成。<br>
+            MP3 ID3タグ（作曲者・アーティスト・CD番号）を自動補完。<br>
+            ライブラリ管理番号（3ST-755-03 / 57A-0023 / 1AN-768_盤名_25 曲名）を自動分解。
+          </div>
+        </div>
+      </div>
+      <div class="flow-arrow">↓</div>
+
+      <!-- Step 4 -->
+      <div class="flow-row">
+        <div class="flow-cols">
+          <div class="flow-step done">
+            <div class="step-label"><span class="pill pill-semi" style="font-size:10px;">半自動</span></div>
+            <div class="step-title">⑥ J-WID 一括自動検索</div>
+            <div class="step-detail">曲名でJ-WID / NexToneを自動検索。1件ヒット or 作曲者一致1件 → 自動入力。複数候補→「候補あり」マーク。</div>
+          </div>
+          <div class="flow-step done">
+            <div class="step-label"><span class="pill pill-semi" style="font-size:10px;">半自動</span></div>
+            <div class="step-title">⑦ MusicBrainz パイプライン</div>
+            <div class="step-detail">Tab 3 で MusicBrainz / Spotify / Claude API を組合せてISRC・アーティスト・アルバムを補完。</div>
+          </div>
+          <div class="flow-step done">
+            <div class="step-label"><span class="pill pill-semi" style="font-size:10px;">半自動</span></div>
+            <div class="step-title">⑧ 個別手動調査（Tab 4）</div>
+            <div class="step-detail">「候補あり」曲を選択。J-WID詳細取得で作曲者/作詞者/編曲者を分離取得。MusicForestリンクで手動確認。✅適用で確定。</div>
+          </div>
+        </div>
+      </div>
+      <div class="flow-arrow">↓</div>
+
+      <!-- Step 5 -->
+      <div class="flow-row">
+        <div class="flow-step" style="border-color:var(--red);background:var(--red-bg);">
+          <div class="step-label"><span class="pill pill-manual" style="font-size:10px;">現状・手動</span></div>
+          <div class="step-title">⑨ 使用形態・音源区分・I/V区分・邦洋区分の入力</div>
+          <div class="step-detail">
+            現在のアプリにフィールドなし。最終アウトプットに必要なため追加が必要。<br>
+            <strong>使用形態</strong>（背景/OP/ED）→ NUENDOのトラック名から自動推測も可能<br>
+            <strong>I/V区分</strong> → ID3タグのジャンルまたは管理番号の慣習から推測可能<br>
+            <strong>邦・洋区分</strong> → アーティスト名の文字種から自動判定ロジック追加可能
+          </div>
+        </div>
+      </div>
+      <div class="flow-arrow">↓</div>
+
+      <!-- Step 6 -->
+      <div class="flow-row">
+        <div class="flow-step todo">
+          <div class="step-label"><span class="pill pill-todo" style="font-size:10px;">未実装</span></div>
+          <div class="step-title">⑩ 使用時間（分・秒）の変換＆レコード会社名取得</div>
+          <div class="step-detail">
+            <strong>使用時間</strong>: Cue CSVの「長さ」（HH:MM:SS.mmm）を分・秒の整数に分解する処理を追加する。<br>
+            <strong>レコード会社名</strong>: MusicBrainzのlabel-info APIまたはマスターDBから取得。現在は未保持。
+          </div>
+        </div>
+      </div>
+      <div class="flow-arrow">↓</div>
+
+      <!-- Step 7 -->
+      <div class="flow-row">
+        <div class="flow-step todo">
+          <div class="step-label"><span class="pill pill-todo" style="font-size:10px;">未実装</span></div>
+          <div class="step-title">⑪ cue_sheet_outputs 生成（イベント単位に展開）</div>
+          <div class="step-detail">
+            songs（楽曲単位）× nuendo_events（使用単位）を結合して、<strong>同一楽曲の複数使用を複数行に展開</strong>する。<br>
+            この段階で「楽曲まとめ（song単位）」→「Cueシート（event単位）」に変換される。
+          </div>
+        </div>
+      </div>
+      <div class="flow-arrow">↓</div>
+
+      <!-- Step 8 -->
+      <div class="flow-row">
+        <div class="flow-step" style="background:var(--acc-bg);border-color:var(--accent);">
+          <div class="step-label" style="color:var(--accent);">アウトプット</div>
+          <div class="step-title">⑫ Excel / CSV 出力（JASRAC申告フォーマット）</div>
+          <div class="step-detail">
+            現在のExcel出力は <strong>songs（楽曲単位）</strong> のまま。今後 <strong>cue_sheet_outputs（イベント単位）</strong> のシートを追加することで、そのまま提出できるフォーマットになる。<br><br>
+            <strong>現在出力できる列</strong>: 楽曲名・JASRAC作品コード・NexTone管理番号・作曲者・作詞者・アーティスト・CD番号・管理番号・確認ステータス<br>
+            <strong>追加が必要な列</strong>: 使用形態・音源区分・レコード会社名・使用時間(分/秒)・I/V区分・邦洋区分・原訳詞区分・編曲者・訳詞者・自社楽曲ID
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ギャップサマリー -->
+    <div style="margin-top:32px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px 24px;">
+      <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:12px;">現在のアプリで埋まっている部分 vs 残っているギャップ</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+        <div>
+          <div style="font-size:12px;font-weight:700;color:var(--green);margin-bottom:8px;">✅ アプリが担う部分</div>
+          <ul style="font-size:12.5px;color:var(--sub);padding-left:16px;display:flex;flex-direction:column;gap:4px;">
+            <li>楽曲名の抽出・正規化</li>
+            <li>JASRAC作品コード・NexTone管理番号の自動検索</li>
+            <li>作曲者・作詞者・編曲者の取得（J-WID詳細）</li>
+            <li>アーティスト・CD番号（MP3 ID3 / MusicBrainz / Spotify）</li>
+            <li>自社楽曲ID ≒ ライブラリ管理番号の自動分解</li>
+            <li>マスターDBからの一括補完</li>
+            <li>MusicForestへの手動検索リンク</li>
+          </ul>
+        </div>
+        <div>
+          <div style="font-size:12px;font-weight:700;color:var(--red);margin-bottom:8px;">❌ 現状ギャップ（追加開発が必要）</div>
+          <ul style="font-size:12.5px;color:var(--sub);padding-left:16px;display:flex;flex-direction:column;gap:4px;">
+            <li>使用形態フィールドと入力UI</li>
+            <li>音源区分・I/V区分・邦洋区分フィールド</li>
+            <li>レコード会社名の取得</li>
+            <li>訳詞者の取得・保存</li>
+            <li>使用時間（分・秒）への変換</li>
+            <li><strong>songs単位 → events単位への展開ロジック</strong>（最重要）</li>
+            <li>申告フォーマットそのままのExcelシート出力</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+</div>

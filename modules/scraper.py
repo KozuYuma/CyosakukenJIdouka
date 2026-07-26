@@ -195,7 +195,7 @@ def search_jwid(title: str, author: str = "") -> dict:
 
 
 def _parse_jwid_table(soup: BeautifulSoup) -> list[dict]:
-    """J-WID 検索結果 HTML（新形式）からデータ行を抽出する。
+    """J-WID 検索結果 HTML からデータ行を抽出する。
 
     対象テーブル: <table class="search-result">
     列構造:
@@ -203,6 +203,7 @@ def _parse_jwid_table(soup: BeautifulSoup) -> list[dict]:
       data-role="result-title"  → 作品名
       data-role="result-author" → 著作者名（作曲者 / 作詞者 混在）
       data-role="result-artist" → アーティスト名
+    詳細リンク: 各行末の <a class="btn btn-detail AUTO_JUMP">
     """
     results = []
 
@@ -219,17 +220,175 @@ def _parse_jwid_table(soup: BeautifulSoup) -> list[dict]:
         if not title_td:
             continue
 
+        # 詳細リンク: <a class="btn btn-detail AUTO_JUMP" href="main?trxID=F20101&WORKS_CD=...">
+        detail_url = ""
+        works_cd = ""
+        detail_a = row.find("a", class_="btn-detail")
+        if detail_a and detail_a.get("href"):
+            href = detail_a["href"]
+            if not href.startswith("http"):
+                href = JWID_BASE + href.lstrip("./")
+            detail_url = href
+            m = re.search(r"WORKS_CD=([^&]+)", href)
+            if m:
+                works_cd = m.group(1)
+
         item = {
-            "作品コード":  code_td.get_text(strip=True)   if code_td   else "",
-            "作品名":      title_td.get_text(strip=True)  if title_td  else "",
-            "作曲者":      author_td.get_text(strip=True) if author_td else "",
-            "作詞者":      "",
+            "作品コード":   code_td.get_text(strip=True)   if code_td   else "",
+            "WORKS_CD":     works_cd,
+            "作品名":       title_td.get_text(strip=True)  if title_td  else "",
+            "著作者名":     author_td.get_text(strip=True) if author_td else "",
             "アーティスト": artist_td.get_text(strip=True) if artist_td else "",
+            "_detail_url":  detail_url,
         }
-        if any(v for v in item.values()):
+        if any(v for k, v in item.items() if not k.startswith("_") and k != "WORKS_CD"):
             results.append(item)
 
     return results
+
+
+def _parse_management_status(soup: BeautifulSoup) -> dict[str, str]:
+    """
+    J-WID 詳細ページの 管理状況(利用分野) セクションから ○△× を抽出する。
+
+    SVG形状: circle → ○, polygon → △, line/path → ×, 要素なし → ×
+
+    Returns: {"演奏会等": "○", "上映/BGM": "○", "放送": "○", ...}
+    """
+    status: dict[str, str] = {}
+    mgmt = soup.find("div", class_="management")
+    if not mgmt:
+        return status
+
+    for dl in mgmt.find_all("dl"):
+        dd = dl.find("dd")
+        if not dd:
+            continue
+        for li in dd.find_all("li"):
+            a = li.find("a", class_="field")
+            if not a:
+                continue
+
+            # フィールド名: 2番目の span (balloon 内 full name) または 1番目
+            spans = a.find_all("span")
+            if len(spans) >= 2:
+                field_name = spans[1].get_text(strip=True)
+            elif spans:
+                field_name = spans[0].get_text(strip=True)
+            else:
+                continue
+            if not field_name:
+                continue
+
+            # SVG形状で管理状況を判定
+            svg = li.find("svg")
+            if svg:
+                child_names = [c.name for c in svg.children if hasattr(c, "name") and c.name]
+                if "circle" in child_names:
+                    icon = "○"
+                elif "polygon" in child_names:
+                    icon = "△"
+                else:
+                    icon = "×"
+            else:
+                icon = "×"
+
+            status[field_name] = icon
+
+    return status
+
+
+def fetch_jwid_detail(detail_url: str) -> dict:
+    """
+    J-WID 作品詳細ページから作曲者・作詞者・編曲者・管理状況を取得する。
+
+    Returns: {
+        "作曲者": str, "作詞者": str, "編曲者": str,
+        "著作者リスト": [{"役割": str, "氏名": str, "所属団体": str}, ...],
+        "管理状況": {"演奏会等": "○", ...},
+        "error": str | None,
+    }
+    """
+    out: dict = {
+        "作曲者": "", "作詞者": "", "編曲者": "", "訳詞者": "",
+        "著作者リスト": [],
+        "管理状況": {},
+        "error": None,
+    }
+    if not detail_url:
+        out["error"] = "detail_url が空"
+        return out
+    try:
+        _rate_limit("jasrac.or.jp")
+        resp = _session.get(detail_url, timeout=TIMEOUT)
+        resp.raise_for_status()
+        html = resp.content.decode("ms932", errors="replace")
+        soup = BeautifulSoup(html, "lxml")
+
+        composers, lyricists, arrangers, translators = [], [], [], []
+
+        # 著作者テーブルは各利用分野タブに重複するため「未選択」デフォルトタブのみ参照
+        # div#tab-def > div.PC > table.detail: No. | 著作者名 | 識別 | 契約 | 所属団体 | 特記
+        tab_def = soup.find("div", id="tab-def") or soup
+        pc_div  = tab_def.find("div", class_="PC") or tab_def
+        for tbl in pc_div.find_all("table", class_="detail"):
+            for row in tbl.find_all("tr"):
+                tds = row.find_all("td")
+                if len(tds) < 5:
+                    continue
+                no_text   = tds[0].get_text(strip=True)
+                if not no_text.isdigit():
+                    continue
+                name_text = tds[1].get_text(strip=True)
+                role_text = tds[2].get_text(strip=True)
+                society   = tds[4].get_text(strip=True)
+                if not name_text:
+                    continue
+                out["著作者リスト"].append({"役割": role_text, "氏名": name_text, "所属団体": society})
+                if "作曲" in role_text:
+                    composers.append(name_text)
+                if "訳詞" in role_text:   # 訳詞は作詞より先にチェック
+                    translators.append(name_text)
+                elif "作詞" in role_text:  # 「作詞作曲」も作詞者に入る（作曲は上の if で捕捉済み）
+                    lyricists.append(name_text)
+                if "編曲" in role_text:
+                    arrangers.append(name_text)
+
+        out["作曲者"] = "/".join(composers)
+        out["作詞者"] = "/".join(lyricists)
+        out["編曲者"] = "/".join(arrangers)
+        out["訳詞者"] = "/".join(translators)
+        out["管理状況"] = _parse_management_status(soup)
+
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+def fetch_jwid_rights_by_code(jasrac_code: str) -> dict:
+    """
+    JASRAC作品コード（例: 052-1235-9）から管理状況・著作者情報を取得する。
+
+    先行 search_jwid() なしで単独利用可能。
+    """
+    global _jwid_agreed
+    if not _jwid_agreed:
+        _jwid_agree()
+
+    works_cd = jasrac_code.replace("-", "").replace("－", "").strip()
+    if not works_cd:
+        return {
+            "作曲者": "", "作詞者": "", "編曲者": "",
+            "著作者リスト": [], "管理状況": {},
+            "error": "作品コードが空です",
+        }
+
+    detail_url = (
+        JWID_BASE
+        + f"main?trxID=F20101&WORKS_CD={works_cd}"
+        + "&subSessionID=001&subSession=start"
+    )
+    return fetch_jwid_detail(detail_url)
 
 
 # =====================================================================

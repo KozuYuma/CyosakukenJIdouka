@@ -1,0 +1,576 @@
+<title>著作権調査支援ツール — DB スキーマ設計</title>
+<style>
+  /* ── Token layer ── */
+  :root {
+    --bg:        #F5F3EE;
+    --bg-alt:    #EDEAE2;
+    --surface:   #FFFFFF;
+    --border:    #D6D1C4;
+    --text:      #1C1A16;
+    --text-sub:  #6B6456;
+    --accent:    #B5811A;
+    --accent-bg: #FBF3E2;
+    --navy:      #1E2640;
+    --navy-mid:  #2E3A5C;
+    --blue:      #4E6EA3;
+    --green:     #2E6B50;
+    --muted-red: #834050;
+    --purple:    #5A4B82;
+    --orange:    #9C5A28;
+
+    --font-serif: 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif;
+    --font-sans:  system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --font-mono:  Consolas, 'Cascadia Code', 'Courier New', monospace;
+
+    --r: 4px;
+    --r-lg: 8px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:        #111318;
+      --bg-alt:    #191C25;
+      --surface:   #1E2230;
+      --border:    #2E3348;
+      --text:      #E6E2D8;
+      --text-sub:  #8A8370;
+      --accent:    #D4A030;
+      --accent-bg: #1E1A0E;
+      --navy:      #D0CCBE;
+      --navy-mid:  #9090A8;
+      --blue:      #7090C8;
+      --green:     #4EA87C;
+      --muted-red: #C07080;
+      --purple:    #9080C8;
+      --orange:    #D08050;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg:#F5F3EE;--bg-alt:#EDEAE2;--surface:#FFFFFF;--border:#D6D1C4;
+    --text:#1C1A16;--text-sub:#6B6456;--accent:#B5811A;--accent-bg:#FBF3E2;
+    --navy:#1E2640;--navy-mid:#2E3A5C;--blue:#4E6EA3;--green:#2E6B50;
+    --muted-red:#834050;--purple:#5A4B82;--orange:#9C5A28;
+  }
+  :root[data-theme="dark"] {
+    --bg:#111318;--bg-alt:#191C25;--surface:#1E2230;--border:#2E3348;
+    --text:#E6E2D8;--text-sub:#8A8370;--accent:#D4A030;--accent-bg:#1E1A0E;
+    --navy:#D0CCBE;--navy-mid:#9090A8;--blue:#7090C8;--green:#4EA87C;
+    --muted-red:#C07080;--purple:#9080C8;--orange:#D08050;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.65;
+  }
+
+  /* ── Layout ── */
+  .page { display: flex; min-height: 100vh; }
+
+  .sidebar {
+    width: 220px;
+    flex-shrink: 0;
+    background: var(--navy);
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 24px 0;
+  }
+  :root[data-theme="dark"] .sidebar,
+  @media (prefers-color-scheme: dark) { .sidebar { background: #0C0E14; } }
+
+  .sidebar-title {
+    font-family: var(--font-serif);
+    font-size: 11px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: #8898BB;
+    padding: 0 20px 12px;
+    border-bottom: 1px solid #2E3A5C;
+    margin-bottom: 12px;
+  }
+
+  .sidebar a {
+    display: block;
+    padding: 7px 20px;
+    color: #A8B8D8;
+    text-decoration: none;
+    font-size: 12.5px;
+    font-family: var(--font-mono);
+    transition: background .15s, color .15s;
+  }
+  .sidebar a:hover { background: rgba(255,255,255,.06); color: #E0E8F8; }
+  .sidebar a .tbl-num {
+    display: inline-block;
+    width: 18px;
+    font-size: 10px;
+    color: #566688;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .main { flex: 1; padding: 48px 52px 80px; max-width: 900px; }
+
+  /* ── Header ── */
+  .page-header { margin-bottom: 48px; padding-bottom: 28px; border-bottom: 2px solid var(--accent); }
+  .page-eyebrow {
+    font-size: 11px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-family: var(--font-sans);
+    margin-bottom: 10px;
+  }
+  .page-title {
+    font-family: var(--font-serif);
+    font-size: 28px;
+    font-weight: normal;
+    color: var(--text);
+    text-wrap: balance;
+    line-height: 1.3;
+    margin-bottom: 12px;
+  }
+  .page-desc { color: var(--text-sub); max-width: 60ch; font-size: 13.5px; }
+
+  /* ── ER Overview ── */
+  .er-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    padding: 20px 24px;
+    margin-bottom: 48px;
+    font-size: 12.5px;
+    color: var(--text-sub);
+  }
+  .er-box-title {
+    font-size: 11px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 14px;
+  }
+  .er-flow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+  }
+  .er-node {
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    padding: 5px 10px;
+    color: var(--text);
+  }
+  .er-node.core { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .er-arrow { color: var(--text-sub); padding: 0 2px; }
+
+  /* ── Table section ── */
+  .tbl-section { margin-bottom: 52px; }
+  .tbl-header {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .tbl-name {
+    font-family: var(--font-mono);
+    font-size: 17px;
+    color: var(--text);
+    font-weight: 600;
+  }
+  .tbl-label {
+    font-family: var(--font-serif);
+    font-size: 16px;
+    color: var(--text-sub);
+    font-weight: normal;
+  }
+  .tbl-nature {
+    font-size: 12.5px;
+    color: var(--text-sub);
+    margin-bottom: 14px;
+    padding: 10px 14px;
+    background: var(--accent-bg);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 var(--r) var(--r) 0;
+    max-width: 66ch;
+    text-wrap: pretty;
+  }
+  .tbl-nature strong { color: var(--accent); font-weight: 600; }
+
+  /* ── Column table ── */
+  .col-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-lg); }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    background: var(--bg-alt);
+    font-size: 10.5px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--text-sub);
+    font-weight: 600;
+    padding: 9px 14px;
+    text-align: left;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody tr { border-bottom: 1px solid var(--border); }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: var(--bg-alt); }
+  tbody td {
+    padding: 8px 14px;
+    vertical-align: top;
+    font-size: 13px;
+  }
+  .col-name {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .col-type-wrap { display: flex; flex-wrap: wrap; gap: 4px; }
+
+  /* badges */
+  .badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    white-space: nowrap;
+    font-weight: 600;
+    letter-spacing: .02em;
+  }
+  .badge-pk   { background: var(--muted-red); color: #fff; }
+  .badge-fk   { background: var(--blue);      color: #fff; }
+  .badge-text { background: var(--bg-alt);     color: var(--text-sub); border: 1px solid var(--border); }
+  .badge-int  { background: var(--purple);     color: #fff; }
+  .badge-bool { background: var(--navy-mid);   color: #fff; }
+  .badge-ts   { background: var(--green);      color: #fff; }
+  .badge-enum { background: var(--orange);     color: #fff; }
+  .badge-nn   { background: transparent;       color: var(--text-sub); border: 1px solid var(--border); font-size: 9px; }
+
+  .col-desc { color: var(--text-sub); font-size: 12.5px; line-height: 1.5; }
+  .col-desc em { color: var(--text); font-style: normal; font-weight: 500; }
+
+  /* ── Divider ── */
+  hr.section-div { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+
+  @media (max-width: 680px) {
+    .page { flex-direction: column; }
+    .sidebar { width: 100%; height: auto; position: static; }
+    .main { padding: 28px 20px 60px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="page">
+
+  <!-- Sidebar -->
+  <nav class="sidebar" aria-label="テーブル一覧">
+    <div class="sidebar-title">テーブル</div>
+    <a href="#projects"><span class="tbl-num">01</span> projects</a>
+    <a href="#songs"><span class="tbl-num">02</span> songs</a>
+    <a href="#nuendo_events"><span class="tbl-num">03</span> nuendo_events</a>
+    <a href="#wav_files"><span class="tbl-num">04</span> wav_files</a>
+    <a href="#mp3_files"><span class="tbl-num">05</span> mp3_files</a>
+    <a href="#rights_search_results"><span class="tbl-num">06</span> rights_search_results</a>
+    <a href="#master_db_entries"><span class="tbl-num">07</span> master_db_entries</a>
+    <a href="#import_logs"><span class="tbl-num">08</span> import_logs</a>
+  </nav>
+
+  <!-- Main -->
+  <main class="main">
+
+    <header class="page-header">
+      <div class="page-eyebrow">Database Schema Design</div>
+      <h1 class="page-title">著作権調査支援ツール<br>DBスキーマ設計</h1>
+      <p class="page-desc">NUENDOのCueシート照合から権利情報確定まで、調査ワークフロー全体を管理するためのテーブル構成です。</p>
+    </header>
+
+    <!-- ER Overview -->
+    <div class="er-box">
+      <div class="er-box-title">テーブル関係の概観</div>
+      <div class="er-flow">
+        <span class="er-node">projects</span>
+        <span class="er-arrow">1 ──&lt;</span>
+        <span class="er-node core">songs</span>
+        <span class="er-arrow">&gt;── N</span>
+        <span class="er-node">nuendo_events</span>
+      </div>
+      <div class="er-flow" style="margin-top:10px">
+        <span class="er-node core">songs</span>
+        <span class="er-arrow">1 ──&lt;</span>
+        <span class="er-node">rights_search_results</span>
+        <span class="er-arrow">&nbsp;/&nbsp;</span>
+        <span class="er-node">wav_files</span>
+        <span class="er-arrow">&nbsp;/&nbsp;</span>
+        <span class="er-node">mp3_files</span>
+      </div>
+      <div style="margin-top:12px;font-size:12px">
+        <strong style="color:var(--text)">songs</strong> が中核テーブル。wav_files・mp3_files は照合ソースデータ、rights_search_results は検索キャッシュ兼候補履歴として独立します。master_db_entries と import_logs はプロジェクト横断で使用します。
+      </div>
+    </div>
+
+    <!-- ① projects -->
+    <section class="tbl-section" id="projects">
+      <div class="tbl-header">
+        <span class="tbl-name">projects</span>
+        <span class="tbl-label">プロジェクト</span>
+      </div>
+      <div class="tbl-nature">
+        <strong>性質:</strong> 案件・番組・映像作品単位の親レコード。1回の納品ワークフローを1プロジェクトとして管理する。変更頻度は低く、他テーブルのスコープ境界として機能する。
+      </div>
+      <div class="col-wrap">
+        <table>
+          <thead><tr><th>カラム名</th><th>型・制約</th><th>説明</th></tr></thead>
+          <tbody>
+            <tr><td class="col-name">id</td><td class="col-type-wrap"><span class="badge badge-pk">PK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">自動採番</td></tr>
+            <tr><td class="col-name">name</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span><span class="badge badge-nn">NOT NULL</span></td><td class="col-desc">案件名（例: <em>◯◯劇場版 BGM調査</em>）</td></tr>
+            <tr><td class="col-name">description</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">補足メモ、放送日、依頼元など</td></tr>
+            <tr><td class="col-name">created_at</td><td class="col-type-wrap"><span class="badge badge-ts">TIMESTAMP</span></td><td class="col-desc">プロジェクト作成日時</td></tr>
+            <tr><td class="col-name">updated_at</td><td class="col-type-wrap"><span class="badge badge-ts">TIMESTAMP</span></td><td class="col-desc">最終更新日時</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <hr class="section-div">
+
+    <!-- ② songs -->
+    <section class="tbl-section" id="songs">
+      <div class="tbl-header">
+        <span class="tbl-name">songs</span>
+        <span class="tbl-label">楽曲まとめ</span>
+      </div>
+      <div class="tbl-nature">
+        <strong>性質:</strong> 本ツールの中核テーブル。NUENDOイベント名単位でユニーク化した楽曲情報をすべて集約する。照合結果・手動入力・自動検索の書き込みが混在するため、<strong>更新頻度が最も高い可変データ</strong>。確認ステータスの遷移が調査進捗を表す。1プロジェクトあたり数十〜数百件。
+      </div>
+      <div class="col-wrap">
+        <table>
+          <thead><tr><th>カラム名</th><th>型・制約</th><th>説明</th></tr></thead>
+          <tbody>
+            <tr><td class="col-name">id</td><td class="col-type-wrap"><span class="badge badge-pk">PK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">自動採番</td></tr>
+            <tr><td class="col-name">project_id</td><td class="col-type-wrap"><span class="badge badge-fk">FK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">所属プロジェクト</td></tr>
+            <tr><td class="col-name">no</td><td class="col-type-wrap"><span class="badge badge-int">INTEGER</span></td><td class="col-desc">表示用連番（プロジェクト内）</td></tr>
+            <tr><td class="col-name">event_name</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span><span class="badge badge-nn">NOT NULL</span></td><td class="col-desc">NUENDOイベント名。照合の主キー。例: <em>3ST-755-03 風よ運んでいいよ_113_C</em></td></tr>
+            <tr><td class="col-name">management_number_type</td><td class="col-type-wrap"><span class="badge badge-enum">ENUM</span></td><td class="col-desc"><em>ライブラリ管理番号 / Audiostock管理番号</em>（空も可）</td></tr>
+            <tr><td class="col-name">original_management_number</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">正規化済み管理番号。例: <em>3ST-755-03</em></td></tr>
+            <tr><td class="col-name">management_series</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">管理系列。例: <em>3ST</em></td></tr>
+            <tr><td class="col-name">library_disc_number</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">ライブラリ盤番号。例: <em>3ST-755</em></td></tr>
+            <tr><td class="col-name">track_number</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">トラック番号。例: <em>03</em></td></tr>
+            <tr><td class="col-name">audiostock_number</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">Audiostock管理番号。例: <em>856447</em></td></tr>
+            <tr><td class="col-name">song_title</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">管理番号・BPMサフィックス除去後の曲名</td></tr>
+            <tr><td class="col-name">nuendo_filename</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">NUENDOが参照しているファイル名</td></tr>
+            <tr><td class="col-name">wav_matched_filename</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">WAV照合で一致したファイル名</td></tr>
+            <tr><td class="col-name">wav_detected_title</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">WAVファイル名から抽出した検出タイトル</td></tr>
+            <tr><td class="col-name">wav_full_duration</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">WAVフル尺（HH:MM:SS.mmm形式）</td></tr>
+            <tr><td class="col-name">wav_match_status</td><td class="col-type-wrap"><span class="badge badge-enum">ENUM</span></td><td class="col-desc"><em>完全一致 / 正規化一致 / 管理番号一致 / 曲名一致 / ファイル名一致 / 部分一致 / WAV未照合</em></td></tr>
+            <tr><td class="col-name">mp3_matched_filename</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">MP3照合で一致したファイル名</td></tr>
+            <tr><td class="col-name">mp3_full_duration</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">MP3フル尺</td></tr>
+            <tr><td class="col-name">composer</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">作曲者（ID3タグ / J-WID / NexTone / 手動）</td></tr>
+            <tr><td class="col-name">lyricist</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">作詞者</td></tr>
+            <tr><td class="col-name">artist</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">アーティスト名</td></tr>
+            <tr><td class="col-name">cd_number</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">CD品番（例: <em>KICA-37</em>）</td></tr>
+            <tr><td class="col-name">jasrac_code</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">JASRAC作品コード（例: <em>015-8717-0</em>）</td></tr>
+            <tr><td class="col-name">nextone_code</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">NexTone管理番号</td></tr>
+            <tr><td class="col-name">confirm_status</td><td class="col-type-wrap"><span class="badge badge-enum">ENUM</span></td><td class="col-desc"><em>未調査 / 候補あり / 確定 / 要確認 / J-WID要確認 / NexTone要確認 / ライブラリ元確認 / Audiostock確認 / MP3補助確認</em></td></tr>
+            <tr><td class="col-name">memo</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">自由記述メモ</td></tr>
+            <tr><td class="col-name">created_at</td><td class="col-type-wrap"><span class="badge badge-ts">TIMESTAMP</span></td><td class="col-desc">照合実行日時</td></tr>
+            <tr><td class="col-name">updated_at</td><td class="col-type-wrap"><span class="badge badge-ts">TIMESTAMP</span></td><td class="col-desc">最終更新日時（ステータス変更・権利情報入力のたびに更新）</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <hr class="section-div">
+
+    <!-- ③ nuendo_events -->
+    <section class="tbl-section" id="nuendo_events">
+      <div class="tbl-header">
+        <span class="tbl-name">nuendo_events</span>
+        <span class="tbl-label">NUENDOイベント一覧</span>
+      </div>
+      <div class="tbl-nature">
+        <strong>性質:</strong> Cue CSVをそのまま格納する<strong>append-onlyに近い生データテーブル</strong>。同一楽曲が複数トラックで複数回使用される場合に複数行となる（songs とは N:1 の関係）。照合実行後に上書きインポートされる。1プロジェクトあたり数十〜数千件。
+      </div>
+      <div class="col-wrap">
+        <table>
+          <thead><tr><th>カラム名</th><th>型・制約</th><th>説明</th></tr></thead>
+          <tbody>
+            <tr><td class="col-name">id</td><td class="col-type-wrap"><span class="badge badge-pk">PK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">自動採番</td></tr>
+            <tr><td class="col-name">project_id</td><td class="col-type-wrap"><span class="badge badge-fk">FK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">所属プロジェクト</td></tr>
+            <tr><td class="col-name">song_id</td><td class="col-type-wrap"><span class="badge badge-fk">FK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">対応楽曲（照合後に設定）</td></tr>
+            <tr><td class="col-name">track_name</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">NUENDOトラック名</td></tr>
+            <tr><td class="col-name">event_name</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">イベント名（songs.event_name と同値）</td></tr>
+            <tr><td class="col-name">nuendo_filename</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">NUENDOが参照するファイル名</td></tr>
+            <tr><td class="col-name">start_time</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">START TIME（タイムコード）</td></tr>
+            <tr><td class="col-name">end_time</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">終了時間</td></tr>
+            <tr><td class="col-name">in_time</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">イン時間</td></tr>
+            <tr><td class="col-name">out_time</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">アウト時間</td></tr>
+            <tr><td class="col-name">usage_duration</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">使用尺（Cueシート記載値）</td></tr>
+            <tr><td class="col-name">wav_match_status</td><td class="col-type-wrap"><span class="badge badge-enum">ENUM</span></td><td class="col-desc">WAV照合ステータス（songs と同値・非正規化コピー）</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <hr class="section-div">
+
+    <!-- ④ wav_files -->
+    <section class="tbl-section" id="wav_files">
+      <div class="tbl-header">
+        <span class="tbl-name">wav_files</span>
+        <span class="tbl-label">WAVファイル一覧</span>
+      </div>
+      <div class="tbl-nature">
+        <strong>性質:</strong> フォルダスキャンまたはCSVから取り込む<strong>ファイルシステムのスナップショット</strong>。再スキャンで上書き。照合の参照元として使われるが、照合後は songs.wav_matched_filename に結果が移る。変更頻度低。数百〜数千件。
+      </div>
+      <div class="col-wrap">
+        <table>
+          <thead><tr><th>カラム名</th><th>型・制約</th><th>説明</th></tr></thead>
+          <tbody>
+            <tr><td class="col-name">id</td><td class="col-type-wrap"><span class="badge badge-pk">PK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">自動採番</td></tr>
+            <tr><td class="col-name">project_id</td><td class="col-type-wrap"><span class="badge badge-fk">FK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">所属プロジェクト</td></tr>
+            <tr><td class="col-name">filename</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">ファイル名（拡張子含む）</td></tr>
+            <tr><td class="col-name">file_path</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">フルパス（スキャン時のみ取得）</td></tr>
+            <tr><td class="col-name">duration</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">再生時間（HH:MM:SS.mmm）</td></tr>
+            <tr><td class="col-name">scanned_at</td><td class="col-type-wrap"><span class="badge badge-ts">TIMESTAMP</span></td><td class="col-desc">スキャン or インポート日時</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <hr class="section-div">
+
+    <!-- ⑤ mp3_files -->
+    <section class="tbl-section" id="mp3_files">
+      <div class="tbl-header">
+        <span class="tbl-name">mp3_files</span>
+        <span class="tbl-label">MP3ファイル一覧（mp3finder出力）</span>
+      </div>
+      <div class="tbl-nature">
+        <strong>性質:</strong> nuendo_mp3_finder.py の出力CSVを格納する<strong>ID3タグ付き照合結果テーブル</strong>。イベント名と照合種別を持ち、作曲者・アーティスト情報の主要ソース。1イベント名に対して複数行（マッチ種別違い）があり得る。WAV非依存で使える貴重な情報源。
+      </div>
+      <div class="col-wrap">
+        <table>
+          <thead><tr><th>カラム名</th><th>型・制約</th><th>説明</th></tr></thead>
+          <tbody>
+            <tr><td class="col-name">id</td><td class="col-type-wrap"><span class="badge badge-pk">PK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">自動採番</td></tr>
+            <tr><td class="col-name">project_id</td><td class="col-type-wrap"><span class="badge badge-fk">FK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">所属プロジェクト</td></tr>
+            <tr><td class="col-name">event_name</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">照合キー。songs.event_name と突合</td></tr>
+            <tr><td class="col-name">match_type</td><td class="col-type-wrap"><span class="badge badge-enum">ENUM</span></td><td class="col-desc"><em>完全一致 / 正規化一致 / 管理番号一致 / タイトル一致 / 部分一致 / 該当なし</em></td></tr>
+            <tr><td class="col-name">filename</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">マッチしたMP3ファイル名</td></tr>
+            <tr><td class="col-name">duration</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">再生時間</td></tr>
+            <tr><td class="col-name">id3_title</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">ID3タグ: タイトル</td></tr>
+            <tr><td class="col-name">id3_artist</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">ID3タグ: アーティスト</td></tr>
+            <tr><td class="col-name">id3_album</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">ID3タグ: アルバム（CD品番の手がかり）</td></tr>
+            <tr><td class="col-name">id3_composer</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">ID3タグ: 作曲者（J-WID検索のヒントとして最重要）</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <hr class="section-div">
+
+    <!-- ⑥ rights_search_results -->
+    <section class="tbl-section" id="rights_search_results">
+      <div class="tbl-header">
+        <span class="tbl-name">rights_search_results</span>
+        <span class="tbl-label">権利情報検索結果</span>
+      </div>
+      <div class="tbl-nature">
+        <strong>性質:</strong> J-WID・NexTone・MusicBrainz・Spotifyの検索結果を<strong>候補履歴＋キャッシュ</strong>として保存するテーブル。1曲あたり複数候補が存在し、applied フラグで適用済みを管理する。同一曲を再検索した際の差分確認にも使える。時間経過で情報が古くなるため、searched_at での鮮度管理が重要。
+      </div>
+      <div class="col-wrap">
+        <table>
+          <thead><tr><th>カラム名</th><th>型・制約</th><th>説明</th></tr></thead>
+          <tbody>
+            <tr><td class="col-name">id</td><td class="col-type-wrap"><span class="badge badge-pk">PK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">自動採番</td></tr>
+            <tr><td class="col-name">song_id</td><td class="col-type-wrap"><span class="badge badge-fk">FK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">対象楽曲</td></tr>
+            <tr><td class="col-name">source</td><td class="col-type-wrap"><span class="badge badge-enum">ENUM</span></td><td class="col-desc"><em>JASRAC / NexTone / MusicBrainz / Spotify / Claude</em></td></tr>
+            <tr><td class="col-name">search_term</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">使用した検索語</td></tr>
+            <tr><td class="col-name">result_rank</td><td class="col-type-wrap"><span class="badge badge-int">INTEGER</span></td><td class="col-desc">候補順位（1始まり）</td></tr>
+            <tr><td class="col-name">work_title</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">作品名（DB上の表記）</td></tr>
+            <tr><td class="col-name">work_code</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">JASRAC作品コード or NexTone管理番号 or MB ID</td></tr>
+            <tr><td class="col-name">composer</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">作曲者</td></tr>
+            <tr><td class="col-name">lyricist</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">作詞者</td></tr>
+            <tr><td class="col-name">arranger</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">編曲者</td></tr>
+            <tr><td class="col-name">artist</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">アーティスト</td></tr>
+            <tr><td class="col-name">album</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">アルバム名（MusicBrainz/Spotifyから）</td></tr>
+            <tr><td class="col-name">isrc</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">ISRC（国際標準レコーディングコード）</td></tr>
+            <tr><td class="col-name">detail_url</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">J-WID詳細ページURL</td></tr>
+            <tr><td class="col-name">mb_score</td><td class="col-type-wrap"><span class="badge badge-int">INTEGER</span></td><td class="col-desc">MusicBrainzマッチスコア（0〜100）</td></tr>
+            <tr><td class="col-name">applied</td><td class="col-type-wrap"><span class="badge badge-bool">BOOLEAN</span></td><td class="col-desc">songs テーブルへの適用済みフラグ</td></tr>
+            <tr><td class="col-name">searched_at</td><td class="col-type-wrap"><span class="badge badge-ts">TIMESTAMP</span></td><td class="col-desc">検索実行日時（キャッシュ鮮度の判定に使用）</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <hr class="section-div">
+
+    <!-- ⑦ master_db_entries -->
+    <section class="tbl-section" id="master_db_entries">
+      <div class="tbl-header">
+        <span class="tbl-name">master_db_entries</span>
+        <span class="tbl-label">マスターDB</span>
+      </div>
+      <div class="tbl-nature">
+        <strong>性質:</strong> Accessや社内DBからエクスポートした<strong>社内確認済み権利情報の静的マスター</strong>。songs への補完ソースとして使われ、更新頻度は低い。プロジェクト横断で参照され、数千〜数万件になり得る。自動検索で拾いにくい古い曲・ライブラリ音楽の情報源として特に有効。
+      </div>
+      <div class="col-wrap">
+        <table>
+          <thead><tr><th>カラム名</th><th>型・制約</th><th>説明</th></tr></thead>
+          <tbody>
+            <tr><td class="col-name">id</td><td class="col-type-wrap"><span class="badge badge-pk">PK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">自動採番</td></tr>
+            <tr><td class="col-name">song_title</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span><span class="badge badge-nn">NOT NULL</span></td><td class="col-desc">曲名（照合キー）</td></tr>
+            <tr><td class="col-name">jasrac_code</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">JASRAC作品コード</td></tr>
+            <tr><td class="col-name">nextone_code</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">NexTone管理番号</td></tr>
+            <tr><td class="col-name">composer</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">作曲者</td></tr>
+            <tr><td class="col-name">lyricist</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">作詞者</td></tr>
+            <tr><td class="col-name">artist</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">アーティスト</td></tr>
+            <tr><td class="col-name">cd_number</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">CD品番</td></tr>
+            <tr><td class="col-name">source_name</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">インポート元ファイル名（バージョン管理用）</td></tr>
+            <tr><td class="col-name">imported_at</td><td class="col-type-wrap"><span class="badge badge-ts">TIMESTAMP</span></td><td class="col-desc">インポート日時</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <hr class="section-div">
+
+    <!-- ⑧ import_logs -->
+    <section class="tbl-section" id="import_logs">
+      <div class="tbl-header">
+        <span class="tbl-name">import_logs</span>
+        <span class="tbl-label">インポート履歴</span>
+      </div>
+      <div class="tbl-nature">
+        <strong>性質:</strong> CSVやExcelの読み込み操作を記録する<strong>監査ログ</strong>。"どのファイルをいつ読み込んで何件処理したか"を追跡するための append-only テーブル。デバッグや再現性の確保に役立つ。
+      </div>
+      <div class="col-wrap">
+        <table>
+          <thead><tr><th>カラム名</th><th>型・制約</th><th>説明</th></tr></thead>
+          <tbody>
+            <tr><td class="col-name">id</td><td class="col-type-wrap"><span class="badge badge-pk">PK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">自動採番</td></tr>
+            <tr><td class="col-name">project_id</td><td class="col-type-wrap"><span class="badge badge-fk">FK</span><span class="badge badge-int">INTEGER</span></td><td class="col-desc">対象プロジェクト（nullの場合はプロジェクト横断）</td></tr>
+            <tr><td class="col-name">import_type</td><td class="col-type-wrap"><span class="badge badge-enum">ENUM</span></td><td class="col-desc"><em>cue / wav_scan / wav_csv / mp3_scan / mp3_csv / master_db</em></td></tr>
+            <tr><td class="col-name">source_filename</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">読み込んだファイル名</td></tr>
+            <tr><td class="col-name">encoding</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">検出エンコーディング（UTF-8, Shift-JIS など）</td></tr>
+            <tr><td class="col-name">record_count</td><td class="col-type-wrap"><span class="badge badge-int">INTEGER</span></td><td class="col-desc">読み込み件数</td></tr>
+            <tr><td class="col-name">updated_count</td><td class="col-type-wrap"><span class="badge badge-int">INTEGER</span></td><td class="col-desc">補完・更新した楽曲件数</td></tr>
+            <tr><td class="col-name">error_message</td><td class="col-type-wrap"><span class="badge badge-text">TEXT</span></td><td class="col-desc">エラーがあった場合のメッセージ</td></tr>
+            <tr><td class="col-name">imported_at</td><td class="col-type-wrap"><span class="badge badge-ts">TIMESTAMP</span></td><td class="col-desc">インポート実行日時</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+</div>
