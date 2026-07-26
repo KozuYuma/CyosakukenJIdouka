@@ -70,6 +70,7 @@ CONFIRM_STATUS_OPTIONS = [
 
 # 編集可能列（data_editor で直接入力できる列）
 EDITABLE_COLS = [
+    "曲名",
     "使用形態",
     "音源区分",
     "I/V区分",
@@ -1526,17 +1527,21 @@ with tabs[0]:
                     st.session_state["ex_filter_composer"] = ""
                     st.session_state["ex_filter_artist"]   = _auto_artist
 
-            # 検索語を収集（優先度順）
+            # 検索語を収集（優先度順・重複除去）
             term_candidates: list[tuple[str, str]] = []
+            _tc_seen: set[str] = set()
             for field, label in [
                 ("WAV検出タイトル", "WAV検出タイトル"),
-                ("曲名",           "管理番号除去後曲名"),
+                ("曲名",           "曲名"),
+                ("アーティスト",   "アーティスト"),
                 ("ライブラリ盤番号", "ライブラリ盤番号"),
                 ("CD番号",         "CD番号"),
+                ("イベント名",     "イベント名"),
             ]:
                 val = str(row.get(field, "")).strip()
-                if val and val.lower() != "nan":
+                if val and val.lower() != "nan" and val not in _tc_seen:
                     term_candidates.append((label, val))
+                    _tc_seen.add(val)
             if not term_candidates:
                 term_candidates.append(("イベント名", str(row.get("イベント名", "")).strip()))
 
@@ -1554,17 +1559,13 @@ with tabs[0]:
 
             with col_links:
                 st.markdown("**手動検索リンク**")
-                # J-WID: POST 送信のため URL に検索語を含められない → 検索画面を開いて手入力
-                _jwid_search_url = (
-                    "https://www2.jasrac.or.jp/eJwid/main"
-                    f"?trxID=A00401-3"
-                    f"&IN_WORKS_TITLE_NAME1={encoded}"
-                    f"&IN_WORKS_TITLE_OPTION1=2"
-                    f"&IN_DEFAULT_SEARCH_WORKS_NAIGAI=0"
-                    f"&CMD_SEARCH="
+                # J-WID: POST 送信のため URL に検索語を含められない → 承認後の検索フォームへ
+                st.link_button(
+                    "🔍 J-WID で検索",
+                    "https://www2.jasrac.or.jp/eJwid/main?trxID=F00100",
+                    use_container_width=True,
                 )
-                st.link_button("🔍 J-WID で検索", _jwid_search_url, use_container_width=True)
-                st.caption(f"↑ 結果が出ない場合は「{main_term[:20]}」で再検索 → JASRACコードをコピー → 下の欄に貼付")
+                st.caption(f"↑ 「{main_term[:20]}」で検索 → JASRACコードをコピー → 下の欄に貼付")
                 # NexTone: 利用規約同意が必要なため直接検索URLへの誘導は不可 → トップページを開く
                 st.link_button(
                     "🔍 NexTone で検索",
@@ -1744,7 +1745,18 @@ with tabs[0]:
                 _pip_song_title = term_candidates[_pip_term_opts.index(_pip_term_sel)][1]
             else:
                 _pip_song_title = term_candidates[0][1] if term_candidates else ""
-                st.caption(f"検索語: **{_pip_song_title}**")
+
+            # 選択語を編集できるinput（候補が変わったときリセット）
+            _pip_edit_key  = f"pip_term_edit_{selected_no}"
+            _pip_prev_key  = f"pip_term_prev_{selected_no}"
+            if st.session_state.get(_pip_prev_key) != _pip_song_title:
+                st.session_state[_pip_edit_key] = _pip_song_title
+                st.session_state[_pip_prev_key] = _pip_song_title
+            _pip_search_term = st.text_input(
+                "検索語（編集可）",
+                key=_pip_edit_key,
+                help="不要な語を削除するなど自由に編集できます。候補を変えると自動リセットされます。",
+            )
 
             if st.button(
                 "🔄 全自動調査パイプラインを実行",
@@ -1757,7 +1769,7 @@ with tabs[0]:
                         event_name=str(row.get("イベント名", "")),
                         wav_full_duration=wav_dur_raw,
                         wav_detected_title=str(row.get("WAV検出タイトル", "")),
-                        song_title=_pip_song_title,
+                        song_title=_pip_search_term or _pip_song_title,
                         tolerance_sec=float(pip_tolerance),
                         mb_score_threshold=int(pip_threshold),
                         use_claude=bool(pip_use_claude),
@@ -1767,7 +1779,7 @@ with tabs[0]:
 
                 # MINC 検索（セッション有効かつチェックONのみ）
                 if pip_use_minc and _pip_mf_ok:
-                    _pip_minc_term = pip_result.get("search_title", _pip_song_title)
+                    _pip_minc_term = pip_result.get("search_title", _pip_search_term or _pip_song_title)
                     with st.spinner(f"MINC で「{_pip_minc_term[:30]}」を検索中..."):
                         try:
                             _pip_mf_c = load_client()
@@ -2094,8 +2106,20 @@ with tabs[0]:
                 )
             _mf_match_int = int(_mf_match[0])
 
+            # 選択語を編集できるinput（候補が変わったときリセット）
+            _mf_edit_key = f"mf_term_edit_{selected_no}"
+            _mf_prev_key = f"mf_term_prev_{selected_no}"
+            if st.session_state.get(_mf_prev_key) != _mf_title_val:
+                st.session_state[_mf_edit_key] = _mf_title_val
+                st.session_state[_mf_prev_key] = _mf_title_val
+            _mf_search_term = st.text_input(
+                "検索語（編集可）",
+                key=_mf_edit_key,
+                help="候補から自動入力。不要な語を削除するなど自由に編集できます。",
+            )
+
             if st.button(
-                f"🌲 MINC で「{_mf_title_val[:20]}」を検索",
+                f"🌲 MINC で「{(_mf_search_term or _mf_title_val)[:20]}」を検索",
                 key=f"mf_search_{selected_no}",
                 type="primary",
                 use_container_width=True,
@@ -2104,7 +2128,7 @@ with tabs[0]:
                     try:
                         _mf_client = load_client()
                         _mf_result = _mf_client.search(
-                            _mf_title_val,
+                            _mf_search_term or _mf_title_val,
                             author=_mf_author_val,
                             match=_mf_match_int,
                         )
