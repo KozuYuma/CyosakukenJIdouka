@@ -2105,6 +2105,28 @@ with tabs[0]:
                         _pip_mf_items = _pip_mf_res["results"]
                         st.success(f"🌲 MINC: {len(_pip_mf_items)} 件")
                         st.caption(f"検索URL: {_pip_mf_res.get('search_url','')}")
+
+                        # 未取得の詳細を自動フェッチ（1曲確認画面なので全候補を取得）
+                        _auto_key = f"pip_mf_auto_fetched_{selected_no}"
+                        if not st.session_state.get(_auto_key):
+                            _need_fetch = [
+                                (_pmi, _item) for _pmi, _item in enumerate(_pip_mf_items[:10])
+                                if not st.session_state.get(f"pip_mf_ddetail_{selected_no}_{_pmi}")
+                                and _item.get("_detail_href","")
+                            ]
+                            if _need_fetch:
+                                with st.spinner(f"MINC 詳細を自動取得中（{len(_need_fetch)} 件）…"):
+                                    _mf_auto_c = _get_mf_client()
+                                    for _pmi, _item in _need_fetch:
+                                        try:
+                                            _dd = _mf_auto_c.get_detail(_item["_detail_href"])
+                                            st.session_state[f"pip_mf_ddetail_{selected_no}_{_pmi}"] = _dd
+                                        except Exception:
+                                            pass
+                            st.session_state[_auto_key] = True
+                            if _need_fetch:
+                                st.rerun()
+
                         for _pmi, _pm_item in enumerate(_pip_mf_items[:10]):
                             _pm_label = (
                                 f"候補{_pmi+1}: {_pm_item.get('作品名','')} ／ {_pm_item.get('アーティスト','')} "
@@ -2147,7 +2169,7 @@ with tabs[0]:
 
                                 _pm_btn1, _pm_btn2 = st.columns(2)
                                 with _pm_btn1:
-                                    if st.button("🔍 MINC詳細取得（作曲者等）", key=f"pip_mf_dget_{selected_no}_{_pmi}", use_container_width=True):
+                                    if st.button("🔄 MINC詳細を再取得", key=f"pip_mf_dget_{selected_no}_{_pmi}", use_container_width=True):
                                         with st.spinner("MINC詳細取得中..."):
                                             try:
                                                 _pm_dd = _get_mf_client().get_detail(_pm_item.get("_detail_href",""))
