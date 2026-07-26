@@ -1980,6 +1980,25 @@ with tabs[0]:
                             st.code(jwid_r.get("debug_html", "")[:3000], language="html")
                     else:
                         st.success(f"{len(jwid_r['results'])} 件")
+
+                        # 未取得の詳細を自動フェッチ（MINCと同理由：詳細ページは別URL）
+                        _jwid_auto_key = f"pip_j_auto_fetched_{selected_no}"
+                        if not st.session_state.get(_jwid_auto_key):
+                            _jwid_need = [
+                                (i, it) for i, it in enumerate(jwid_r["results"])
+                                if not st.session_state.get(f"jwid_detail_{selected_no}_{i}")
+                                and it.get("_detail_url","")
+                            ]
+                            if _jwid_need:
+                                from modules.scraper import fetch_jwid_detail as _fetch_detail_auto
+                                with st.spinner(f"J-WID 詳細を自動取得中（{len(_jwid_need)} 件）…"):
+                                    for _ji, _jit in _jwid_need:
+                                        _jd = _fetch_detail_auto(_jit.get("_detail_url",""))
+                                        st.session_state[f"jwid_detail_{selected_no}_{_ji}"] = _jd
+                            st.session_state[_jwid_auto_key] = True
+                            if _jwid_need:
+                                st.rerun()
+
                         for i, item in enumerate(jwid_r["results"]):
                             with st.expander(
                                 f"候補{i+1}: {item.get('作品名','')} ／ {item.get('作品コード','')}",
@@ -2022,7 +2041,7 @@ with tabs[0]:
 
                                 btn_col1, btn_col2 = st.columns(2)
                                 with btn_col1:
-                                    if st.button("🔍 詳細・管理状況取得", key=f"pip_detail_j_{selected_no}_{i}", use_container_width=True):
+                                    if st.button("🔄 J-WID詳細を再取得", key=f"pip_detail_j_{selected_no}_{i}", use_container_width=True):
                                         with st.spinner("詳細ページ取得中..."):
                                             from modules.scraper import fetch_jwid_detail as _fetch_detail
                                             _d = _fetch_detail(item.get("_detail_url", ""))
