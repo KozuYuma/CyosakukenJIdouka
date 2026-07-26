@@ -1310,6 +1310,10 @@ with tabs[0]:
         )
         _table_height = 260 if _compact_view else 560
 
+        # 反映ボタン後の成功メッセージ（st.rerun() をまたいで表示するため session_state 経由）
+        if "_apply_msg" in st.session_state:
+            st.success(st.session_state.pop("_apply_msg"))
+
         # ---- data_editor ----
         edited_df = st.data_editor(
             filtered_df,
@@ -1701,7 +1705,8 @@ with tabs[0]:
                         for _col, _val in _jw_apply.items():
                             if _val and _col in st.session_state.songs_df.columns:
                                 st.session_state.songs_df.at[row_idx, _col] = _val
-                        st.success("楽曲まとめ・申告フォーマットに反映しました。")
+                        st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
+                        st.session_state.pop("songs_editor", None)
                         st.rerun()
 
             st.divider()
@@ -2025,7 +2030,9 @@ with tabs[0]:
                                         }.items():
                                             if val and col in st.session_state.songs_df.columns:
                                                 st.session_state.songs_df.at[row_idx, col] = val
-                                        st.success("楽曲まとめ・申告フォーマットに反映しました。")
+                                        st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
+                                        st.session_state.pop("songs_editor", None)
+                                        st.rerun()
 
                 with pip_tab_n:
                     st.caption(f"検索URL: {ntone_r.get('search_url','')}")
@@ -2056,7 +2063,9 @@ with tabs[0]:
                                     }.items():
                                         if val and col in st.session_state.songs_df.columns:
                                             st.session_state.songs_df.at[row_idx, col] = val
-                                    st.success("楽曲まとめ・申告フォーマットに反映しました。")
+                                    st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
+                                    st.session_state.pop("songs_editor", None)
+                                    st.rerun()
 
                 with pip_tab_mf:
                     _pip_mf_res = st.session_state.get(f"pipeline_minc_{selected_no}")
@@ -2118,7 +2127,8 @@ with tabs[0]:
                                     for _col, _val in _pm_apply.items():
                                         if _val and _col in st.session_state.songs_df.columns:
                                             st.session_state.songs_df.at[row_idx, _col] = _val
-                                    st.success("楽曲まとめ・申告フォーマットに反映しました。")
+                                    st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
+                                    st.session_state.pop("songs_editor", None)
                                     st.rerun()
 
         # ---- MINC 楽曲検索（個別・保険）----
@@ -2396,7 +2406,8 @@ with tabs[0]:
                                 for _col, _val in _mf_apply.items():
                                     if _val and _col in st.session_state.songs_df.columns:
                                         st.session_state.songs_df.at[row_idx, _col] = _val
-                                st.success("楽曲まとめ・申告フォーマットに反映しました。")
+                                st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
+                                st.session_state.pop("songs_editor", None)
                                 st.rerun()
 
                         st.link_button(
