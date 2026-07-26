@@ -2166,16 +2166,9 @@ with tabs[0]:
                                             "NexTone管理番号": _pm_item.get("NexTone管理番号",""),
                                             "確認ステータス":  "候補あり",
                                         }
-                                        # キャッシュ済み詳細を使用、なければその場でフェッチ
+                                        # 詳細取得済みの場合のみ作曲者等を追加（自動フェッチはしない）
                                         _cached = st.session_state.get(_pm_detail_key, {})
-                                        if not _cached and _pm_item.get("_detail_href",""):
-                                            with st.spinner("MINC から作曲者・作詞者を取得中..."):
-                                                try:
-                                                    _cached = _get_mf_client().get_detail(_pm_item["_detail_href"])
-                                                    st.session_state[_pm_detail_key] = _cached
-                                                except Exception:
-                                                    pass
-                                        if not _cached.get("error"):
+                                        if _cached and not _cached.get("error"):
                                             for _ak in ["作曲者","作詞者","編曲者","訳詞者"]:
                                                 if _cached.get(_ak): _pm_apply[_ak] = _cached[_ak]
                                         for _col, _val in _pm_apply.items():
