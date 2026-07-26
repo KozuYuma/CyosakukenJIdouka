@@ -1978,9 +1978,14 @@ with tabs[0]:
                                 _mgmt_pip = _detail.get("管理状況", {})
                                 if _mgmt_pip:
                                     st.markdown("**管理状況（JASRAC）:**  \n" + _format_management_status(_mgmt_pip))
-                                if _detail and not _detail.get("作曲者") and _detail.get("debug_html"):
-                                    with st.expander("⚠️ デバッグ HTML（作曲者が取得できなかった場合に確認）"):
-                                        st.code(_detail["debug_html"][:5000], language="html")
+                                if _detail and not _detail.get("作曲者"):
+                                    with st.expander("⚠️ デバッグ情報（作曲者が取得できなかった場合）"):
+                                        st.write(f"**error**: `{_detail.get('error')}`")
+                                        st.write(f"**著作者リスト**: {_detail.get('著作者リスト')}")
+                                        if _detail.get("debug_html"):
+                                            st.code(_detail["debug_html"][:5000], language="html")
+                                        else:
+                                            st.warning("debug_html が空です（セッションエラーまたはdetail_urlが空の可能性）")
 
                                 btn_col1, btn_col2 = st.columns(2)
                                 with btn_col1:
