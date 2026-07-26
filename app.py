@@ -1212,6 +1212,17 @@ with tabs[0]:
                                             _minc_iv = _iv_minc
                                     except Exception:
                                         pass
+                                # MINC 作品詳細から作曲者・作詞者を補完（J-WID 未取得の場合のみ）
+                                _mfr_dhref = _mfr.get("_detail_href", "")
+                                if _mfr_dhref and not updates.get("作曲者"):
+                                    try:
+                                        _mf_d = _mf_c.get_detail(_mfr_dhref)
+                                        if not _mf_d.get("error"):
+                                            if _mf_d.get("作曲者"): updates["作曲者"] = _mf_d["作曲者"]
+                                            if _mf_d.get("作詞者") and not updates.get("作詞者"): updates["作詞者"] = _mf_d["作詞者"]
+                                            if _mf_d.get("編曲者") and not updates.get("編曲者"): updates["編曲者"] = _mf_d["編曲者"]
+                                    except Exception:
+                                        pass
                         except Exception as _me:
                             stats["MINCエラー"] += 1
                             stats.setdefault("_minc_last_error", f"{type(_me).__name__}: {_me}")
@@ -1597,7 +1608,8 @@ with tabs[0]:
                     use_container_width=True,
                 )
                 st.caption("MINC（要ログイン）")
-                _mf_enc = urllib.parse.quote(main_term)
+                _mf_link_term = st.session_state.get(f"mf_term_edit_{selected_no}") or main_term
+                _mf_enc = urllib.parse.quote(_mf_link_term)
                 st.link_button(
                     "🌲 MINC タイトル検索",
                     f"https://www.minc.or.jp/music/list/?tr={_mf_enc}&ka=&type=search-form-title&match=2",
@@ -1750,11 +1762,13 @@ with tabs[0]:
             _pip_edit_key  = f"pip_term_edit_{selected_no}"
             _pip_prev_key  = f"pip_term_prev_{selected_no}"
             if st.session_state.get(_pip_prev_key) != _pip_song_title:
-                st.session_state[_pip_edit_key] = _pip_song_title
+                if _pip_edit_key in st.session_state:
+                    del st.session_state[_pip_edit_key]
                 st.session_state[_pip_prev_key] = _pip_song_title
             _pip_search_term = st.text_input(
                 "検索語（編集可）",
                 key=_pip_edit_key,
+                value=_pip_song_title,
                 help="不要な語を削除するなど自由に編集できます。候補を変えると自動リセットされます。",
             )
 
@@ -2040,7 +2054,7 @@ with tabs[0]:
                                 _pm_c2.text_input("NexTone管理番号",  value=_pm_item.get("NexTone管理番号",""), key=f"pip_mf_ncd_{selected_no}_{_pmi}", disabled=True)
                                 _pm_c2.text_input("レコード会社名",   value=_pm_item.get("レコード会社名",""),  key=f"pip_mf_label_{selected_no}_{_pmi}", disabled=True)
                                 if st.button("✅ MINC情報を申告フォーマットに反映", key=f"pip_mf_apply_{selected_no}_{_pmi}", use_container_width=True):
-                                    for _col, _val in {
+                                    _pm_apply = {
                                         "アーティスト":    _pm_item.get("アーティスト",""),
                                         "CD番号":          _pm_item.get("品番",""),
                                         "CD名":            _pm_item.get("CD商品タイトル",""),
@@ -2048,7 +2062,21 @@ with tabs[0]:
                                         "JASRAC作品コード": _pm_item.get("JASRAC作品コード",""),
                                         "NexTone管理番号": _pm_item.get("NexTone管理番号",""),
                                         "確認ステータス":  "候補あり",
-                                    }.items():
+                                    }
+                                    # MINC 作品詳細から作曲者・作詞者も取得
+                                    _pm_dhref = _pm_item.get("_detail_href", "")
+                                    if _pm_dhref:
+                                        with st.spinner("MINC から作曲者・作詞者を取得中..."):
+                                            try:
+                                                _pm_mf_c = load_client()
+                                                _pm_detail = _pm_mf_c.get_detail(_pm_dhref)
+                                                if not _pm_detail.get("error"):
+                                                    if _pm_detail.get("作曲者"): _pm_apply["作曲者"] = _pm_detail["作曲者"]
+                                                    if _pm_detail.get("作詞者"): _pm_apply["作詞者"] = _pm_detail["作詞者"]
+                                                    if _pm_detail.get("編曲者"): _pm_apply["編曲者"] = _pm_detail["編曲者"]
+                                            except Exception:
+                                                pass
+                                    for _col, _val in _pm_apply.items():
                                         if _val and _col in st.session_state.songs_df.columns:
                                             st.session_state.songs_df.at[row_idx, _col] = _val
                                     st.success("楽曲まとめ・申告フォーマットに反映しました。")
@@ -2110,11 +2138,13 @@ with tabs[0]:
             _mf_edit_key = f"mf_term_edit_{selected_no}"
             _mf_prev_key = f"mf_term_prev_{selected_no}"
             if st.session_state.get(_mf_prev_key) != _mf_title_val:
-                st.session_state[_mf_edit_key] = _mf_title_val
+                if _mf_edit_key in st.session_state:
+                    del st.session_state[_mf_edit_key]
                 st.session_state[_mf_prev_key] = _mf_title_val
             _mf_search_term = st.text_input(
                 "検索語（編集可）",
                 key=_mf_edit_key,
+                value=_mf_title_val,
                 help="候補から自動入力。不要な語を削除するなど自由に編集できます。",
             )
 

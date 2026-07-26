@@ -165,8 +165,8 @@ def search_jwid(title: str, author: str = "") -> dict:
         html = resp.content.decode("ms932", errors="replace")
         out["debug_html"] = html[:3000]
 
-        # セッション切れ（エラー021）→ 再同意して1回リトライ
-        if "エラー番号021" in html or "エラー" in html[:500]:
+        # セッション切れ（エラー021 / ValidatorApplicationErrException）→ 再同意して1回リトライ
+        if "エラー番号021" in html or "ValidatorApplicationErrException" in html or "エラー" in html[:500]:
             _jwid_agreed = False
             if _jwid_agree():
                 _rate_limit("jasrac.or.jp")
