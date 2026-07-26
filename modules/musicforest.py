@@ -252,6 +252,7 @@ class MusicForestClient:
             "作曲者": str,
             "作詞者": str,
             "編曲者": str,
+            "訳詞者": str,
             "error": None | str,
         }
         """
@@ -264,6 +265,7 @@ class MusicForestClient:
             "作曲者": "",
             "作詞者": "",
             "編曲者": "",
+            "訳詞者": "",
             "error": None,
         }
         try:
@@ -461,6 +463,7 @@ def _parse_detail(soup: BeautifulSoup, out: dict) -> None:
     composers: list[str] = []
     lyricists: list[str] = []
     arrangers: list[str] = []
+    translators: list[str] = []
 
     for row in soup.select("tr"):
         cells = row.select("td, th")
@@ -472,7 +475,9 @@ def _parse_detail(soup: BeautifulSoup, out: dict) -> None:
             continue
         if "作曲" in role:
             composers.append(name)
-        if "作詞" in role:   # elif → if: 「作詞作曲」は作曲者・作詞者両方に入れる
+        if "訳詞" in role:
+            translators.append(name)
+        elif "作詞" in role:   # elif: 訳詞を先に除外し、純粋な作詞のみ
             lyricists.append(name)
         if "編曲" in role:
             arrangers.append(name)
@@ -483,6 +488,8 @@ def _parse_detail(soup: BeautifulSoup, out: dict) -> None:
         out["作詞者"] = "/".join(lyricists)
     if arrangers and not out["編曲者"]:
         out["編曲者"] = "/".join(arrangers)
+    if translators and not out.get("訳詞者"):
+        out["訳詞者"] = "/".join(translators)
 
 
 def _apply_basic(label: str, value: str, out: dict) -> None:
