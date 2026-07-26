@@ -1554,17 +1554,35 @@ with tabs[0]:
 
             with col_links:
                 st.markdown("**手動検索リンク**")
-                _jwid_search_url = f"https://www2.jasrac.or.jp/eJwid/main?trxID=F00100"
-                st.link_button("🔍 J-WID 作品検索", _jwid_search_url, use_container_width=True)
-                st.caption(f"↑ 開いたら「{main_term[:20]}」で検索 → JASRACコードをコピー → 下の欄に貼付")
+                # J-WID: POST 送信のため URL に検索語を含められない → 検索画面を開いて手入力
+                _jwid_search_url = (
+                    "https://www2.jasrac.or.jp/eJwid/main"
+                    f"?trxID=A00401-3"
+                    f"&IN_WORKS_TITLE_NAME1={encoded}"
+                    f"&IN_WORKS_TITLE_OPTION1=2"
+                    f"&IN_DEFAULT_SEARCH_WORKS_NAIGAI=0"
+                    f"&CMD_SEARCH="
+                )
+                st.link_button("🔍 J-WID で検索", _jwid_search_url, use_container_width=True)
+                st.caption(f"↑ 結果が出ない場合は「{main_term[:20]}」で再検索 → JASRACコードをコピー → 下の欄に貼付")
+                # NexTone: 利用規約同意が必要なため直接検索URLへの誘導は不可 → トップページを開く
                 st.link_button(
                     "🔍 NexTone で検索",
-                    f"https://search.nex-tone.co.jp/search?keyword={encoded}",
+                    f"https://search.nex-tone.co.jp/",
                     use_container_width=True,
                 )
+                st.caption(f"↑ 利用規約に同意後「{main_term[:20]}」で検索")
+                # Google: 曲名 + 著作権者名（作曲者またはアーティスト）
+                _rights_holder = str(row.get("作曲者", "")).strip()
+                if not _rights_holder or _rights_holder.lower() == "nan":
+                    _rights_holder = str(row.get("アーティスト", "")).strip()
+                if _rights_holder and _rights_holder.lower() != "nan":
+                    _google_q = urllib.parse.quote(f"{main_term} {_rights_holder}")
+                else:
+                    _google_q = encoded
                 st.link_button(
                     "🔍 Google で検索",
-                    f"https://www.google.com/search?q={encoded}+著作権+JASRAC+NexTone",
+                    f"https://www.google.com/search?q={_google_q}",
                     use_container_width=True,
                 )
                 st.link_button(
@@ -1590,8 +1608,8 @@ with tabs[0]:
                 if _mf_composer and _mf_composer.lower() != "nan":
                     _mf_comp_enc = urllib.parse.quote(_mf_composer)
                     st.link_button(
-                        f"🌲 MINC 著作者検索（{_mf_composer[:10]}）",
-                        f"https://www.minc.or.jp/music/list/?tr=&ka={_mf_comp_enc}&type=search-form-title&match=2",
+                        f"🌲 MINC タイトル+著作者検索",
+                        f"https://www.minc.or.jp/music/list/?tr={_mf_enc}&ka={_mf_comp_enc}&type=search-form-title&match=2",
                         use_container_width=True,
                     )
 
