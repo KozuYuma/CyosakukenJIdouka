@@ -531,9 +531,10 @@ def _session_age_str(state_path: Path) -> str:
         return ""
 
 
-def check_session() -> tuple[bool, str]:
+def check_session(client: Optional["MusicForestClient"] = None) -> tuple[bool, str]:
     """
     MusicForest のセッション状態を確認する。
+    client を渡すと既存セッションを使い回す（セッションローテーション対策）。
     Returns: (ok: bool, message: str)
     """
     state_path = get_state_path()
@@ -548,8 +549,9 @@ def check_session() -> tuple[bool, str]:
     except Exception:
         pass
     try:
-        client = MusicForestClient()
-        client.load_state(state_path)
+        if client is None:
+            client = MusicForestClient()
+            client.load_state(state_path)
         ok = client.is_authenticated()
         if ok:
             return True, f"ログイン済み（ログイン: {age}）{age_warn}  [{state_path.name}]"

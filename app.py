@@ -139,6 +139,17 @@ def _format_management_status(mgmt: dict) -> str:
     return "  \n".join(lines)
 
 
+def _get_mf_client() -> MusicForestClient:
+    """session_state にキャッシュされた MusicForestClient を返す。
+    同一セッション内で同じインスタンスを使い回すことで、サーバー側のセッション
+    ローテーション（新クッキー）を引き継いだままにし、ログイン状態が切れるのを防ぐ。
+    認証確認ボタン押下時は st.session_state['mf_client'] を削除してから呼ぶこと。
+    """
+    if "mf_client" not in st.session_state:
+        st.session_state["mf_client"] = load_client()
+    return st.session_state["mf_client"]
+
+
 # =====================================================================
 # セッション状態初期化
 # =====================================================================
@@ -963,11 +974,14 @@ with tabs[0]:
         _minc_status_col, _minc_recheck_col = st.columns([5, 1])
         with _minc_recheck_col:
             if st.button("🔄 確認", key="minc_recheck_top", use_container_width=True):
-                if "mf_auth_state" in st.session_state:
-                    del st.session_state["mf_auth_state"]
+                st.session_state.pop("mf_auth_state", None)
+                st.session_state.pop("mf_client", None)  # 再ログイン後は新クライアントを作成
         with _minc_status_col:
             if "mf_auth_state" not in st.session_state:
-                _mf_ok2, _mf_msg2 = check_session()
+                try:
+                    _mf_ok2, _mf_msg2 = check_session(_get_mf_client())
+                except MusicForestError as _e:
+                    _mf_ok2, _mf_msg2 = False, str(_e)
                 st.session_state["mf_auth_state"] = (_mf_ok2, _mf_msg2)
             _mf_ok2, _mf_msg2 = st.session_state["mf_auth_state"]
             if _mf_ok2:
@@ -1171,7 +1185,7 @@ with tabs[0]:
                     _mf_multi_match = False
                     if _mf_ok_bulk:
                         try:
-                            _mf_c = load_client()
+                            _mf_c = _get_mf_client()
                             _mf_bulk = _mf_c.search(search_term, match=3)
                             _mf_bulk_items = _mf_bulk.get("results", []) or []
                             # 1件のみ → 無条件採用 / 複数件 → 作品名が曲名と完全一致する候補を優先
@@ -1802,7 +1816,7 @@ with tabs[0]:
                     _pip_minc_term = pip_result.get("search_title", _pip_search_term or _pip_song_title)
                     with st.spinner(f"MINC で「{_pip_minc_term[:30]}」を検索中..."):
                         try:
-                            _pip_mf_c = load_client()
+                            _pip_mf_c = _get_mf_client()
                             _pip_mf_r = _pip_mf_c.search(_pip_minc_term, match=2)
                             st.session_state[f"pipeline_minc_{selected_no}"] = _pip_mf_r
                         except MusicForestError as _me:
@@ -2074,7 +2088,7 @@ with tabs[0]:
                                     if _pm_dhref:
                                         with st.spinner("MINC から作曲者・作詞者を取得中..."):
                                             try:
-                                                _pm_mf_c = load_client()
+                                                _pm_mf_c = _get_mf_client()
                                                 _pm_detail = _pm_mf_c.get_detail(_pm_dhref)
                                                 if not _pm_detail.get("error"):
                                                     if _pm_detail.get("作曲者"): _pm_apply["作曲者"] = _pm_detail["作曲者"]
@@ -2100,8 +2114,14 @@ with tabs[0]:
         _mf_auth_col, _mf_btn_col = st.columns([4, 1])
         with _mf_btn_col:
             _mf_check = st.button("🔄 認証確認", key=f"mf_check_{selected_no}", use_container_width=True)
-        if _mf_check or "mf_auth_state" not in st.session_state:
-            _mf_ok, _mf_msg = check_session()
+        if _mf_check:
+            st.session_state.pop("mf_auth_state", None)
+            st.session_state.pop("mf_client", None)  # 再ログイン後は新クライアントを作成
+        if "mf_auth_state" not in st.session_state:
+            try:
+                _mf_ok, _mf_msg = check_session(_get_mf_client())
+            except MusicForestError as _e:
+                _mf_ok, _mf_msg = False, str(_e)
             st.session_state["mf_auth_state"] = (_mf_ok, _mf_msg)
         _mf_ok, _mf_msg = st.session_state["mf_auth_state"]
         with _mf_auth_col:
@@ -2162,7 +2182,7 @@ with tabs[0]:
             ):
                 with st.spinner("MINC を検索中... （1.5秒/リクエスト）"):
                     try:
-                        _mf_client = load_client()
+                        _mf_client = _get_mf_client()
                         _mf_result = _mf_client.search(
                             _mf_search_term or _mf_title_val,
                             author=_mf_author_val,
@@ -2256,7 +2276,7 @@ with tabs[0]:
                             ):
                                 with st.spinner("MINC詳細ページ取得中..."):
                                     try:
-                                        _mf_client2 = load_client()
+                                        _mf_client2 = _get_mf_client()
                                         _d = _mf_client2.get_detail(_mf_item["_detail_href"])
                                         st.session_state[_mf_detail_key] = _d
                                         if _d.get("error"):
@@ -2307,7 +2327,7 @@ with tabs[0]:
                             ):
                                 with st.spinner("委任者確認中..."):
                                     try:
-                                        _mf_client3 = load_client()
+                                        _mf_client3 = _get_mf_client()
                                         _delg_r = _mf_client3.fetch_product_detail(_mf_alb_id, _mf_trk_id)
                                         st.session_state[_mf_delg_key] = _delg_r
                                     except MusicForestError as e:
@@ -2326,7 +2346,7 @@ with tabs[0]:
                                 if not (_jw_d.get("作曲者") or _detail_now.get("作曲者") or
                                         _jw_d.get("作詞者") or _detail_now.get("作詞者")):
                                     try:
-                                        _ac = load_client()
+                                        _ac = _get_mf_client()
                                         _ad = _ac.get_detail(_mf_item["_detail_href"])
                                         if not _ad.get("error"):
                                             st.session_state[_mf_detail_key] = _ad
