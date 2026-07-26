@@ -1556,7 +1556,11 @@ with tabs[0]:
             if not term_candidates:
                 term_candidates.append(("イベント名", str(row.get("イベント名", "")).strip()))
 
-            main_term = term_candidates[0][1]
+            # col_terms の text_input で編集済みであればその値を使う
+            _main_label = term_candidates[0][0]
+            main_term = st.session_state.get(
+                f"term_{selected_no}_{_main_label}", term_candidates[0][1]
+            )
             encoded = urllib.parse.quote(main_term)
 
             st.subheader(f"No.{selected_no} ／ {row.get('イベント名', '')}")
