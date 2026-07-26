@@ -276,11 +276,13 @@ class MusicForestClient:
 
             url = f"{DETAIL_URL}?{data_href}"
             resp = self._get(url)
-            if "/login" in resp.url:
+
+            html = resp.text
+            if "/login" in resp.url.lower():
                 out["error"] = "セッションが切れています。再ログインしてください。"
                 return out
 
-            soup = BeautifulSoup(resp.text, "lxml")
+            soup = BeautifulSoup(html, "lxml")
             _parse_detail(soup, out)
 
         except requests.exceptions.ConnectionError:
@@ -460,6 +462,10 @@ def _parse_detail(soup: BeautifulSoup, out: dict) -> None:
             _apply_basic(th.get_text(strip=True), td.get_text(" ", strip=True), out)
 
     # ── 権利者情報: 作曲 / 作詞 / 編曲 ロールを持つ行 ─────────────────
+    # ロール列は cells[0] とは限らない（空セル・番号列が先頭に来るレイアウトに対応）
+    _ROLE_KEYWORDS = ["作曲", "作詞", "編曲", "訳詞"]
+    _NAME_SKIP = _ROLE_KEYWORDS + ["権利", "種別", "割合", "比率", "コード", "番号", "登録"]
+
     composers: list[str] = []
     lyricists: list[str] = []
     arrangers: list[str] = []
@@ -467,17 +473,38 @@ def _parse_detail(soup: BeautifulSoup, out: dict) -> None:
 
     for row in soup.select("tr"):
         cells = row.select("td, th")
-        if len(cells) < 2:
+        cell_texts = [c.get_text(" ", strip=True) for c in cells]
+        if len(cell_texts) < 2:
             continue
-        role  = cells[0].get_text(strip=True)
-        name  = cells[1].get_text(" ", strip=True)
-        if not name or name.lower() == "nan":
+
+        # ロールが入っているセルを探す
+        role_idx = next(
+            (ci for ci, t in enumerate(cell_texts)
+             if any(kw in t for kw in _ROLE_KEYWORDS)),
+            None,
+        )
+        if role_idx is None:
             continue
+        role = cell_texts[role_idx]
+
+        # 名前: ロール以外のセルから「2文字以上・数字だけでない・ヘッダーキーワードなし」を選ぶ
+        name = next(
+            (t for ci, t in enumerate(cell_texts)
+             if ci != role_idx
+             and t and t.lower() != "nan"
+             and len(t.replace(" ", "").replace("　", "")) >= 2
+             and not t.replace(" ", "").replace("　", "").isdigit()
+             and not any(kw in t for kw in _NAME_SKIP)),
+            "",
+        )
+        if not name:
+            continue
+
         if "作曲" in role:
             composers.append(name)
         if "訳詞" in role:
             translators.append(name)
-        elif "作詞" in role:   # elif: 訳詞を先に除外し、純粋な作詞のみ
+        elif "作詞" in role:
             lyricists.append(name)
         if "編曲" in role:
             arrangers.append(name)

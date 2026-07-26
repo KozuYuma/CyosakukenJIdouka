@@ -2125,26 +2125,22 @@ with tabs[0]:
                         st.success(f"🌲 MINC: {len(_pip_mf_items)} 件")
                         st.caption(f"検索URL: {_pip_mf_res.get('search_url','')}")
 
-                        # 未取得の詳細を自動フェッチ（1曲確認画面なので全候補を取得）
-                        _auto_key = f"pip_mf_auto_fetched_{selected_no}"
-                        if not st.session_state.get(_auto_key):
-                            _need_fetch = [
-                                (_pmi, _item) for _pmi, _item in enumerate(_pip_mf_items[:10])
-                                if not st.session_state.get(f"pip_mf_ddetail_{selected_no}_{_pmi}")
-                                and _item.get("_detail_href","")
-                            ]
-                            if _need_fetch:
-                                with st.spinner(f"MINC 詳細を自動取得中（{len(_need_fetch)} 件）…"):
-                                    _mf_auto_c = _get_mf_client()
-                                    for _pmi, _item in _need_fetch:
-                                        try:
-                                            _dd = _mf_auto_c.get_detail(_item["_detail_href"])
-                                            st.session_state[f"pip_mf_ddetail_{selected_no}_{_pmi}"] = _dd
-                                        except Exception:
-                                            pass
-                            st.session_state[_auto_key] = True
-                            if _need_fetch:
-                                st.rerun()
+                        # 未取得の詳細を自動フェッチ（キー未存在＝未取得として判定、エラー時もキーをセットして無限ループ防止）
+                        _mf_need_fetch = [
+                            (_auto_pmi, _auto_it) for _auto_pmi, _auto_it in enumerate(_pip_mf_items[:10])
+                            if f"pip_mf_ddetail_{selected_no}_{_auto_pmi}" not in st.session_state
+                            and _auto_it.get("_detail_href", "")
+                        ]
+                        if _mf_need_fetch:
+                            _mf_auto_c = _get_mf_client()
+                            with st.spinner(f"MINC 詳細を自動取得中（{len(_mf_need_fetch)} 件）…"):
+                                for _auto_pmi, _auto_it in _mf_need_fetch:
+                                    _auto_dkey = f"pip_mf_ddetail_{selected_no}_{_auto_pmi}"
+                                    try:
+                                        st.session_state[_auto_dkey] = _mf_auto_c.get_detail(_auto_it["_detail_href"])
+                                    except Exception as _auto_e:
+                                        st.session_state[_auto_dkey] = {"error": str(_auto_e), "debug_html": f"例外: {type(_auto_e).__name__}: {_auto_e}"}
+                            st.rerun()
 
                         for _pmi, _pm_item in enumerate(_pip_mf_items[:10]):
                             _pm_label = (
@@ -2194,8 +2190,17 @@ with tabs[0]:
                                                 _pm_dd = _get_mf_client().get_detail(_pm_item.get("_detail_href",""))
                                                 st.session_state[_pm_detail_key] = _pm_dd
                                             except Exception as _pm_e:
-                                                st.session_state[_pm_detail_key] = {"error": str(_pm_e)}
+                                                st.session_state[_pm_detail_key] = {"error": str(_pm_e), "debug_html": f"例外: {type(_pm_e).__name__}: {_pm_e}"}
                                         st.rerun()
+                                # 詳細取得エラーまたはデバッグ情報
+                                # エラー時のみデバッグ情報を表示
+                                if _pm_detail_data and _pm_detail_data.get("error"):
+                                    st.error(f"MINC詳細エラー: {_pm_detail_data['error']}")
+                                    _dbg = _pm_detail_data.get("debug_html", "")
+                                    if _dbg:
+                                        with st.expander("🔍 デバッグ HTML"):
+                                            st.code(_dbg[:3000], language="html")
+
                                 with _pm_btn2:
                                     if st.button("✅ MINC情報を申告フォーマットに反映", key=f"pip_mf_apply_{selected_no}_{_pmi}", use_container_width=True):
                                         _pm_apply = {
