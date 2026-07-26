@@ -1978,6 +1978,9 @@ with tabs[0]:
                                 _mgmt_pip = _detail.get("管理状況", {})
                                 if _mgmt_pip:
                                     st.markdown("**管理状況（JASRAC）:**  \n" + _format_management_status(_mgmt_pip))
+                                if _detail and not _detail.get("作曲者") and _detail.get("debug_html"):
+                                    with st.expander("⚠️ デバッグ HTML（作曲者が取得できなかった場合に確認）"):
+                                        st.code(_detail["debug_html"][:5000], language="html")
 
                                 btn_col1, btn_col2 = st.columns(2)
                                 with btn_col1:
@@ -1990,6 +1993,8 @@ with tabs[0]:
                                             st.session_state[f"mf_author_{selected_no}"] = _d["作曲者"].strip()
                                         if _d.get("error"):
                                             st.error(f"詳細取得エラー: {_d['error']}")
+                                        elif not _d.get("作曲者") and not _d.get("作詞者"):
+                                            st.warning("作曲者・作詞者が取得できませんでした。下の「デバッグ HTML」を確認してください。")
                                         else:
                                             st.success(f"作曲者: {_d['作曲者']} ／ 作詞者: {_d['作詞者']}")
                                         st.rerun()

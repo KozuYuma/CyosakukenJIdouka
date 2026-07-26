@@ -314,6 +314,7 @@ def fetch_jwid_detail(detail_url: str) -> dict:
         "著作者リスト": [],
         "管理状況": {},
         "error": None,
+        "debug_html": "",
     }
     if not detail_url:
         out["error"] = "detail_url が空"
@@ -336,35 +337,46 @@ def fetch_jwid_detail(detail_url: str) -> dict:
                 html = resp.content.decode("ms932", errors="replace")
 
         soup = BeautifulSoup(html, "lxml")
+        out["debug_html"] = html[:5000]
 
         composers, lyricists, arrangers, translators = [], [], [], []
 
-        # 著作者テーブルは各利用分野タブに重複するため「未選択」デフォルトタブのみ参照
-        # div#tab-def > div.PC > table.detail: No. | 著作者名 | 識別 | 契約 | 所属団体 | 特記
+        def _parse_author_rows(tables) -> bool:
+            """table リストから著作者行を抽出。1件以上見つかったら True。"""
+            found = False
+            for tbl in tables:
+                for row in tbl.find_all("tr"):
+                    cells = row.find_all(["td", "th"])
+                    if len(cells) < 3:
+                        continue
+                    no_text = cells[0].get_text(strip=True)
+                    if not no_text.isdigit():
+                        continue
+                    name_text = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+                    role_text = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+                    society   = cells[4].get_text(strip=True) if len(cells) > 4 else ""
+                    if not name_text:
+                        continue
+                    out["著作者リスト"].append({"役割": role_text, "氏名": name_text, "所属団体": society})
+                    if "作曲" in role_text:
+                        composers.append(name_text)
+                    if "訳詞" in role_text:
+                        translators.append(name_text)
+                    elif "作詞" in role_text:
+                        lyricists.append(name_text)
+                    if "編曲" in role_text:
+                        arrangers.append(name_text)
+                    found = True
+            return found
+
+        # 戦略1: div#tab-def > div.PC > table.detail（元の想定構造）
         tab_def = soup.find("div", id="tab-def") or soup
         pc_div  = tab_def.find("div", class_="PC") or tab_def
-        for tbl in pc_div.find_all("table", class_="detail"):
-            for row in tbl.find_all("tr"):
-                tds = row.find_all("td")
-                if len(tds) < 5:
-                    continue
-                no_text   = tds[0].get_text(strip=True)
-                if not no_text.isdigit():
-                    continue
-                name_text = tds[1].get_text(strip=True)
-                role_text = tds[2].get_text(strip=True)
-                society   = tds[4].get_text(strip=True)
-                if not name_text:
-                    continue
-                out["著作者リスト"].append({"役割": role_text, "氏名": name_text, "所属団体": society})
-                if "作曲" in role_text:
-                    composers.append(name_text)
-                if "訳詞" in role_text:   # 訳詞は作詞より先にチェック
-                    translators.append(name_text)
-                elif "作詞" in role_text:  # 「作詞作曲」も作詞者に入る（作曲は上の if で捕捉済み）
-                    lyricists.append(name_text)
-                if "編曲" in role_text:
-                    arrangers.append(name_text)
+        if not _parse_author_rows(pc_div.find_all("table", class_="detail")):
+            # 戦略2: ページ全体から table.detail
+            if not _parse_author_rows(soup.find_all("table", class_="detail")):
+                # 戦略3: クラス不問で全テーブルを走査（No.列が数字の行を採用）
+                _parse_author_rows(soup.find_all("table"))
 
         out["作曲者"] = "/".join(composers)
         out["作詞者"] = "/".join(lyricists)
