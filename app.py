@@ -1570,20 +1570,22 @@ with tabs[0]:
 
             with col_links:
                 st.markdown("**手動検索リンク**")
+                st.caption("検索語（右のアイコンでコピー）")
+                st.code(main_term, language=None)
                 # J-WID: POST 送信のため URL に検索語を含められない → 承認後の検索フォームへ
                 st.link_button(
                     "🔍 J-WID で検索",
                     "https://www2.jasrac.or.jp/eJwid/main?trxID=F00100",
                     use_container_width=True,
                 )
-                st.caption(f"↑ 「{main_term[:20]}」で検索 → JASRACコードをコピー → 下の欄に貼付")
+                st.caption("↑ コピーした検索語を「作品タイトル」欄に貼り付けてください")
                 # NexTone: 利用規約同意が必要なため直接検索URLへの誘導は不可 → トップページを開く
                 st.link_button(
                     "🔍 NexTone で検索",
                     f"https://search.nex-tone.co.jp/",
                     use_container_width=True,
                 )
-                st.caption(f"↑ 利用規約に同意後「{main_term[:20]}」で検索")
+                st.caption("↑ 利用規約に同意後、コピーした検索語で検索してください")
                 # Google: 曲名 + 著作権者名（作曲者またはアーティスト）
                 _rights_holder = str(row.get("作曲者", "")).strip()
                 if not _rights_holder or _rights_holder.lower() == "nan":
