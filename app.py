@@ -1994,6 +1994,11 @@ with tabs[0]:
                                             from modules.scraper import fetch_jwid_detail as _fetch_detail
                                             _d = _fetch_detail(item.get("_detail_url", ""))
                                         st.session_state[_detail_key] = _d
+                                        # disabled text_input は session_state の値を value 引数より優先するため明示的に更新
+                                        st.session_state[f"pip_j_comp_{selected_no}_{i}"] = _d.get("作曲者", "")
+                                        st.session_state[f"pip_j_lyric_{selected_no}_{i}"] = _d.get("作詞者", "")
+                                        st.session_state[f"pip_j_arr_{selected_no}_{i}"] = _d.get("編曲者", "")
+                                        st.session_state[f"pip_j_tran_{selected_no}_{i}"] = _d.get("訳詞者", "")
                                         if _d.get("作曲者"):
                                             st.session_state[f"mf_author_{selected_no}"] = _d["作曲者"].strip()
                                         if _d.get("error"):

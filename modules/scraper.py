@@ -337,9 +337,29 @@ def fetch_jwid_detail(detail_url: str) -> dict:
                 html = resp.content.decode("ms932", errors="replace")
 
         soup = BeautifulSoup(html, "lxml")
-        out["debug_html"] = html[:5000]
+
+        # debug_html: 先頭 2000 字 ＋ "作曲" 周辺コンテキスト
+        _comp_pos = html.find("作曲")
+        if _comp_pos >= 0:
+            _s = max(0, _comp_pos - 300)
+            _e = min(len(html), _comp_pos + 1500)
+            out["debug_html"] = html[:2000] + "\n\n...[作曲周辺]...\n\n" + html[_s:_e]
+        else:
+            out["debug_html"] = html[:5000]
 
         composers, lyricists, arrangers, translators = [], [], [], []
+
+        _ROLE_SKIP = {"作曲", "作詞", "編曲", "訳詞", "著作者", "識別", "所属", "契約", "特記", "JASRAC", "NexTone", "No", "○", "△", "×"}
+
+        def _classify_role(role_text: str, name: str):
+            if "作曲" in role_text and name not in composers:
+                composers.append(name)
+            if "訳詞" in role_text and name not in translators:
+                translators.append(name)
+            elif "作詞" in role_text and name not in lyricists:
+                lyricists.append(name)
+            if "編曲" in role_text and name not in arrangers:
+                arrangers.append(name)
 
         def _parse_author_rows(tables) -> bool:
             """table リストから著作者行を抽出。1件以上見つかったら True。"""
@@ -347,25 +367,43 @@ def fetch_jwid_detail(detail_url: str) -> dict:
             for tbl in tables:
                 for row in tbl.find_all("tr"):
                     cells = row.find_all(["td", "th"])
-                    if len(cells) < 3:
+                    if len(cells) < 2:
                         continue
-                    no_text = cells[0].get_text(strip=True)
-                    if not no_text.isdigit():
+                    cell_texts = [c.get_text(strip=True) for c in cells]
+
+                    # パターンA: cells[0] が数字（No.列あり構造）
+                    if cell_texts[0].isdigit() and len(cell_texts) >= 3:
+                        name_text = cell_texts[1]
+                        role_text = cell_texts[2]
+                        society   = cell_texts[4] if len(cell_texts) > 4 else ""
+                        if not name_text:
+                            continue
+                        out["著作者リスト"].append({"役割": role_text, "氏名": name_text, "所属団体": society})
+                        _classify_role(role_text, name_text)
+                        found = True
                         continue
-                    name_text = cells[1].get_text(strip=True) if len(cells) > 1 else ""
-                    role_text = cells[2].get_text(strip=True) if len(cells) > 2 else ""
-                    society   = cells[4].get_text(strip=True) if len(cells) > 4 else ""
+
+                    # パターンB: 役割ワードを含むセルが存在する（No.列なし構造）
+                    role_ci = next(
+                        (ci for ci, t in enumerate(cell_texts)
+                         if any(r in t for r in ["作曲", "作詞", "編曲", "訳詞"])),
+                        None,
+                    )
+                    if role_ci is None:
+                        continue
+                    role_text = cell_texts[role_ci]
+                    # 名前候補: 他のセルで除外キーワードを含まない最初のもの
+                    name_text = next(
+                        (t for ci, t in enumerate(cell_texts)
+                         if ci != role_ci and len(t) >= 2
+                         and not any(kw in t for kw in _ROLE_SKIP)
+                         and not t.replace("　", "").replace(" ", "").isdigit()),
+                        "",
+                    )
                     if not name_text:
                         continue
-                    out["著作者リスト"].append({"役割": role_text, "氏名": name_text, "所属団体": society})
-                    if "作曲" in role_text:
-                        composers.append(name_text)
-                    if "訳詞" in role_text:
-                        translators.append(name_text)
-                    elif "作詞" in role_text:
-                        lyricists.append(name_text)
-                    if "編曲" in role_text:
-                        arrangers.append(name_text)
+                    out["著作者リスト"].append({"役割": role_text, "氏名": name_text, "所属団体": ""})
+                    _classify_role(role_text, name_text)
                     found = True
             return found
 
@@ -375,7 +413,7 @@ def fetch_jwid_detail(detail_url: str) -> dict:
         if not _parse_author_rows(pc_div.find_all("table", class_="detail")):
             # 戦略2: ページ全体から table.detail
             if not _parse_author_rows(soup.find_all("table", class_="detail")):
-                # 戦略3: クラス不問で全テーブルを走査（No.列が数字の行を採用）
+                # 戦略3: クラス不問で全テーブルを走査
                 _parse_author_rows(soup.find_all("table"))
 
         out["作曲者"] = "/".join(composers)
