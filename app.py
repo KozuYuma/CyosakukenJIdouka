@@ -1225,6 +1225,15 @@ with tabs[0]:
                             # J-WID 詳細取得済みで作詞者なし → インスト確定
                             updates["I/V区分"] = "インスト"
 
+                    # 邦洋区分 自動判定（JASRACコード 2文字目: 数字→邦楽、英字→洋楽）
+                    _jasrac = (updates.get("JASRAC作品コード") or str(row.get("JASRAC作品コード", ""))).strip()
+                    if _jasrac and len(_jasrac) >= 2 and str(row.get("邦洋区分", "")).strip().lower() in _BLANK and not updates.get("邦洋区分"):
+                        _c2 = _jasrac[1]
+                        if _c2.isdigit():
+                            updates["邦洋区分"] = "邦楽"
+                        elif _c2.isalpha():
+                            updates["邦洋区分"] = "洋楽"
+
                     if updates:
                         updates["確認ステータス"] = "複数候補あり" if _mf_multi_match else "候補あり"
                         for col, val in updates.items():
