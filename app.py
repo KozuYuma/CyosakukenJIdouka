@@ -995,10 +995,17 @@ with tabs[0]:
         fc1, fc2 = st.columns([2, 2])
         with fc1:
             status_opts = sorted(songs_df["確認ステータス"].dropna().unique().tolist())
-            # 保存済みフィルター値が全部staleになっていたらリセット（一括検索後などに発生）
+            # 保存済みフィルター値の整合チェック
             _stored_sf = st.session_state.get("songs_status_filter")
-            if _stored_sf is not None and not any(s in status_opts for s in _stored_sf):
-                del st.session_state["songs_status_filter"]
+            if _stored_sf is not None:
+                if not any(s in status_opts for s in _stored_sf):
+                    # 全部無効化 → リセット
+                    del st.session_state["songs_status_filter"]
+                else:
+                    # 反映などで新ステータスが追加された場合、フィルターに自動追加
+                    _new_opts = [s for s in status_opts if s not in _stored_sf]
+                    if _new_opts:
+                        st.session_state["songs_status_filter"] = list(_stored_sf) + _new_opts
             status_filter = st.multiselect(
                 "確認ステータスで絞り込み",
                 options=status_opts,
@@ -1529,6 +1536,17 @@ with tabs[0]:
             + _tab4_df["確認ステータス"] + "] "
             + _tab4_df["イベント名"]
         ).tolist()
+        # 反映でステータスが変わるとラベル文字列も変わり選択がリセットされるため、
+        # 古い選択ラベルを No. で探し直して最新ラベルに更新する
+        _stored_sel = st.session_state.get("search_song_select")
+        if _stored_sel and _stored_sel not in song_labels:
+            try:
+                _stored_no = int(_stored_sel.split(".")[0])
+                _matched = next((l for l in song_labels if int(l.split(".")[0]) == _stored_no), None)
+                if _matched:
+                    st.session_state["search_song_select"] = _matched
+            except (ValueError, StopIteration):
+                pass
         selected_label = st.selectbox(
             f"調査する楽曲を選択（{len(_tab4_df)} 件）",
             options=song_labels,
