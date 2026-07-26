@@ -1965,12 +1965,21 @@ with tabs[0]:
                                 _detail_key = f"jwid_detail_{selected_no}_{i}"
                                 _detail = st.session_state.get(_detail_key, {})
 
+                                # ウィジェット描画前に session_state を同期（描画後は変更不可）
+                                if _detail:
+                                    st.session_state[f"pip_j_comp_{selected_no}_{i}"] = _detail.get("作曲者", "")
+                                    st.session_state[f"pip_j_lyric_{selected_no}_{i}"] = _detail.get("作詞者", "")
+                                    st.session_state[f"pip_j_arr_{selected_no}_{i}"] = _detail.get("編曲者", "")
+                                    st.session_state[f"pip_j_tran_{selected_no}_{i}"] = _detail.get("訳詞者", "")
+
                                 pc1, pc2 = st.columns(2)
                                 pc1.text_input("作品コード", value=item.get("作品コード",""), key=f"pip_j_code_{selected_no}_{i}", disabled=True)
                                 pc1.text_input("作品名",    value=item.get("作品名",""),    key=f"pip_j_title_{selected_no}_{i}", disabled=True)
                                 pc1.text_input("著作者名（一覧）", value=item.get("著作者名",""), key=f"pip_j_auth_{selected_no}_{i}", disabled=True)
-                                pc2.text_input("作曲者", value=_detail.get("作曲者","（詳細取得で確認）"), key=f"pip_j_comp_{selected_no}_{i}", disabled=True)
-                                pc2.text_input("作詞者", value=_detail.get("作詞者","（詳細取得で確認）"), key=f"pip_j_lyric_{selected_no}_{i}", disabled=True)
+                                _comp_disp = _detail.get("作曲者","（詳細取得で確認）") if not _detail else _detail.get("作曲者","")
+                                _lyric_disp = _detail.get("作詞者","（詳細取得で確認）") if not _detail else _detail.get("作詞者","")
+                                pc2.text_input("作曲者", value=_comp_disp, key=f"pip_j_comp_{selected_no}_{i}", disabled=True)
+                                pc2.text_input("作詞者", value=_lyric_disp, key=f"pip_j_lyric_{selected_no}_{i}", disabled=True)
                                 pc2.text_input("編曲者", value=_detail.get("編曲者",""),    key=f"pip_j_arr_{selected_no}_{i}", disabled=True)
                                 pc2.text_input("訳詞者", value=_detail.get("訳詞者",""),    key=f"pip_j_tran_{selected_no}_{i}", disabled=True)
 
@@ -1994,11 +2003,6 @@ with tabs[0]:
                                             from modules.scraper import fetch_jwid_detail as _fetch_detail
                                             _d = _fetch_detail(item.get("_detail_url", ""))
                                         st.session_state[_detail_key] = _d
-                                        # disabled text_input は session_state の値を value 引数より優先するため明示的に更新
-                                        st.session_state[f"pip_j_comp_{selected_no}_{i}"] = _d.get("作曲者", "")
-                                        st.session_state[f"pip_j_lyric_{selected_no}_{i}"] = _d.get("作詞者", "")
-                                        st.session_state[f"pip_j_arr_{selected_no}_{i}"] = _d.get("編曲者", "")
-                                        st.session_state[f"pip_j_tran_{selected_no}_{i}"] = _d.get("訳詞者", "")
                                         if _d.get("作曲者"):
                                             st.session_state[f"mf_author_{selected_no}"] = _d["作曲者"].strip()
                                         if _d.get("error"):
