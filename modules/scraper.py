@@ -318,11 +318,23 @@ def fetch_jwid_detail(detail_url: str) -> dict:
     if not detail_url:
         out["error"] = "detail_url が空"
         return out
+    global _jwid_agreed
+    if not _jwid_agreed:
+        _jwid_agree()
     try:
         _rate_limit("jasrac.or.jp")
         resp = _session.get(detail_url, timeout=TIMEOUT)
         resp.raise_for_status()
         html = resp.content.decode("ms932", errors="replace")
+
+        # セッション切れ → 再同意して1回リトライ
+        if "ValidatorApplicationErrException" in html or "エラー番号021" in html or "エラー" in html[:500]:
+            _jwid_agreed = False
+            if _jwid_agree():
+                _rate_limit("jasrac.or.jp")
+                resp = _session.get(detail_url, timeout=TIMEOUT)
+                html = resp.content.decode("ms932", errors="replace")
+
         soup = BeautifulSoup(html, "lxml")
 
         composers, lyricists, arrangers, translators = [], [], [], []
