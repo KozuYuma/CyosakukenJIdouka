@@ -1133,6 +1133,7 @@ with tabs[0]:
 
                     updates: dict = {}
                     _jwid_detail_ok = False  # I/V区分「インスト」判定用
+                    _minc_iv = ""            # MINC から取得した IV 値（"I" or "V"）
 
                     if _auto_apply(jwid_r, jwid_comp_n):
                         r = jwid_r[0]
@@ -1205,6 +1206,9 @@ with tabs[0]:
                                         _chuukanri = _delg_b.get("集中管理", "")
                                         if _chuukanri in ("委任者", "非委任者"):
                                             updates["委任者"] = _chuukanri
+                                        _iv_minc = _delg_b.get("IV", "")
+                                        if _iv_minc in ("I", "V"):
+                                            _minc_iv = _iv_minc
                                     except Exception:
                                         pass
                         except Exception as _me:
@@ -1221,6 +1225,10 @@ with tabs[0]:
                             updates["I/V区分"] = "ヴォーカル"
                             if str(row.get("原訳詞区分", "")).strip().lower() in _BLANK:
                                 updates["原訳詞区分"] = "原詞"
+                        elif _minc_iv == "I":
+                            updates["I/V区分"] = "インスト"
+                        elif _minc_iv == "V":
+                            updates["I/V区分"] = "ヴォーカル"
                         elif _jwid_detail_ok:
                             # J-WID 詳細取得済みで作詞者なし → インスト確定
                             updates["I/V区分"] = "インスト"

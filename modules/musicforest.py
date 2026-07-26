@@ -202,10 +202,10 @@ class MusicForestClient:
 
     def fetch_product_detail(self, album_id: str, track_id: str) -> dict:
         """
-        parts/product/detail から※集中管理の委任者/非委任者を取得する。
-        Returns: {"集中管理": "委任者" | "非委任者" | "", "error": None | str}
+        parts/product/detail から※集中管理の委任者/非委任者と IV 区分を取得する。
+        Returns: {"集中管理": "委任者" | "非委任者" | "", "IV": "I" | "V" | "", "error": None | str}
         """
-        out: dict = {"集中管理": "", "error": None}
+        out: dict = {"集中管理": "", "IV": "", "error": None}
         if not album_id or not track_id:
             out["error"] = "album_id / track_id が不明です"
             return out
@@ -219,6 +219,15 @@ class MusicForestClient:
             active_span = soup.select_one("span.delegation.active")
             if active_span:
                 out["集中管理"] = active_span.get_text(strip=True)
+            # IV 区分: <th>IV</th> の次 <td> が "I" または "V"
+            for th in soup.find_all("th"):
+                if th.get_text(strip=True) == "IV":
+                    td = th.find_next_sibling("td")
+                    if td:
+                        iv_text = td.get_text(strip=True)
+                        if iv_text in ("I", "V"):
+                            out["IV"] = iv_text
+                    break
         except requests.exceptions.ConnectionError:
             out["error"] = "接続エラー"
         except Exception as e:
