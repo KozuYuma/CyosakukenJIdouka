@@ -1306,140 +1306,46 @@ with tabs[0]:
                     st.warning(f"⚠️ MINC エラー {stats['MINCエラー']} 件: {stats.get('_minc_last_error','')}")
                 st.rerun()
 
-        # ---- 編集不可列の設定 ----
-        disabled_cols = [c for c in songs_df.columns if c not in EDITABLE_COLS]
-
-        # ---- 縮小/全体表示トグル ----
-        _compact_view = st.toggle(
-            "縮小表示",
-            value=False,
-            key="songs_compact_view",
-            help="表を縮小表示します。右上 ⛶ で全画面表示できます。",
-        )
-        _table_height = 260 if _compact_view else 560
-
-        # 反映ボタン後の成功メッセージ（st.rerun() をまたいで表示するため session_state 経由）
+        # ---- 申告フォーマット プレビュー（提出用・イベント行単位）----
+        # 反映ボタン後の成功メッセージ
         if "_apply_msg" in st.session_state:
             st.success(st.session_state.pop("_apply_msg"))
 
-        # ---- data_editor ----
-        edited_df = st.data_editor(
-            filtered_df,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            disabled=disabled_cols,
-            height=_table_height,
-            column_config={
-                "No": st.column_config.NumberColumn("No", width="small"),
-                "管理番号種別": st.column_config.TextColumn("管理番号種別", width="medium"),
-                "元管理番号": st.column_config.TextColumn("元管理番号", width="medium"),
-                "ライブラリ盤番号": st.column_config.TextColumn("ライブラリ盤番号", width="medium"),
-                "トラック番号": st.column_config.TextColumn("トラック番号", width="small"),
-                "曲名": st.column_config.TextColumn("曲名", width="large"),
-                "イベント名": st.column_config.TextColumn("イベント名", width="large"),
-                "WAV照合ステータス": st.column_config.TextColumn("WAV照合ステータス", width="medium"),
-                "WAVフル尺": st.column_config.TextColumn("WAVフル尺", width="small"),
-                "使用形態": st.column_config.SelectboxColumn(
-                    "使用形態",
-                    options=["通常", "テーマ", "背景", "フィラー"],
-                    width="small",
-                ),
-                "音源区分": st.column_config.SelectboxColumn(
-                    "音源区分",
-                    options=["CD", "生"],
-                    width="small",
-                ),
-                "I/V区分": st.column_config.SelectboxColumn(
-                    "I/V区分",
-                    options=["", "インスト", "ヴォーカル"],
-                    width="small",
-                ),
-                "邦洋区分": st.column_config.SelectboxColumn(
-                    "邦洋区分",
-                    options=["", "邦楽", "洋楽"],
-                    width="small",
-                ),
-                "原訳詞区分": st.column_config.SelectboxColumn(
-                    "原訳詞区分",
-                    options=["", "原詞", "訳詞"],
-                    width="small",
-                ),
-                "編曲者": st.column_config.TextColumn("編曲者", width="medium"),
-                "訳詞者": st.column_config.TextColumn("訳詞者", width="medium"),
-                "レコード会社名": st.column_config.TextColumn("レコード会社名", width="medium"),
-                "自社楽曲ID": st.column_config.TextColumn("自社楽曲ID", width="medium"),
-                "確認ステータス": st.column_config.SelectboxColumn(
-                    "確認ステータス",
-                    options=CONFIRM_STATUS_OPTIONS,
-                    width="medium",
-                ),
-                "JASRAC作品コード": st.column_config.TextColumn("JASRAC作品コード", width="medium"),
-                "NexTone管理番号": st.column_config.TextColumn("NexTone管理番号", width="medium"),
-                "CD番号": st.column_config.TextColumn("CD番号", width="medium"),
-                "CD名":   st.column_config.TextColumn("CD名（アルバムタイトル）", width="large"),
-                "委任者": st.column_config.SelectboxColumn(
-                    "委任者",
-                    options=["", "委任者", "非委任者"],
-                    width="small",
-                ),
-                "メモ": st.column_config.TextColumn("メモ", width="large"),
-            },
-            key="songs_editor",
-        )
-
-        # 編集内容をセッション状態に反映（フィルター後の行のみ更新）
-        if edited_df is not None:
-            for col in EDITABLE_COLS:
-                if col in edited_df.columns:
-                    st.session_state.songs_df.loc[filtered_df.index, col] = (
-                        edited_df[col].values
-                    )
-
-        # ---- 申告フォーマット プレビュー（提出用・イベント行単位）----
         _shinkok_songs  = st.session_state.songs_df
         _shinkok_events = st.session_state.events_df
         _shinkok_df: pd.DataFrame | None = None
         if _shinkok_events is not None and len(_shinkok_events) > 0:
             _shinkok_df = build_shinkok_df(_shinkok_songs, _shinkok_events)
             _preview_cols = [c for c in _shinkok_df.columns if c not in {"トラック", "START TIME", "使用尺"}]
-            with st.expander(
-                f"📋 申告フォーマット プレビュー（提出用・{len(_shinkok_df)} 行 ／ {_shinkok_songs['イベント名'].nunique()} 曲）",
-                expanded=False,
-            ):
-                st.caption("イベント単位（1行 per 使用箇所）。右上 ⛶ で全画面表示。")
-                st.dataframe(
-                    _shinkok_df[_preview_cols],
+            st.caption(f"申告フォーマット：{len(_shinkok_df)} 行 ／ {_shinkok_songs['イベント名'].nunique()} 曲　右上 ⛶ で全画面表示")
+            st.dataframe(
+                _shinkok_df[_preview_cols],
+                use_container_width=True,
+                hide_index=True,
+                height=500,
+                column_config={
+                    "使用時間（分）": st.column_config.NumberColumn("分", width="small", format="%d"),
+                    "使用時間（秒）": st.column_config.NumberColumn("秒", width="small", format="%d"),
+                    "使用形態":      st.column_config.TextColumn("使用形態", width="small"),
+                    "音源区分":      st.column_config.TextColumn("音源区分", width="small"),
+                    "I/V区分":      st.column_config.TextColumn("I/V区分",  width="small"),
+                    "邦・洋区分":    st.column_config.TextColumn("邦・洋区分", width="small"),
+                    "原・訳詞区分":  st.column_config.TextColumn("原・訳詞区分", width="small"),
+                    "確認ステータス": st.column_config.TextColumn("確認ステータス", width="medium"),
+                    "委任者":        st.column_config.TextColumn("委任者", width="small"),
+                    "CD名":          st.column_config.TextColumn("CD名", width="medium"),
+                },
+            )
+            _sh_dl_col, _sh_gap = st.columns([2, 3])
+            with _sh_dl_col:
+                _shinkok_csv = _shinkok_df[_preview_cols].to_csv(index=False, encoding="utf-8-sig")
+                st.download_button(
+                    label="⬇️ 申告フォーマット CSV",
+                    data=_shinkok_csv.encode("utf-8-sig"),
+                    file_name="申告フォーマット.csv",
+                    mime="text/csv",
                     use_container_width=True,
-                    hide_index=True,
-                    height=400,
-                    column_config={
-                        "使用時間（分）": st.column_config.NumberColumn("分", width="small", format="%d"),
-                        "使用時間（秒）": st.column_config.NumberColumn("秒", width="small", format="%d"),
-                        "使用形態":      st.column_config.TextColumn("使用形態", width="small"),
-                        "音源区分":      st.column_config.TextColumn("音源区分", width="small"),
-                        "I/V区分":      st.column_config.TextColumn("I/V区分",  width="small"),
-                        "邦・洋区分":    st.column_config.TextColumn("邦・洋区分", width="small"),
-                        "原・訳詞区分":  st.column_config.TextColumn("原・訳詞区分", width="small"),
-                        "確認ステータス": st.column_config.SelectboxColumn(
-                            "確認ステータス",
-                            options=CONFIRM_STATUS_OPTIONS,
-                            width="medium",
-                        ),
-                        "委任者":        st.column_config.TextColumn("委任者", width="small"),
-                        "CD名":          st.column_config.TextColumn("CD名", width="medium"),
-                    },
                 )
-                _sh_dl_col, _sh_gap = st.columns([2, 3])
-                with _sh_dl_col:
-                    _shinkok_csv = _shinkok_df[_preview_cols].to_csv(index=False, encoding="utf-8-sig")
-                    st.download_button(
-                        label="⬇️ 申告フォーマット CSV",
-                        data=_shinkok_csv.encode("utf-8-sig"),
-                        file_name="申告フォーマット.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    )
 
 
 # =====================================================================

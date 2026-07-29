@@ -216,7 +216,13 @@ def build_shinkok_df(songs_df: pd.DataFrame, events_df: pd.DataFrame) -> pd.Data
         merged["使用時間（秒）"] = _times.apply(lambda x: x[1])
 
     out_cols = [c for c in _SHINKOK_ORDER if c in merged.columns]
-    result = merged[out_cols].reset_index(drop=True)
+    result = merged[out_cols]
+
+    # IN タイム昇順ソート（START TIME が "HH:MM:SS.xx" 形式の文字列でも辞書順で正しく並ぶ）
+    if "START TIME" in result.columns:
+        result = result.sort_values("START TIME", kind="stable").reset_index(drop=True)
+    else:
+        result = result.reset_index(drop=True)
 
     # 使用時間（分・秒）を整数型に
     for col in _SHINKOK_INT_COLS:
