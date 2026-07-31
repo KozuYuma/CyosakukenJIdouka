@@ -2010,6 +2010,12 @@ with tabs[0]:
                 )
                 _mf_title_val = term_candidates[_mf_term_opts.index(_mf_term_sel)][1]
             with _mf_s2:
+                # 他セクション（パイプライン等）から著作者名を流し込む場合は
+                # ウィジェット生成「前」のここで反映する
+                # （生成後に session_state を書き換えると StreamlitAPIException）
+                _mf_author_pending = st.session_state.pop(f"mf_author_pending_{selected_no}", None)
+                if _mf_author_pending is not None:
+                    st.session_state[f"mf_author_{selected_no}"] = _mf_author_pending
                 _mf_author_val = st.text_input(
                     "著作者名（任意・絞り込み用）",
                     value="",
@@ -2999,7 +3005,9 @@ with tabs[0]:
                                             _d = _fetch_detail(item.get("_detail_url", ""))
                                         st.session_state[_detail_key] = _d
                                         if _d.get("作曲者"):
-                                            st.session_state[f"mf_author_{selected_no}"] = _d["作曲者"].strip()
+                                            # MINC個別検索の著作者欄はこの時点で生成済みのため
+                                            # 直接代入せず、次回の描画時に反映させる
+                                            st.session_state[f"mf_author_pending_{selected_no}"] = _d["作曲者"].strip()
                                         if _d.get("error"):
                                             st.error(f"詳細取得エラー: {_d['error']}")
                                         elif not _d.get("作曲者") and not _d.get("作詞者"):
