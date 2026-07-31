@@ -383,7 +383,14 @@ def _render_cd_results(
             f"**🎵 収録曲（{len(_cp_tracks)}曲）** — "
             f"{_cp_det.get('CD商品タイトル', '') or _cp_item.get('CD商品タイトル', '')}"
         )
-        st.dataframe(
+        # 行クリック → 下の「この曲を申告フォーマットに反映」に連動（CD一覧と同じ操作）
+        _cp_tsel_key  = f"cpanel_tsel_{key_prefix}"
+        _cp_tlast_key = f"cpanel_tblrow_trk_{key_prefix}"
+        if not isinstance(st.session_state.get(_cp_tsel_key), int) or \
+                not (0 <= st.session_state.get(_cp_tsel_key, -1) < len(_cp_tracks)):
+            st.session_state[_cp_tsel_key] = 0
+
+        _cp_tev = st.dataframe(
             pd.DataFrame([
                 {
                     "曲順":            t.get("曲順", ""),
@@ -400,7 +407,23 @@ def _render_cd_results(
             use_container_width=True,
             hide_index=True,
             height=min(400, 40 + 35 * len(_cp_tracks)),
+            on_select="rerun",
+            selection_mode="single-row",
+            key=f"cpanel_ttbl_{key_prefix}",
         )
+        st.caption("表の行をクリックすると、下の「この曲を申告フォーマットに反映」に反映されます。")
+
+        try:
+            _cp_trows = list(_cp_tev.selection.rows)
+        except AttributeError:
+            _cp_trows = list((_cp_tev or {}).get("selection", {}).get("rows", []))
+        if _cp_trows:
+            _cp_trow = int(_cp_trows[0])
+            if 0 <= _cp_trow < len(_cp_tracks) and st.session_state.get(_cp_tlast_key) != _cp_trow:
+                st.session_state[_cp_tlast_key] = _cp_trow
+                st.session_state[_cp_tsel_key] = _cp_trow
+        else:
+            st.session_state.pop(_cp_tlast_key, None)
 
         _cp_tsel = st.selectbox(
             "この曲を申告フォーマットに反映",
@@ -409,9 +432,15 @@ def _render_cd_results(
                 f"{_cp_tracks[i].get('曲順', '')}. {_cp_tracks[i].get('曲名', '')}"
                 f"（{_cp_tracks[i].get('収録時間', '')}／{_cp_tracks[i].get('IV', '')}）"
             ),
-            key=f"cpanel_tsel_{key_prefix}",
+            key=_cp_tsel_key,
         )
         _cp_trk = _cp_tracks[_cp_tsel]
+        _cp_want_cred = st.checkbox(
+            "作詞者・作曲者もMINCから取得して反映する（作品詳細に1回アクセスします）",
+            value=True,
+            key=f"cpanel_tcred_{key_prefix}",
+            help="収録曲一覧には作家名が載っていないため、JASRAC作品コードから作品詳細を引いて補います。",
+        )
         if st.button(
             "✅ この曲＋CD情報を反映",
             key=f"cpanel_tapply_{key_prefix}",
@@ -428,12 +457,40 @@ def _render_cd_results(
                 "委任者":           _cp_det.get("集中管理", ""),
                 "I/V区分":          {"I": "インスト", "V": "ヴォーカル"}.get(_cp_trk.get("IV", ""), ""),
             }
+
+            # ── 作家名（収録曲一覧には無いので作品詳細から補う）──────────────
+            _cp_cred_msg = ""
+            if _cp_want_cred:
+                _cp_tjcd = re.sub(r"[-\s]", "", _cp_trk.get("JASRAC作品コード", "")).upper()
+                _cp_tncd = re.sub(r"[-\s]", "", _cp_trk.get("NexTone作品コード", "")).upper()
+                _cp_rjcd = re.sub(r"[-\s]", "", str(_cp_res.get("作品コード", ""))).upper()
+                if _cp_tjcd and _cp_tjcd == _cp_rjcd:
+                    # いま検索している作品そのもの → 取得済みの情報を使う（通信なし）
+                    _cp_cred = {k: _cp_res.get(k, "") for k in ("作曲者", "作詞者", "編曲者", "訳詞者")}
+                elif _cp_tjcd or _cp_tncd:
+                    with st.spinner("作詞者・作曲者を取得中..."):
+                        try:
+                            _cp_cred = _get_mf_client().get_detail(
+                                f"jcd={_cp_tjcd}&ncd={_cp_tncd}&refer=music/list-product"
+                            )
+                        except MusicForestError as _cp_ce:
+                            _cp_cred = {}
+                            _cp_cred_msg = f"（作家名の取得に失敗: {_cp_ce}）"
+                else:
+                    _cp_cred = {}
+                    _cp_cred_msg = "（作品コードが無いため作家名は取得できません）"
+                for _cp_ck in ("作曲者", "作詞者", "編曲者", "訳詞者"):
+                    if (_cp_cred or {}).get(_cp_ck):
+                        _cp_tapply[_cp_ck] = _cp_cred[_cp_ck]
+
             for _cp_col, _cp_val in _cp_tapply.items():
                 if _cp_val and _cp_col in st.session_state.songs_df.columns:
                     st.session_state.songs_df.at[row_idx, _cp_col] = _cp_val
             st.session_state["_apply_msg"] = (
                 f"{_cp_trk.get('曲順', '')}曲目「{_cp_trk.get('曲名', '')}」"
                 f"（{_cp_trk.get('収録時間', '')}）とCD情報を反映しました。"
+                + (f" 作曲: {_cp_tapply.get('作曲者', '')}" if _cp_tapply.get("作曲者") else "")
+                + _cp_cred_msg
             )
             st.session_state.pop("songs_editor", None)
             st.rerun()
