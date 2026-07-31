@@ -184,6 +184,16 @@ def _cp_current_houyo(row_idx: int) -> str:
     return "" if _v.lower() in ("", "nan", "none") else _v
 
 
+def _cp_row_jcd(row_idx: int) -> str:
+    """songs_df の現在のJASRAC作品コード（ハイフン・空白を除いた比較用）。"""
+    if "JASRAC作品コード" not in st.session_state.songs_df.columns:
+        return ""
+    _v = str(st.session_state.songs_df.at[row_idx, "JASRAC作品コード"]).strip()
+    if _v.lower() in ("", "nan", "none"):
+        return ""
+    return re.sub(r"[-\s]", "", _v).upper()
+
+
 def _render_cd_results(
     _cp_res: dict | None, row_idx: int, key_prefix: str, artist_filter: str = ""
 ) -> None:
@@ -372,9 +382,13 @@ def _render_cd_results(
             ).strip()
             if _cp_iv_str and not _cp_cur_iv:
                 st.session_state.songs_df.at[row_idx, "I/V区分"] = _cp_iv_str
-            # 邦洋区分（JASRACコード2文字目）— 空欄のときだけ補う
-            _cp_hy0 = _infer_houyo(re.sub(r"[-\s]", "", str(_cp_res.get("作品コード", ""))))
-            if _cp_hy0 and not _cp_current_houyo(row_idx) and "邦洋区分" in st.session_state.songs_df.columns:
+            # 邦洋区分（JASRACコード2文字目）
+            # 行のJASRACコードと違う作品を反映する場合は上書きする
+            _cp_hy0_src = re.sub(r"[-\s]", "", str(_cp_res.get("作品コード", ""))).upper()
+            _cp_hy0 = _infer_houyo(_cp_hy0_src)
+            if _cp_hy0 and "邦洋区分" in st.session_state.songs_df.columns and (
+                not _cp_current_houyo(row_idx) or _cp_hy0_src != _cp_row_jcd(row_idx)
+            ):
                 st.session_state.songs_df.at[row_idx, "邦洋区分"] = _cp_hy0
             st.session_state["_apply_msg"] = (
                 f"CD番号・レコード会社名を反映しました。（{_cp_item.get('品番', '')}）"
@@ -507,12 +521,17 @@ def _render_cd_results(
                     if (_cp_cred or {}).get(_cp_ck):
                         _cp_tapply[_cp_ck] = _cp_cred[_cp_ck]
 
-            # 邦洋区分（JASRACコード2文字目: 数字→邦楽、英字→洋楽）— 空欄のときだけ補う
-            _cp_hy = _infer_houyo(
+            # 邦洋区分（JASRACコード2文字目: 数字→邦楽、英字→洋楽）
+            # 別の作品を反映するときは古い値が残ると誤りになるので上書きする。
+            # 同じ作品を反映し直すときは、手で直した値を潰さないよう空欄のときだけ補う。
+            _cp_hy_src = (
                 re.sub(r"[-\s]", "", _cp_trk.get("JASRAC作品コード", ""))
                 or re.sub(r"[-\s]", "", str(_cp_res.get("作品コード", "")))
-            )
-            if _cp_hy and not _cp_current_houyo(row_idx):
+            ).upper()
+            _cp_hy = _infer_houyo(_cp_hy_src)
+            if _cp_hy and (
+                not _cp_current_houyo(row_idx) or _cp_hy_src != _cp_row_jcd(row_idx)
+            ):
                 _cp_tapply["邦洋区分"] = _cp_hy
 
             for _cp_col, _cp_val in _cp_tapply.items():
