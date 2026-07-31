@@ -1745,7 +1745,7 @@ with tabs[0]:
                     _name2 = str(_sm2.get("曲名", _sel_ev) or _sel_ev).strip() or _sel_ev
                     _status2 = str(_sm2.get("確認ステータス", "未調査") or "未調査").strip()
                     _sel_label2 = f"{_no2}. [{_status2}] {_sel_ev}"
-                    _gbc1, _gbc2, _gbc3 = st.columns([2.5, 2.5, 5])
+                    _gbc1, _gbc2, _gbc3, _gbc4 = st.columns([2.5, 2.5, 2.5, 3.5])
                     with _gbc1:
                         if st.button("🌲 MINC で調査", key="shin_goto_minc", use_container_width=True):
                             st.session_state["search_song_select"] = _sel_label2
@@ -1757,6 +1757,11 @@ with tabs[0]:
                             st.session_state["_scroll_target"] = "sec-pipeline"
                             st.rerun()
                     with _gbc3:
+                        if st.button("💿 CD情報を検索", key="shin_goto_cds", use_container_width=True):
+                            st.session_state["search_song_select"] = _sel_label2
+                            st.session_state["_scroll_target"] = "sec-cd-search"
+                            st.rerun()
+                    with _gbc4:
                         st.caption(f"📍 **{_name2}** [{_status2}]")
 
             # 直接編集・CSV ダウンロード
@@ -1912,6 +1917,12 @@ with tabs[0]:
                             background:#1565C0;color:#fff;border-radius:6px;
                             text-decoration:none;font-size:13px;font-weight:600">
                     🌲 MINC 楽曲検索（個別）
+                  </a>
+                  <a href="#sec-cd-search"
+                     style="flex:1;text-align:center;padding:7px 4px;
+                            background:#1565C0;color:#fff;border-radius:6px;
+                            text-decoration:none;font-size:13px;font-weight:600">
+                    💿 CD情報検索
                   </a>
                   <a href="#sec-pipeline"
                      style="flex:1;text-align:center;padding:7px 4px;
