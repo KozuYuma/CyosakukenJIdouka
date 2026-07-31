@@ -464,21 +464,33 @@ def _render_cd_results(
                 _cp_tjcd = re.sub(r"[-\s]", "", _cp_trk.get("JASRAC作品コード", "")).upper()
                 _cp_tncd = re.sub(r"[-\s]", "", _cp_trk.get("NexTone作品コード", "")).upper()
                 _cp_rjcd = re.sub(r"[-\s]", "", str(_cp_res.get("作品コード", ""))).upper()
+                _cp_cred: dict = {}
+                # 検索中の作品と同じコードなら、取得済みの情報を先に使う（通信なし）。
+                # ただし曲名を指定して検索した場合は作家名が空なので、その時は取得しに行く。
                 if _cp_tjcd and _cp_tjcd == _cp_rjcd:
-                    # いま検索している作品そのもの → 取得済みの情報を使う（通信なし）
-                    _cp_cred = {k: _cp_res.get(k, "") for k in ("作曲者", "作詞者", "編曲者", "訳詞者")}
-                elif _cp_tjcd or _cp_tncd:
-                    with st.spinner("作詞者・作曲者を取得中..."):
-                        try:
-                            _cp_cred = _get_mf_client().get_detail(
-                                f"jcd={_cp_tjcd}&ncd={_cp_tncd}&refer=music/list-product"
+                    _cp_cred = {
+                        k: _cp_res.get(k, "")
+                        for k in ("作曲者", "作詞者", "編曲者", "訳詞者")
+                        if _cp_res.get(k)
+                    }
+                if not _cp_cred:
+                    if _cp_tjcd or _cp_tncd:
+                        with st.spinner("作詞者・作曲者を取得中..."):
+                            try:
+                                _cp_cred = _get_mf_client().get_detail(
+                                    f"jcd={_cp_tjcd}&ncd={_cp_tncd}&refer=music/list-product"
+                                ) or {}
+                            except MusicForestError as _cp_ce:
+                                _cp_cred_msg = f"（作家名の取得に失敗: {_cp_ce}）"
+                        if _cp_cred.get("error"):
+                            _cp_cred_msg = f"（作家名の取得に失敗: {_cp_cred['error']}）"
+                        elif not any(_cp_cred.get(k) for k in ("作曲者", "作詞者")):
+                            _cp_cred_msg = (
+                                f"（MINCの作品詳細に作家名がありませんでした"
+                                f"／コード {_cp_tjcd or _cp_tncd}）"
                             )
-                        except MusicForestError as _cp_ce:
-                            _cp_cred = {}
-                            _cp_cred_msg = f"（作家名の取得に失敗: {_cp_ce}）"
-                else:
-                    _cp_cred = {}
-                    _cp_cred_msg = "（作品コードが無いため作家名は取得できません）"
+                    else:
+                        _cp_cred_msg = "（作品コードが無いため作家名は取得できません）"
                 for _cp_ck in ("作曲者", "作詞者", "編曲者", "訳詞者"):
                     if (_cp_cred or {}).get(_cp_ck):
                         _cp_tapply[_cp_ck] = _cp_cred[_cp_ck]
