@@ -176,6 +176,14 @@ def _show_cd_panel(
     _render_cd_results(st.session_state.get(_cp_res_key), row_idx, key_prefix, artist)
 
 
+def _cp_current_houyo(row_idx: int) -> str:
+    """songs_df の現在の邦洋区分（空扱いの値は "" として返す）。"""
+    if "邦洋区分" not in st.session_state.songs_df.columns:
+        return ""
+    _v = str(st.session_state.songs_df.at[row_idx, "邦洋区分"]).strip()
+    return "" if _v.lower() in ("", "nan", "none") else _v
+
+
 def _render_cd_results(
     _cp_res: dict | None, row_idx: int, key_prefix: str, artist_filter: str = ""
 ) -> None:
@@ -364,6 +372,10 @@ def _render_cd_results(
             ).strip()
             if _cp_iv_str and not _cp_cur_iv:
                 st.session_state.songs_df.at[row_idx, "I/V区分"] = _cp_iv_str
+            # 邦洋区分（JASRACコード2文字目）— 空欄のときだけ補う
+            _cp_hy0 = _infer_houyo(re.sub(r"[-\s]", "", str(_cp_res.get("作品コード", ""))))
+            if _cp_hy0 and not _cp_current_houyo(row_idx) and "邦洋区分" in st.session_state.songs_df.columns:
+                st.session_state.songs_df.at[row_idx, "邦洋区分"] = _cp_hy0
             st.session_state["_apply_msg"] = (
                 f"CD番号・レコード会社名を反映しました。（{_cp_item.get('品番', '')}）"
             )
@@ -494,6 +506,14 @@ def _render_cd_results(
                 for _cp_ck in ("作曲者", "作詞者", "編曲者", "訳詞者"):
                     if (_cp_cred or {}).get(_cp_ck):
                         _cp_tapply[_cp_ck] = _cp_cred[_cp_ck]
+
+            # 邦洋区分（JASRACコード2文字目: 数字→邦楽、英字→洋楽）— 空欄のときだけ補う
+            _cp_hy = _infer_houyo(
+                re.sub(r"[-\s]", "", _cp_trk.get("JASRAC作品コード", ""))
+                or re.sub(r"[-\s]", "", str(_cp_res.get("作品コード", "")))
+            )
+            if _cp_hy and not _cp_current_houyo(row_idx):
+                _cp_tapply["邦洋区分"] = _cp_hy
 
             for _cp_col, _cp_val in _cp_tapply.items():
                 if _cp_val and _cp_col in st.session_state.songs_df.columns:
