@@ -184,9 +184,13 @@ def _render_cd_results(
         return
     if _cp_res.get("error") and not _cp_res.get("cds"):
         st.error(f"CD検索エラー: {_cp_res['error']}")
+        if _cp_res.get("search_url"):
+            st.caption(f"🔗 MINCで直接開く: [{_cp_res['search_url']}]({_cp_res['search_url']})")
         return
     if not _cp_res.get("cds"):
         st.warning("収録CDが見つかりませんでした。")
+        if _cp_res.get("search_url"):
+            st.caption(f"🔗 MINCで直接開く: [{_cp_res['search_url']}]({_cp_res['search_url']})")
         return
     if _cp_res.get("error"):
         st.warning(f"⚠️ 一部エラー: {_cp_res['error']}")
@@ -315,20 +319,24 @@ def _render_cd_results(
     _cp_b1, _cp_b2 = st.columns(2)
     with _cp_b1:
         if st.button(
-            "💿 委任者区分を取得",
+            "🎵 収録曲を表示（このCDから曲を逆引き）",
             key=f"cpanel_fetch_{key_prefix}",
             use_container_width=True,
-            disabled=not (_cp_a and _cp_t),
-            help="CD商品リストからは委任者区分が取得できないCDもあります",
+            disabled=not _cp_a,
+            help="CD商品詳細から全収録曲（曲順・曲名・IV・収録時間・ISRC・JASRACコード）と委任者区分を取得します",
         ):
-            with st.spinner("CD詳細を取得中..."):
+            with st.spinner("収録曲を取得中..."):
                 try:
-                    _cp_fd = _get_mf_client().fetch_product_detail(_cp_a, _cp_t)
+                    _cp_fd = _get_mf_client().fetch_track_list(_cp_a, _cp_t)
                     st.session_state[_cp_det_key] = _cp_fd
                     if _cp_fd.get("error"):
                         st.toast(f"エラー: {_cp_fd['error']}", icon="❌")
                     else:
-                        st.toast(f"委任者={_cp_fd.get('集中管理', '(なし)')}", icon="✅")
+                        st.toast(
+                            f"{len(_cp_fd.get('tracks', []))}曲を取得  "
+                            f"委任者={_cp_fd.get('集中管理', '(なし)')}",
+                            icon="✅",
+                        )
                 except MusicForestError as _cp_fe:
                     st.toast(f"エラー: {_cp_fe}", icon="❌")
     with _cp_b2:
@@ -359,6 +367,79 @@ def _render_cd_results(
             )
             st.session_state.pop("songs_editor", None)
             st.rerun()
+
+    # ── 収録曲（CD → 曲の逆引き）────────────────────────────────────────
+    _cp_tracks = _cp_det.get("tracks") or []
+    if _cp_det.get("error") and not _cp_tracks:
+        st.warning(f"収録曲を取得できませんでした: {_cp_det['error']}")
+    if _cp_tracks:
+        st.markdown(
+            f"**🎵 収録曲（{len(_cp_tracks)}曲）** — "
+            f"{_cp_det.get('CD商品タイトル', '') or _cp_item.get('CD商品タイトル', '')}"
+        )
+        st.dataframe(
+            pd.DataFrame([
+                {
+                    "曲順":            t.get("曲順", ""),
+                    "曲名":            t.get("曲名", ""),
+                    "IV":             t.get("IV", ""),
+                    "収録時間":         t.get("収録時間", ""),
+                    "アーティスト":     t.get("アーティスト", ""),
+                    "ISRC":           t.get("ISRC", ""),
+                    "JASRAC作品コード":  t.get("JASRAC作品コード", ""),
+                    "NexTone作品コード": t.get("NexTone作品コード", ""),
+                }
+                for t in _cp_tracks
+            ]),
+            use_container_width=True,
+            hide_index=True,
+            height=min(400, 40 + 35 * len(_cp_tracks)),
+        )
+
+        _cp_tsel = st.selectbox(
+            "この曲を申告フォーマットに反映",
+            options=list(range(len(_cp_tracks))),
+            format_func=lambda i: (
+                f"{_cp_tracks[i].get('曲順', '')}. {_cp_tracks[i].get('曲名', '')}"
+                f"（{_cp_tracks[i].get('収録時間', '')}／{_cp_tracks[i].get('IV', '')}）"
+            ),
+            key=f"cpanel_tsel_{key_prefix}",
+        )
+        _cp_trk = _cp_tracks[_cp_tsel]
+        if st.button(
+            "✅ この曲＋CD情報を反映",
+            key=f"cpanel_tapply_{key_prefix}",
+            use_container_width=True,
+            disabled=not _cp_trk.get("曲名"),
+        ):
+            _cp_tapply = {
+                "曲名":             _cp_trk.get("曲名", ""),
+                "JASRAC作品コード":  _cp_trk.get("JASRAC作品コード", ""),
+                "アーティスト":      _cp_trk.get("アーティスト", ""),
+                "CD番号":           _cp_item.get("品番", "") or _cp_det.get("品番", ""),
+                "CD名":             _cp_det.get("CD商品タイトル", "") or _cp_item.get("CD商品タイトル", ""),
+                "レコード会社名":     _cp_item.get("レコード会社名", "") or _cp_det.get("レコード会社名", ""),
+                "委任者":           _cp_det.get("集中管理", ""),
+                "I/V区分":          {"I": "インスト", "V": "ヴォーカル"}.get(_cp_trk.get("IV", ""), ""),
+            }
+            for _cp_col, _cp_val in _cp_tapply.items():
+                if _cp_val and _cp_col in st.session_state.songs_df.columns:
+                    st.session_state.songs_df.at[row_idx, _cp_col] = _cp_val
+            st.session_state["_apply_msg"] = (
+                f"{_cp_trk.get('曲順', '')}曲目「{_cp_trk.get('曲名', '')}」"
+                f"（{_cp_trk.get('収録時間', '')}）とCD情報を反映しました。"
+            )
+            st.session_state.pop("songs_editor", None)
+            st.rerun()
+
+    # ── 参照したMINCのURL ───────────────────────────────────────────────
+    _cp_urls = []
+    if _cp_res.get("search_url"):
+        _cp_urls.append(f"[CD商品リスト]({_cp_res['search_url']})")
+    if _cp_item.get("detail_url"):
+        _cp_urls.append(f"[選択中のCDの商品詳細]({_cp_item['detail_url']})")
+    if _cp_urls:
+        st.caption("🔗 MINC: " + "　／　".join(_cp_urls))
 
 
 # DB 読み込み時に不足する可能性がある列とそのデフォルト値

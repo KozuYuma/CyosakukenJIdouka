@@ -405,6 +405,124 @@ class MusicForestClient:
             out["error"] = f"{type(e).__name__}: {e}"
         return out
 
+    # ---- CD → 収録曲の逆引き ---------------------------------------------
+
+    def fetch_track_list(self, album_id: str, track_id: str = "") -> dict:
+        """
+        CD商品の収録曲を全曲取得する（CDから曲を逆引きする用途）。
+
+        parts/product/detail は table.cd-detail2-track-list に
+        曲順／メドレー／曲名／IV／収録時間／アーティスト／ISRC／
+        JASRAC作品コード／NexTone作品コード／著作権管理情報 を全曲分出力する。
+
+        Returns: {
+            "CD商品タイトル": str, "品番": str, "レコード会社名": str,
+            "集中管理": str,
+            "tracks": [{"曲順","メドレー","曲名","IV","収録時間","アーティスト",
+                        "ISRC","JASRAC作品コード","NexTone作品コード","管理情報"}, ...],
+            "url": str, "error": None | str, "debug_html": str,
+        }
+        """
+        out: dict = {
+            "CD商品タイトル": "", "品番": "", "レコード会社名": "", "集中管理": "",
+            "tracks": [], "url": "", "error": None, "debug_html": "",
+        }
+        if not album_id:
+            out["error"] = "album_id が不明です"
+            return out
+
+        url = (
+            f"{BASE_URL}/parts/product/detail"
+            f"?album_id={urllib.parse.quote(str(album_id), safe='-')}"
+            f"&track_id={urllib.parse.quote(str(track_id or ''), safe='-')}"
+        )
+        out["url"] = url
+        try:
+            resp = self._get(url)
+            if "/login" in resp.url.lower():
+                out["error"] = "セッションが切れています。再ログインしてください。"
+                return out
+
+            html = resp.text
+            out["debug_html"] = html[:4000]
+            soup = BeautifulSoup(html, "lxml")
+
+            _mt = soup.select_one("h4.modal-title")
+            if _mt:
+                out["CD商品タイトル"] = _mt.get_text(strip=True)
+            _dlg = soup.select_one("span.delegation.active")
+            if _dlg:
+                out["集中管理"] = _dlg.get_text(strip=True)
+            for div in soup.select("div.detail_data div[class*='col-sm']"):
+                text = div.get_text(" ", strip=True)
+                if not out["品番"]:
+                    _m = re.match(r"品番[：:]\s*(.+)", text)
+                    if _m:
+                        out["品番"] = _m.group(1).strip()
+                if not out["レコード会社名"] and "発売会社" in text:
+                    _m2 = re.search(r"発売会社[：:]\s*([^/\n]+)", text)
+                    if _m2:
+                        out["レコード会社名"] = _m2.group(1).strip()
+
+            table = (
+                soup.select_one("table.cd-detail2-track-list")
+                or soup.select_one("table[class*='track-list']")
+            )
+            if table is None:
+                out["error"] = "収録曲テーブルが見つかりませんでした。"
+                return out
+
+            # ヘッダー行から列位置を作る（列順の変更に耐えるため）
+            hdr_row = (
+                table.select_one("thead tr")
+                or next((tr for tr in table.select("tr") if tr.find("th")), None)
+            )
+            col_map: dict[str, int] = {}
+            if hdr_row:
+                for idx, cell in enumerate(hdr_row.find_all(["th", "td"])):
+                    col_map[re.sub(r"\s+", "", cell.get_text(" ", strip=True))] = idx
+
+            def _pick(cells: list[str], *kws: str) -> str:
+                for kw in kws:
+                    for name, idx in col_map.items():
+                        if kw in name and idx < len(cells):
+                            return cells[idx]
+                return ""
+
+            for row in table.select("tr"):
+                if row.find("th"):
+                    continue
+                cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
+                if not cells:
+                    continue
+                _jcd_c = _pick(cells, "JASRAC")
+                _ncd_c = _pick(cells, "NexTone")
+                out["tracks"].append({
+                    "曲順":            _pick(cells, "曲順", "No"),
+                    "メドレー":         _pick(cells, "メドレー"),
+                    "曲名":            _pick(cells, "曲名", "タイトル"),
+                    "IV":             _pick(cells, "IV"),
+                    "収録時間":         _pick(cells, "収録時間", "時間", "尺"),
+                    "アーティスト":     _pick(cells, "アーティスト"),
+                    "ISRC":           _pick(cells, "ISRC"),
+                    "JASRAC作品コード":  "" if _jcd_c == "-" else _jcd_c,
+                    "NexTone作品コード": "" if _ncd_c == "-" else _ncd_c,
+                    "管理情報":         _pick(cells, "管理情報", "著作権"),
+                })
+
+            if not out["tracks"]:
+                out["error"] = "収録曲を取得できませんでした。"
+
+        except requests.exceptions.HTTPError as e:
+            out["error"] = f"HTTP エラー: {e}"
+        except requests.exceptions.ConnectionError:
+            out["error"] = "接続エラー: MusicForest に接続できません。"
+        except requests.exceptions.Timeout:
+            out["error"] = f"タイムアウト（{_TIMEOUT}秒）"
+        except Exception as e:
+            out["error"] = f"{type(e).__name__}: {e}"
+        return out
+
     # ---- JASRACコードでCDリスト取得 -------------------------------------
 
     def search_cds_by_jasrac(self, jcd: str, title: str = "", ncd: str = "") -> dict:
@@ -437,7 +555,7 @@ class MusicForestClient:
             "作曲者": "", "作詞者": "",
             "編曲者": "", "訳詞者": "", "ISWC": "", "アーティスト": "",
             "NexTone管理番号": "",
-            "cds": [], "error": None, "debug_html": "",
+            "cds": [], "search_url": "", "error": None, "debug_html": "",
         }
         cleaned = re.sub(r"[-\s]", "", str(jcd)).upper().strip()
         _ncd = re.sub(r"\s", "", str(ncd)).upper().strip()
@@ -489,6 +607,7 @@ class MusicForestClient:
             f"&ncd={urllib.parse.quote(_ncd, safe='-')}"
             f"&snm={urllib.parse.quote(_title)}"
         )
+        out["search_url"] = url
         try:
             resp = self._get(url)
             if "/login" in resp.url.lower():
@@ -571,6 +690,10 @@ class MusicForestClient:
                     "初回盤":          shokaiban,
                     "album_id":       album_id,
                     "track_id":       track_id,
+                    "detail_url":     (
+                        f"{BASE_URL}/parts/product/detail"
+                        f"?album_id={album_id}&track_id={track_id}" if album_id else ""
+                    ),
                     "label":          " / ".join([x for x in (hinban, cd_title) if x]) or f"CD ({album_id})",
                 })
 
