@@ -177,7 +177,7 @@ def _show_cd_panel(
 
 
 def _render_cd_results(
-    _cp_res: dict | None, row_idx: int, key_prefix: str, artist_default: str = ""
+    _cp_res: dict | None, row_idx: int, key_prefix: str, artist_filter: str = ""
 ) -> None:
     """search_cds_by_jasrac の結果（CD商品リスト全件）を一覧＋反映UIとして描画する。"""
     if not _cp_res:
@@ -201,56 +201,43 @@ def _render_cd_results(
         + f"　／　CD商品 **{_cp_res.get('件数', len(_cp_items))} 件**"
     )
 
-    # ── 絞り込み ────────────────────────────────────────────────────────
-    #   アーティスト欄は申告フォーマットのアーティスト名を初期値として入れる
-    #   （初期値が変わったら追随させる）
-    _cp_art_key  = f"cpanel_art_{key_prefix}"
-    _cp_artd_key = f"cpanel_artdef_{key_prefix}"
-    _cp_artist_default = str(artist_default or "").strip()
-    if _cp_artist_default.lower() == "nan":
-        _cp_artist_default = ""
-    if st.session_state.get(_cp_artd_key) != _cp_artist_default:
-        st.session_state[_cp_artd_key] = _cp_artist_default
-        st.session_state[_cp_art_key] = _cp_artist_default
-
-    _cp_f1, _cp_f2 = st.columns(2)
-    with _cp_f1:
-        _cp_art = st.text_input(
-            "アーティストで絞り込み",
-            key=_cp_art_key,
-            placeholder="例: EXILE（空欄なら絞り込まない）",
-            help="CD商品リストのアーティスト欄との部分一致。オムニバスは (V.A.) と表記されます。",
-        ).strip()
-    with _cp_f2:
-        _cp_q = st.text_input(
-            "キーワードで絞り込み（品番・CDタイトル・会社名など）",
-            key=f"cpanel_q_{key_prefix}",
-            placeholder="例: TOCT / ベスト / ソニー",
-        ).strip()
-
-    _cp_view = _cp_items
+    # ── 検索時に指定されたアーティストで事前に絞り込む ──────────────────────
+    #   0件になる場合（オムニバス盤は (V.A.) 表記）は全件表示にフォールバック
+    _cp_art = str(artist_filter or "").strip()
+    if _cp_art.lower() == "nan":
+        _cp_art = ""
     if _cp_art:
         _cp_artl = _cp_art.lower()
-        _cp_view = [c for c in _cp_view if _cp_artl in c.get("アーティスト", "").lower()]
+        _cp_hit = [c for c in _cp_items if _cp_artl in c.get("アーティスト", "").lower()]
+        if _cp_hit:
+            st.caption(f"🎤 アーティスト「{_cp_art}」で絞り込み: **{len(_cp_hit)}** / {len(_cp_items)} 件")
+            _cp_items = _cp_hit
+        else:
+            st.caption(
+                f"🎤 アーティスト「{_cp_art}」に一致するCDが無いため全件表示しています"
+                "（オムニバス盤は (V.A.) 表記です）"
+            )
+
+    # ── 絞り込み（品番／CD商品タイトル／アーティスト／会社名の部分一致）────────
+    _cp_q = st.text_input(
+        "絞り込み（品番・CDタイトル・アーティスト・会社名）",
+        key=f"cpanel_q_{key_prefix}",
+        placeholder="例: TOCT / ベスト / チューリップ",
+    ).strip()
     if _cp_q:
         _cp_ql = _cp_q.lower()
         _cp_view = [
-            c for c in _cp_view
+            c for c in _cp_items
             if _cp_ql in " ".join([
                 c.get("品番", ""), c.get("CD商品タイトル", ""),
                 c.get("アーティスト", ""), c.get("発売会社", ""), c.get("販売会社", ""),
             ]).lower()
         ]
-
-    if _cp_art or _cp_q:
-        st.caption(f"絞り込み結果: **{len(_cp_view)}** / {len(_cp_items)} 件")
+    else:
+        _cp_view = _cp_items
 
     if not _cp_view:
-        _cp_cond = "／".join([x for x in (_cp_art, _cp_q) if x])
-        st.info(
-            f"「{_cp_cond}」に一致するCDはありません。"
-            "（オムニバス盤はアーティストが (V.A.) 表記のため、アーティスト欄を空にすると出てきます）"
-        )
+        st.info(f"「{_cp_q}」に一致するCDはありません。")
         return
 
     # ── 全件一覧（行クリックで下の「反映するCDを選択」に連動）──────────────
@@ -2384,7 +2371,6 @@ with tabs[0]:
                             _show_cd_panel(
                                 _mf_jcd, row_idx, f"mf_{selected_no}_{_mf_i}",
                                 title=_mf_item.get("作品名", ""),
-                                artist=_mf_item.get("アーティスト", "") or str(row.get("アーティスト", "")).strip(),
                             )
 
                         st.link_button(
@@ -2588,7 +2574,10 @@ with tabs[0]:
             _cds_title_default = str(row.get("曲名", "")).strip()
             _cds_title_default = "" if _cds_title_default.lower() == "nan" else _cds_title_default
 
-            _cds_c1, _cds_c2 = st.columns(2)
+            _cds_artist_default = str(row.get("アーティスト", "")).strip()
+            _cds_artist_default = "" if _cds_artist_default.lower() == "nan" else _cds_artist_default
+
+            _cds_c1, _cds_c2, _cds_c3 = st.columns(3)
             with _cds_c1:
                 _cds_jcd_input = st.text_input(
                     "JASRACコード",
@@ -2603,6 +2592,18 @@ with tabs[0]:
                     value=_cds_title_default,
                     key=f"cds_title_{selected_no}",
                     placeholder="曲名で検索",
+                )
+            with _cds_c3:
+                _cds_artist_input = st.text_input(
+                    "アーティスト（任意・絞り込み用）",
+                    value=_cds_artist_default,
+                    key=f"cds_artist_{selected_no}",
+                    placeholder="例: EXILE",
+                    help=(
+                        "CD商品リストをこのアーティストで絞り込みます。"
+                        "曲名検索のときは、同名曲から作品を選ぶ手がかりにも使います。"
+                        "一致が0件のときは全件表示します（オムニバス盤は (V.A.) 表記）。"
+                    ),
                 )
 
             if st.button("🔍 CDリストを検索", key=f"cds_search_{selected_no}", type="primary", use_container_width=True):
@@ -2619,10 +2620,18 @@ with tabs[0]:
                             if not _cds_term:
                                 _cds_raw = {"cds": [], "error": "JASRACコードまたは曲名を入力してください。"}
                             else:
-                                # 曲名のみ → まず作品を検索し、先頭ヒットのJASRACコードで
+                                # 曲名のみ → まず作品を検索し、ヒットしたJASRACコードで
                                 #            CD商品リスト（全件）を取得する
                                 _cds_sr = _cds_client.search(_cds_term)
-                                _cds_first = (_cds_sr.get("results") or [{}])[0]
+                                _cds_hits = _cds_sr.get("results") or [{}]
+                                # アーティスト指定があれば、それに一致する作品を優先する
+                                _cds_ai = _cds_artist_input.strip().lower()
+                                if _cds_ai:
+                                    _cds_hits = [
+                                        h for h in _cds_hits
+                                        if _cds_ai in str(h.get("アーティスト", "")).lower()
+                                    ] or _cds_hits
+                                _cds_first = _cds_hits[0]
                                 _cds_fjcd = str(_cds_first.get("JASRAC作品コード", "")).strip()
                                 if _cds_fjcd:
                                     _cds_raw = _cds_client.search_cds_by_jasrac(
@@ -2638,6 +2647,8 @@ with tabs[0]:
                                             or f"「{_cds_term}」に一致する作品が見つかりませんでした。"
                                         ),
                                     }
+                        # 検索時点のアーティスト指定を結果と一緒に保持する
+                        _cds_raw["_artist_filter"] = _cds_artist_input.strip()
                         st.session_state[f"cds_results_{selected_no}"] = _cds_raw
                         for _cds_ck in list(st.session_state.keys()):
                             if _cds_ck.startswith(f"cds_detail_{selected_no}_"):
@@ -2645,11 +2656,12 @@ with tabs[0]:
                     except MusicForestError as _cds_ce:
                         st.session_state[f"cds_results_{selected_no}"] = {"cds": [], "error": str(_cds_ce)}
 
+            _cds_res_cur = st.session_state.get(f"cds_results_{selected_no}")
             _render_cd_results(
-                st.session_state.get(f"cds_results_{selected_no}"),
+                _cds_res_cur,
                 row_idx,
                 f"cds_{selected_no}",
-                artist_default=str(row.get("アーティスト", "")).strip(),
+                artist_filter=(_cds_res_cur or {}).get("_artist_filter", ""),
             )
 
         if selected_label:
@@ -3098,7 +3110,6 @@ with tabs[0]:
                                     _show_cd_panel(
                                         _pipj_jcd, row_idx, f"pipj_{selected_no}_{i}",
                                         title=item.get("作品名", ""),
-                                        artist=item.get("アーティスト", "") or str(row.get("アーティスト", "")).strip(),
                                     )
 
                 with pip_tab_n:
@@ -3278,7 +3289,6 @@ with tabs[0]:
                                     _show_cd_panel(
                                         _pipmf_jcd, row_idx, f"pipmf_{selected_no}_{_pmi}",
                                         title=_pm_item.get("作品名", ""),
-                                        artist=_pm_item.get("アーティスト", "") or str(row.get("アーティスト", "")).strip(),
                                     )
 
 
