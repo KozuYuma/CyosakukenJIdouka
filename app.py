@@ -219,8 +219,16 @@ def _render_cd_results(_cp_res: dict | None, row_idx: int, key_prefix: str) -> N
         st.info(f"「{_cp_q}」に一致するCDはありません。")
         return
 
-    # ── 全件一覧（ソート・スクロール可）────────────────────────────────────
-    st.dataframe(
+    # ── 全件一覧（行クリックで下の「反映するCDを選択」に連動）──────────────
+    _cp_sel_key  = f"cpanel_sel_{key_prefix}"
+    _cp_last_key = f"cpanel_tblrow_{key_prefix}"
+
+    # 絞り込みで件数が変わった場合に備え、保持中の選択インデックスを丸める
+    if not isinstance(st.session_state.get(_cp_sel_key), int) or \
+            not (0 <= st.session_state.get(_cp_sel_key, -1) < len(_cp_view)):
+        st.session_state[_cp_sel_key] = 0
+
+    _cp_ev = st.dataframe(
         pd.DataFrame([
             {
                 "No":            c.get("No", ""),
@@ -240,7 +248,25 @@ def _render_cd_results(_cp_res: dict | None, row_idx: int, key_prefix: str) -> N
         use_container_width=True,
         hide_index=True,
         height=min(400, 40 + 35 * len(_cp_view)),
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"cpanel_tbl_{key_prefix}",
     )
+    st.caption("表の行をクリックすると、下の「反映するCDを選択」に反映されます。")
+
+    # 表で選ばれた行 → セレクトボックスへ反映（変化したときだけ上書きし、
+    # セレクトボックス側の手動変更を潰さないようにする）
+    try:
+        _cp_rows = list(_cp_ev.selection.rows)
+    except AttributeError:
+        _cp_rows = list((_cp_ev or {}).get("selection", {}).get("rows", []))
+    if _cp_rows:
+        _cp_row = int(_cp_rows[0])
+        if 0 <= _cp_row < len(_cp_view) and st.session_state.get(_cp_last_key) != _cp_row:
+            st.session_state[_cp_last_key] = _cp_row
+            st.session_state[_cp_sel_key] = _cp_row
+    else:
+        st.session_state.pop(_cp_last_key, None)
 
     # ── 1枚選んで申告フォーマットへ反映 ──────────────────────────────────
     _cp_sel = st.selectbox(
@@ -250,7 +276,7 @@ def _render_cd_results(_cp_res: dict | None, row_idx: int, key_prefix: str) -> N
             f"{_cp_view[i].get('品番', '')}｜{_cp_view[i].get('CD商品タイトル', '')}"
             f"｜{_cp_view[i].get('発売日', '')}｜{_cp_view[i].get('発売会社', '')}"
         ),
-        key=f"cpanel_sel_{key_prefix}",
+        key=_cp_sel_key,
     )
     _cp_item = _cp_view[_cp_sel]
     _cp_a = _cp_item.get("album_id", "")
