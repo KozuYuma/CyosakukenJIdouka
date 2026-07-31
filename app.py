@@ -2931,6 +2931,19 @@ with tabs[0]:
                     help="アーティスト・アルバム・ISRCをSpotifyから取得します" if _pip_sp_avail else "SPOTIFY_CLIENT_ID / SECRET が未設定",
                 )
 
+            st.radio(
+                "詳細（作家名・管理状況）の自動取得",
+                options=["先頭候補のみ", "取得しない", "全候補"],
+                index=0,
+                horizontal=True,
+                key=f"pip_auto_detail_{selected_no}",
+                help=(
+                    "J-WID / MINC の詳細は候補ごとに別リクエストのため、全候補を取ると時間がかかります。"
+                    "取得しなくてもタブ表示・候補一覧・作品コードは出ます。"
+                    "各候補の「🔄 詳細を再取得」または結果タブ内の「まとめて取得」でいつでも取得できます。"
+                ),
+            )
+
             wav_dur_raw = str(row.get("WAVフル尺", "")).strip()
             wav_dur_sec_val = _hms_to_sec(wav_dur_raw)
             if wav_dur_raw and wav_dur_raw.lower() != "nan":
@@ -2994,6 +3007,7 @@ with tabs[0]:
                 st.session_state[f"pipeline_result_{selected_no}"] = pip_result
                 # 再実行のたびに自動フェッチフラグをリセット（新規ページ結果を取得し直すため）
                 st.session_state.pop(f"pip_j_auto_fetched_{selected_no}", None)
+                st.session_state.pop(f"pip_mf_auto_fetched_{selected_no}", None)
 
                 # MINC 検索（セッション有効かつチェックONのみ）
                 if pip_use_minc and _pip_mf_ok:
@@ -3174,24 +3188,6 @@ with tabs[0]:
                         if _mb_artist_hint:
                             st.caption(f"💡 MusicBrainz アーティスト参照: **{_mb_artist_hint}**")
 
-                        # 未取得の詳細を自動フェッチ（MINCと同理由：詳細ページは別URL）
-                        _jwid_auto_key = f"pip_j_auto_fetched_{selected_no}"
-                        if not st.session_state.get(_jwid_auto_key):
-                            _jwid_need = [
-                                (i, it) for i, it in enumerate(jwid_r["results"])
-                                if not st.session_state.get(f"jwid_detail_{selected_no}_{i}")
-                                and it.get("_detail_url","")
-                            ]
-                            if _jwid_need:
-                                from modules.scraper import fetch_jwid_detail as _fetch_detail_auto
-                                with st.spinner(f"J-WID 詳細を自動取得中（{len(_jwid_need)} 件）…"):
-                                    for _ji, _jit in _jwid_need:
-                                        _jd = _fetch_detail_auto(_jit.get("_detail_url",""))
-                                        st.session_state[f"jwid_detail_{selected_no}_{_ji}"] = _jd
-                            st.session_state[_jwid_auto_key] = True
-                            if _jwid_need:
-                                st.rerun()
-
                         # フィルター値はパイプラインボタン上部の入力から読む
                         _jf_title  = st.session_state.get(f"jf_title_{selected_no}",  "")
                         _jf_artist = st.session_state.get(f"jf_artist_{selected_no}", "")
@@ -3214,6 +3210,37 @@ with tabs[0]:
                                 st.warning("フィルター条件に一致する候補がありません。")
                                 if _art_vals:
                                     st.caption("このJ-WID結果に含まれるアーティスト: " + "　/　".join(_art_vals))
+
+                        # 詳細（作家名・管理状況）は候補ごとに別リクエスト。
+                        # 既定は先頭候補のみ自動取得し、残りは任意のタイミングで取得する。
+                        _pip_dmode = st.session_state.get(f"pip_auto_detail_{selected_no}", "先頭候補のみ")
+                        _jwid_auto_key = f"pip_j_auto_fetched_{selected_no}"
+                        _j_todo = [
+                            i for i in _jf_indices
+                            if not st.session_state.get(f"jwid_detail_{selected_no}_{i}")
+                            and jwid_r["results"][i].get("_detail_url", "")
+                        ]
+                        _j_want: list[int] = []
+                        if not st.session_state.get(_jwid_auto_key):
+                            if _pip_dmode == "全候補":
+                                _j_want = _j_todo
+                            elif _pip_dmode == "先頭候補のみ":
+                                _j_want = _j_todo[:1]
+                            st.session_state[_jwid_auto_key] = True
+                        if not _j_want and _j_todo and st.button(
+                            f"⬇️ 表示中の候補の詳細をまとめて取得（{len(_j_todo)}件）",
+                            key=f"pip_j_fetchall_{selected_no}",
+                            use_container_width=True,
+                            help="作曲者・作詞者・管理状況を取得します（1件あたり数秒かかります）",
+                        ):
+                            _j_want = _j_todo
+                        if _j_want:
+                            from modules.scraper import fetch_jwid_detail as _fetch_detail_auto
+                            with st.spinner(f"J-WID 詳細を取得中（{len(_j_want)} 件）…"):
+                                for _ji in _j_want:
+                                    st.session_state[f"jwid_detail_{selected_no}_{_ji}"] = \
+                                        _fetch_detail_auto(jwid_r["results"][_ji].get("_detail_url", ""))
+                            st.rerun()
 
                         for _disp_idx, i in enumerate(_jf_indices):
                             item = jwid_r["results"][i]
@@ -3375,15 +3402,32 @@ with tabs[0]:
                         if _pip_mf_res.get("_cd_fallback_artist"):
                             st.info(f"💡 タイトルのみでは全結果が「作品」テーブル（CD情報なし）だったため、アーティスト「{_pip_mf_res['_cd_fallback_artist']}」を追加して再検索しました。")
 
-                        # 未取得の詳細を自動フェッチ（キー未存在＝未取得として判定、エラー時もキーをセットして無限ループ防止）
-                        _mf_need_fetch = [
+                        # 詳細は候補ごとに別リクエスト（キー未存在＝未取得、エラー時もキーをセットして無限ループ防止）
+                        # 既定は先頭候補のみ自動取得し、残りは任意のタイミングで取得する。
+                        _pip_dmode_mf = st.session_state.get(f"pip_auto_detail_{selected_no}", "先頭候補のみ")
+                        _mf_auto_key = f"pip_mf_auto_fetched_{selected_no}"
+                        _mf_todo = [
                             (_auto_pmi, _auto_it) for _auto_pmi, _auto_it in enumerate(_pip_mf_items[:10])
                             if f"pip_mf_ddetail_{selected_no}_{_auto_pmi}" not in st.session_state
                             and _auto_it.get("_detail_href", "")
                         ]
+                        _mf_need_fetch: list = []
+                        if not st.session_state.get(_mf_auto_key):
+                            if _pip_dmode_mf == "全候補":
+                                _mf_need_fetch = _mf_todo
+                            elif _pip_dmode_mf == "先頭候補のみ":
+                                _mf_need_fetch = _mf_todo[:1]
+                            st.session_state[_mf_auto_key] = True
+                        if not _mf_need_fetch and _mf_todo and st.button(
+                            f"⬇️ 候補の詳細をまとめて取得（{len(_mf_todo)}件）",
+                            key=f"pip_mf_fetchall_{selected_no}",
+                            use_container_width=True,
+                            help="作曲者・作詞者・編曲者を取得します（1件あたり数秒かかります）",
+                        ):
+                            _mf_need_fetch = _mf_todo
                         if _mf_need_fetch:
                             _mf_auto_c = _get_mf_client()
-                            with st.spinner(f"MINC 詳細を自動取得中（{len(_mf_need_fetch)} 件）…"):
+                            with st.spinner(f"MINC 詳細を取得中（{len(_mf_need_fetch)} 件）…"):
                                 for _auto_pmi, _auto_it in _mf_need_fetch:
                                     _auto_dkey = f"pip_mf_ddetail_{selected_no}_{_auto_pmi}"
                                     try:
