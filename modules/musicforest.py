@@ -48,6 +48,23 @@ class MusicForestError(RuntimeError):
     """認証エラー・通信エラーなど"""
 
 
+def _product_detail_url(album_id: str, track_id: str = "") -> str:
+    """
+    CD商品詳細（モーダル）のURLを組み立てる。
+
+    MINC の js/jmdScroll.js（.collapseDetail のクリックハンドラ）と同じ形式:
+        track_id あり: /parts/product/detail/?album_id=<id>&track_id=<tid>
+        track_id なし: /parts/product/detail/?album_id=<id>
+    track_id を空文字で送ると収録曲テーブルが返らないため、必ず省略する。
+    """
+    _alb = urllib.parse.quote(str(album_id).strip(), safe="-")
+    _trk = str(track_id or "").strip()
+    url = f"{BASE_URL}/parts/product/detail/?album_id={_alb}"
+    if _trk:
+        url += f"&track_id={urllib.parse.quote(_trk, safe='-')}"
+    return url
+
+
 # =====================================================================
 # クライアント
 # =====================================================================
@@ -262,7 +279,7 @@ class MusicForestClient:
         if not album_id or not track_id:
             out["error"] = "album_id / track_id が不明です"
             return out
-        url = f"{BASE_URL}/parts/product/detail?album_id={album_id}&track_id={track_id}"
+        url = _product_detail_url(album_id, track_id)
         try:
             resp = self._get(url)
             if "/login" in resp.url.lower():
@@ -431,11 +448,9 @@ class MusicForestClient:
             out["error"] = "album_id が不明です"
             return out
 
-        url = (
-            f"{BASE_URL}/parts/product/detail"
-            f"?album_id={urllib.parse.quote(str(album_id), safe='-')}"
-            f"&track_id={urllib.parse.quote(str(track_id or ''), safe='-')}"
-        )
+        # jmdScroll.js の collapseDetail ハンドラと同じ組み立て方をする。
+        #   track_id が無い場合はパラメータごと省く（空で送ると収録曲が返らない）
+        url = _product_detail_url(album_id, track_id)
         out["url"] = url
         try:
             resp = self._get(url)
@@ -469,7 +484,7 @@ class MusicForestClient:
                 or soup.select_one("table[class*='track-list']")
             )
             if table is None:
-                out["error"] = "収録曲テーブルが見つかりませんでした。"
+                out["error"] = f"収録曲テーブルが見つかりませんでした（{url}）"
                 return out
 
             # ヘッダー行から列位置を作る（列順の変更に耐えるため）
@@ -690,10 +705,7 @@ class MusicForestClient:
                     "初回盤":          shokaiban,
                     "album_id":       album_id,
                     "track_id":       track_id,
-                    "detail_url":     (
-                        f"{BASE_URL}/parts/product/detail"
-                        f"?album_id={album_id}&track_id={track_id}" if album_id else ""
-                    ),
+                    "detail_url":     _product_detail_url(album_id, track_id) if album_id else "",
                     "label":          " / ".join([x for x in (hinban, cd_title) if x]) or f"CD ({album_id})",
                 })
 
