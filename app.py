@@ -154,7 +154,9 @@ def _sync_shinkok_to_songs() -> None:
                 songs.at[song_idx, col] = "" if pd.isna(val) else val
 
 
-def _show_cd_panel(jcd: str, row_idx: int, key_prefix: str, title: str = "") -> None:
+def _show_cd_panel(
+    jcd: str, row_idx: int, key_prefix: str, title: str = "", artist: str = ""
+) -> None:
     """JASRACコードに紐づくCDリストを折りたたみなしでインライン表示し、申告フォーマットに反映できるようにする。"""
     if not jcd or str(jcd).strip().lower() in ("", "nan"):
         return
@@ -171,10 +173,12 @@ def _show_cd_panel(jcd: str, row_idx: int, key_prefix: str, title: str = "") -> 
             except MusicForestError as _cp_e:
                 st.session_state[_cp_res_key] = {"cds": [], "error": str(_cp_e)}
 
-    _render_cd_results(st.session_state.get(_cp_res_key), row_idx, key_prefix)
+    _render_cd_results(st.session_state.get(_cp_res_key), row_idx, key_prefix, artist)
 
 
-def _render_cd_results(_cp_res: dict | None, row_idx: int, key_prefix: str) -> None:
+def _render_cd_results(
+    _cp_res: dict | None, row_idx: int, key_prefix: str, artist_default: str = ""
+) -> None:
     """search_cds_by_jasrac の結果（CD商品リスト全件）を一覧＋反映UIとして描画する。"""
     if not _cp_res:
         return
@@ -197,26 +201,56 @@ def _render_cd_results(_cp_res: dict | None, row_idx: int, key_prefix: str) -> N
         + f"　／　CD商品 **{_cp_res.get('件数', len(_cp_items))} 件**"
     )
 
-    # ── 絞り込み（品番／CD商品タイトル／アーティスト／会社名の部分一致）────────
-    _cp_q = st.text_input(
-        "絞り込み（品番・CDタイトル・アーティスト・会社名）",
-        key=f"cpanel_q_{key_prefix}",
-        placeholder="例: TOCT / ベスト / チューリップ",
-    ).strip()
+    # ── 絞り込み ────────────────────────────────────────────────────────
+    #   アーティスト欄は申告フォーマットのアーティスト名を初期値として入れる
+    #   （初期値が変わったら追随させる）
+    _cp_art_key  = f"cpanel_art_{key_prefix}"
+    _cp_artd_key = f"cpanel_artdef_{key_prefix}"
+    _cp_artist_default = str(artist_default or "").strip()
+    if _cp_artist_default.lower() == "nan":
+        _cp_artist_default = ""
+    if st.session_state.get(_cp_artd_key) != _cp_artist_default:
+        st.session_state[_cp_artd_key] = _cp_artist_default
+        st.session_state[_cp_art_key] = _cp_artist_default
+
+    _cp_f1, _cp_f2 = st.columns(2)
+    with _cp_f1:
+        _cp_art = st.text_input(
+            "アーティストで絞り込み",
+            key=_cp_art_key,
+            placeholder="例: EXILE（空欄なら絞り込まない）",
+            help="CD商品リストのアーティスト欄との部分一致。オムニバスは (V.A.) と表記されます。",
+        ).strip()
+    with _cp_f2:
+        _cp_q = st.text_input(
+            "キーワードで絞り込み（品番・CDタイトル・会社名など）",
+            key=f"cpanel_q_{key_prefix}",
+            placeholder="例: TOCT / ベスト / ソニー",
+        ).strip()
+
+    _cp_view = _cp_items
+    if _cp_art:
+        _cp_artl = _cp_art.lower()
+        _cp_view = [c for c in _cp_view if _cp_artl in c.get("アーティスト", "").lower()]
     if _cp_q:
         _cp_ql = _cp_q.lower()
         _cp_view = [
-            c for c in _cp_items
+            c for c in _cp_view
             if _cp_ql in " ".join([
                 c.get("品番", ""), c.get("CD商品タイトル", ""),
                 c.get("アーティスト", ""), c.get("発売会社", ""), c.get("販売会社", ""),
             ]).lower()
         ]
-    else:
-        _cp_view = _cp_items
+
+    if _cp_art or _cp_q:
+        st.caption(f"絞り込み結果: **{len(_cp_view)}** / {len(_cp_items)} 件")
 
     if not _cp_view:
-        st.info(f"「{_cp_q}」に一致するCDはありません。")
+        _cp_cond = "／".join([x for x in (_cp_art, _cp_q) if x])
+        st.info(
+            f"「{_cp_cond}」に一致するCDはありません。"
+            "（オムニバス盤はアーティストが (V.A.) 表記のため、アーティスト欄を空にすると出てきます）"
+        )
         return
 
     # ── 全件一覧（行クリックで下の「反映するCDを選択」に連動）──────────────
@@ -2347,7 +2381,11 @@ with tabs[0]:
                         # CD情報検索パネル（JASRACコードで収録CDリストを取得）
                         if _mf_jcd:
                             st.divider()
-                            _show_cd_panel(_mf_jcd, row_idx, f"mf_{selected_no}_{_mf_i}", title=_mf_item.get("作品名", ""))
+                            _show_cd_panel(
+                                _mf_jcd, row_idx, f"mf_{selected_no}_{_mf_i}",
+                                title=_mf_item.get("作品名", ""),
+                                artist=_mf_item.get("アーティスト", "") or str(row.get("アーティスト", "")).strip(),
+                            )
 
                         st.link_button(
                             "🌲 MINC で詳細を確認",
@@ -2611,6 +2649,7 @@ with tabs[0]:
                 st.session_state.get(f"cds_results_{selected_no}"),
                 row_idx,
                 f"cds_{selected_no}",
+                artist_default=str(row.get("アーティスト", "")).strip(),
             )
 
         if selected_label:
@@ -3056,7 +3095,11 @@ with tabs[0]:
                                 _pipj_jcd = item.get("作品コード", "")
                                 if _pipj_jcd and _mf_ok:
                                     st.divider()
-                                    _show_cd_panel(_pipj_jcd, row_idx, f"pipj_{selected_no}_{i}", title=item.get("作品名", ""))
+                                    _show_cd_panel(
+                                        _pipj_jcd, row_idx, f"pipj_{selected_no}_{i}",
+                                        title=item.get("作品名", ""),
+                                        artist=item.get("アーティスト", "") or str(row.get("アーティスト", "")).strip(),
+                                    )
 
                 with pip_tab_n:
                     st.caption(f"検索URL: {ntone_r.get('search_url','')}")
@@ -3232,7 +3275,11 @@ with tabs[0]:
                                 _pipmf_jcd = _pm_item.get("JASRAC作品コード", "")
                                 if _pipmf_jcd:
                                     st.divider()
-                                    _show_cd_panel(_pipmf_jcd, row_idx, f"pipmf_{selected_no}_{_pmi}", title=_pm_item.get("作品名", ""))
+                                    _show_cd_panel(
+                                        _pipmf_jcd, row_idx, f"pipmf_{selected_no}_{_pmi}",
+                                        title=_pm_item.get("作品名", ""),
+                                        artist=_pm_item.get("アーティスト", "") or str(row.get("アーティスト", "")).strip(),
+                                    )
 
 
             # ---- 検索語と手動リンク ----
