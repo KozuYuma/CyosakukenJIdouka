@@ -194,19 +194,83 @@ def _cp_row_jcd(row_idx: int) -> str:
     return re.sub(r"[-\s]", "", _v).upper()
 
 
+def _render_delivery_rows(_cp_res: dict, row_idx: int, key_prefix: str) -> None:
+    """CD商品が無い作品向けに、MINCの「配信曲」情報を一覧＋反映UIとして描画する。"""
+    _dl = _cp_res.get("配信") or []
+    if not _dl:
+        return
+    st.markdown(f"**🎧 配信音源（{len(_dl)}件）**")
+    st.dataframe(
+        pd.DataFrame([
+            {
+                "曲名":          d.get("曲名", ""),
+                "アーティスト":   d.get("アーティスト", ""),
+                "アルバム名":     d.get("アルバム名", ""),
+                "ISRC":         d.get("ISRC", ""),
+                "配信日":        d.get("配信日", ""),
+            }
+            for d in _dl
+        ]),
+        use_container_width=True,
+        hide_index=True,
+        height=min(300, 40 + 35 * len(_dl)),
+    )
+    _dl_sel = st.selectbox(
+        "反映する配信音源を選択",
+        options=list(range(len(_dl))),
+        format_func=lambda i: (
+            f"{_dl[i].get('アルバム名', '') or '(アルバム名なし)'}"
+            f"｜{_dl[i].get('アーティスト', '')}｜{_dl[i].get('ISRC', '')}"
+        ),
+        key=f"cpanel_dlsel_{key_prefix}",
+    )
+    _dl_item = _dl[_dl_sel]
+    if st.button(
+        "✅ 配信音源の情報を反映（音源区分=配信）",
+        key=f"cpanel_dlapply_{key_prefix}",
+        use_container_width=True,
+    ):
+        _dl_apply = {
+            "曲名":            _dl_item.get("曲名", "") or _cp_res.get("作品名", ""),
+            "JASRAC作品コード": _dl_item.get("JASRAC作品コード", "") or _cp_res.get("作品コード", ""),
+            "アーティスト":     _dl_item.get("アーティスト", ""),
+            "CD名":            _dl_item.get("アルバム名", ""),
+            "ISRC":           _dl_item.get("ISRC", ""),
+            "音源区分":         "配信",
+        }
+        _dl_jcd = re.sub(r"[-\s]", "", str(_dl_apply["JASRAC作品コード"])).upper()
+        _dl_hy = _infer_houyo(_dl_jcd)
+        if _dl_hy and (not _cp_current_houyo(row_idx) or _dl_jcd != _cp_row_jcd(row_idx)):
+            _dl_apply["邦洋区分"] = _dl_hy
+        for _dl_col, _dl_val in _dl_apply.items():
+            if _dl_val and _dl_col in st.session_state.songs_df.columns:
+                st.session_state.songs_df.at[row_idx, _dl_col] = _dl_val
+        st.session_state["_apply_msg"] = (
+            f"配信音源「{_dl_item.get('アルバム名', '')}」の情報を反映しました"
+            f"（音源区分=配信／CD商品なし）。"
+        )
+        st.session_state.pop("songs_editor", None)
+        st.rerun()
+    st.caption(
+        "※ この作品はMINCにCD商品が登録されていないため、検索結果の「配信曲」から取得しています。"
+        "CD番号・レコード会社名は取得できません。"
+    )
+
+
 def _render_cd_results(
     _cp_res: dict | None, row_idx: int, key_prefix: str, artist_filter: str = ""
 ) -> None:
     """search_cds_by_jasrac の結果（CD商品リスト全件）を一覧＋反映UIとして描画する。"""
     if not _cp_res:
         return
-    if _cp_res.get("error") and not _cp_res.get("cds"):
-        st.error(f"CD検索エラー: {_cp_res['error']}")
-        if _cp_res.get("search_url"):
-            st.caption(f"🔗 MINCで直接開く: [{_cp_res['search_url']}]({_cp_res['search_url']})")
-        return
     if not _cp_res.get("cds"):
-        st.warning("収録CDが見つかりませんでした。")
+        if _cp_res.get("配信"):
+            st.info(_cp_res.get("error") or "CD商品はありませんでした（配信のみの音源です）。")
+        elif _cp_res.get("error"):
+            st.error(f"CD検索エラー: {_cp_res['error']}")
+        else:
+            st.warning("収録CDが見つかりませんでした。")
+        _render_delivery_rows(_cp_res, row_idx, key_prefix)
         if _cp_res.get("search_url"):
             st.caption(f"🔗 MINCで直接開く: [{_cp_res['search_url']}]({_cp_res['search_url']})")
         return

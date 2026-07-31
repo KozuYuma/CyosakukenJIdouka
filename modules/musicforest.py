@@ -616,7 +616,7 @@ class MusicForestClient:
             "作曲者": "", "作詞者": "",
             "編曲者": "", "訳詞者": "", "ISWC": "", "アーティスト": "",
             "NexTone管理番号": "",
-            "cds": [], "search_url": "", "error": None, "debug_html": "",
+            "cds": [], "配信": [], "search_url": "", "error": None, "debug_html": "",
         }
         cleaned = re.sub(r"[-\s]", "", str(jcd)).upper().strip()
         _ncd = re.sub(r"\s", "", str(ncd)).upper().strip()
@@ -759,9 +759,17 @@ class MusicForestClient:
             if not out["件数"]:
                 out["件数"] = len(cds)
             if not cds:
-                out["error"] = (
-                    f"JASRACコード {cleaned}（「{_title}」）に紐づくCD商品が見つかりませんでした。"
-                )
+                # CD商品が無い作品（配信のみのサントラ等）は「配信曲」から音源情報を拾う
+                out["配信"] = self.search_delivery_by_jasrac(cleaned, _ncd, _title)
+                if out["配信"]:
+                    out["error"] = (
+                        f"JASRACコード {cleaned}（「{_title}」）にCD商品はありませんでした。"
+                        f"配信音源が {len(out['配信'])} 件見つかりましたので下に表示します。"
+                    )
+                else:
+                    out["error"] = (
+                        f"JASRACコード {cleaned}（「{_title}」）に紐づくCD商品が見つかりませんでした。"
+                    )
 
         except requests.exceptions.ConnectionError:
             out["error"] = "接続エラー: MusicForest に接続できません。"
@@ -771,6 +779,43 @@ class MusicForestClient:
             out["error"] = f"{type(e).__name__}: {e}"
 
         return out
+
+    def search_delivery_by_jasrac(
+        self, jcd: str, ncd: str = "", title: str = ""
+    ) -> list[dict]:
+        """
+        CD商品が無い作品向けに、検索結果ページの「配信曲」テーブル（#haishin-list）
+        から同一作品コードの配信音源を拾う。
+
+        Returns: [{"曲名","アーティスト","アルバム名","ISRC","配信日",
+                   "JASRAC作品コード","NexTone管理番号"}, ...]
+        """
+        if not str(title).strip():
+            return []
+        _j = re.sub(r"[-\s]", "", str(jcd)).upper()
+        _n = re.sub(r"[-\s]", "", str(ncd)).upper()
+        try:
+            res = self.search(str(title).strip(), match=3)
+        except Exception:
+            return []
+        rows: list[dict] = []
+        for it in res.get("results", []):
+            if it.get("_source_table") != "配信曲":
+                continue
+            _ij = re.sub(r"[-\s]", "", str(it.get("JASRAC作品コード", ""))).upper()
+            _in = re.sub(r"[-\s]", "", str(it.get("NexTone管理番号", ""))).upper()
+            if not ((_j and _ij == _j) or (_n and _in == _n)):
+                continue
+            rows.append({
+                "曲名":            it.get("作品名", ""),
+                "アーティスト":     it.get("アーティスト", ""),
+                "アルバム名":       it.get("アルバム名", "") or it.get("CD商品タイトル", ""),
+                "ISRC":           it.get("ISRC", ""),
+                "配信日":          it.get("配信日", ""),
+                "JASRAC作品コード": it.get("JASRAC作品コード", ""),
+                "NexTone管理番号":  it.get("NexTone管理番号", ""),
+            })
+        return rows
 
     # ---- 詳細ページ -----------------------------------------------------
 
@@ -964,6 +1009,9 @@ def _parse_search_results(soup: BeautifulSoup) -> list[dict]:
                 cd_title      = _cell(row_cells, "CD商品タイトル")
                 publisher_raw = _cell(row_cells, "発売会社")   # "発売会社／販売会社" に部分一致
                 isrc          = _cell(row_cells, "ISRC")
+                # 配信曲テーブルは「アルバム名」「配信日」列（CD商品タイトル／発売日は無い）
+                album_name    = _cell(row_cells, "アルバム") or cd_title
+                release_date  = _cell(row_cells, "配信") or _cell(row_cells, "発売日")
             else:
                 # ヘッダー取得不可時の位置ベースフォールバック
                 tds = [c.get_text(" ", strip=True) for c in row.find_all("td")]
@@ -973,6 +1021,8 @@ def _parse_search_results(soup: BeautifulSoup) -> list[dict]:
                 cd_title      = ""
                 publisher_raw = ""
                 isrc          = ""
+                album_name    = ""
+                release_date  = ""
 
             if not title:
                 title = btn.get_text(strip=True)
@@ -1011,6 +1061,8 @@ def _parse_search_results(soup: BeautifulSoup) -> list[dict]:
                 "品番":             catalog,
                 "CD商品タイトル":   cd_title,
                 "収録CD":           cd_display,
+                "アルバム名":        album_name,
+                "配信日":           release_date,
                 "ISRC":            isrc,
                 "発売会社販売会社":  publisher_raw,
                 "レコード会社名":    record_company,
