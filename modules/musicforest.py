@@ -424,7 +424,29 @@ class MusicForestClient:
 
     # ---- CD → 収録曲の逆引き ---------------------------------------------
 
-    def fetch_track_list(self, album_id: str, track_id: str = "") -> dict:
+    def find_track_id(self, album_id: str, title: str = "") -> str:
+        """
+        CD商品リスト（from_saku）には track_id が無いため、曲名検索の結果ページから
+        同じ album_id を持つ collapseDetail リンクを探して track_id を拾う。
+
+        見つからなければ空文字を返す。
+        """
+        _alb = str(album_id).strip()
+        if not _alb or not str(title).strip():
+            return ""
+        try:
+            sr = self.search(str(title).strip(), match=3)
+        except Exception:
+            return ""
+        for _r in sr.get("results", []):
+            if str(_r.get("_album_id", "")).strip() == _alb and _r.get("_track_id"):
+                return str(_r["_track_id"]).strip()
+        for _l in sr.get("_page_cd_links", []):
+            if str(_l.get("album_id", "")).strip() == _alb and _l.get("track_id"):
+                return str(_l["track_id"]).strip()
+        return ""
+
+    def fetch_track_list(self, album_id: str, track_id: str = "", title: str = "") -> dict:
         """
         CD商品の収録曲を全曲取得する（CDから曲を逆引きする用途）。
 
@@ -432,35 +454,65 @@ class MusicForestClient:
         曲順／メドレー／曲名／IV／収録時間／アーティスト／ISRC／
         JASRAC作品コード／NexTone作品コード／著作権管理情報 を全曲分出力する。
 
+        track_id はサーバ側で必須（省略すると
+        "The track id field must have a value." が返る）だが、CD商品リストの
+        行には track_id が無い。そのため以下の順に候補を試す:
+          1. 呼び出し元から渡された track_id
+          2. 曲名検索の結果ページから拾った同一 album_id の track_id
+          3. track_id=0（ハイライト無しで開けるか）
+
         Returns: {
             "CD商品タイトル": str, "品番": str, "レコード会社名": str,
             "集中管理": str,
-            "tracks": [{"曲順","メドレー","曲名","IV","収録時間","アーティスト",
-                        "ISRC","JASRAC作品コード","NexTone作品コード","管理情報"}, ...],
-            "url": str, "error": None | str, "debug_html": str,
+            "tracks": [...], "url": str, "attempts": [{"url","result"}, ...],
+            "error": None | str, "debug_html": str,
         }
         """
         out: dict = {
             "CD商品タイトル": "", "品番": "", "レコード会社名": "", "集中管理": "",
-            "tracks": [], "url": "", "error": None, "debug_html": "",
+            "tracks": [], "url": "", "attempts": [], "error": None, "debug_html": "",
         }
         if not album_id:
             out["error"] = "album_id が不明です"
             return out
 
-        # jmdScroll.js の collapseDetail ハンドラと同じ組み立て方をする。
-        #   track_id が無い場合はパラメータごと省く（空で送ると収録曲が返らない）
-        url = _product_detail_url(album_id, track_id)
-        out["url"] = url
-        try:
-            resp = self._get(url)
-            if "/login" in resp.url.lower():
-                out["error"] = "セッションが切れています。再ログインしてください。"
-                return out
+        # 試す track_id の候補を組み立てる（重複除去・順序維持）
+        _cands: list[str] = []
+        for _c in (str(track_id or "").strip(),
+                   self.find_track_id(album_id, title) if not str(track_id or "").strip() else "",
+                   "0"):
+            if _c and _c not in _cands:
+                _cands.append(_c)
+        if not _cands:
+            _cands = ["0"]
 
-            html = resp.text
+        try:
+            html = ""
+            soup = None
+            for _c in _cands:
+                url = _product_detail_url(album_id, _c)
+                out["url"] = url
+                resp = self._get(url)
+                if "/login" in resp.url.lower():
+                    out["error"] = "セッションが切れています。再ログインしてください。"
+                    return out
+                html = resp.text
+                soup = BeautifulSoup(html, "lxml")
+                if soup.select_one("table.cd-detail2-track-list, table[class*='track-list']"):
+                    out["attempts"].append({"url": url, "result": "OK"})
+                    break
+                # バリデーションエラー等のメッセージを拾って記録する
+                _msg = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))[:120]
+                out["attempts"].append({"url": url, "result": _msg or "収録曲テーブルなし"})
+                soup = None
+
             out["debug_html"] = html[:4000]
-            soup = BeautifulSoup(html, "lxml")
+            if soup is None:
+                out["error"] = (
+                    "収録曲テーブルが見つかりませんでした（track_id を特定できません）。"
+                    + " ／ ".join(f"{a['url']} → {a['result']}" for a in out["attempts"])
+                )
+                return out
 
             _mt = soup.select_one("h4.modal-title")
             if _mt:
@@ -479,13 +531,7 @@ class MusicForestClient:
                     if _m2:
                         out["レコード会社名"] = _m2.group(1).strip()
 
-            table = (
-                soup.select_one("table.cd-detail2-track-list")
-                or soup.select_one("table[class*='track-list']")
-            )
-            if table is None:
-                out["error"] = f"収録曲テーブルが見つかりませんでした（{url}）"
-                return out
+            table = soup.select_one("table.cd-detail2-track-list, table[class*='track-list']")
 
             # ヘッダー行から列位置を作る（列順の変更に耐えるため）
             hdr_row = (

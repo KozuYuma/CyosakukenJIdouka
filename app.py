@@ -327,7 +327,9 @@ def _render_cd_results(
         ):
             with st.spinner("収録曲を取得中..."):
                 try:
-                    _cp_fd = _get_mf_client().fetch_track_list(_cp_a, _cp_t)
+                    _cp_fd = _get_mf_client().fetch_track_list(
+                        _cp_a, _cp_t, title=_cp_res.get("作品名", "")
+                    )
                     st.session_state[_cp_det_key] = _cp_fd
                     if _cp_fd.get("error"):
                         st.toast(f"エラー: {_cp_fd['error']}", icon="❌")
@@ -372,6 +374,10 @@ def _render_cd_results(
     _cp_tracks = _cp_det.get("tracks") or []
     if _cp_det.get("error") and not _cp_tracks:
         st.warning(f"収録曲を取得できませんでした: {_cp_det['error']}")
+        if _cp_det.get("attempts"):
+            with st.expander("🔍 試したURLと応答", expanded=False):
+                for _cp_at in _cp_det["attempts"]:
+                    st.markdown(f"- [{_cp_at['url']}]({_cp_at['url']}) → `{_cp_at['result']}`")
     if _cp_tracks:
         st.markdown(
             f"**🎵 収録曲（{len(_cp_tracks)}曲）** — "
