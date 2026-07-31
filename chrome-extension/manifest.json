@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "MINC Session Sync",
+  "version": "1.0",
+  "description": "minc.or.jp のセッション Cookie を著作権自動化アプリに同期します。",
+  "permissions": ["cookies", "tabs"],
+  "host_permissions": [
+    "*://*.minc.or.jp/*",
+    "http://localhost/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "MINCセッション同期"
+  }
+}

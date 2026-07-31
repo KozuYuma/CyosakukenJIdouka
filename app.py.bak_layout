@@ -7,13 +7,10 @@ NUENDO Cue CSV × WAV 一覧照合 → 権利情報管理 → Excel 出力
 """
 import json
 import os
-import re
-import unicodedata
 import urllib.parse
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as _stc
 
 from modules.csv_reader import (
     normalize_cue_columns,
@@ -31,7 +28,7 @@ from modules.database import (
     save_events,
     save_songs,
 )
-from modules.excel_exporter import export_to_excel, build_shinkok_df, _SHINKOK_RENAME
+from modules.excel_exporter import export_to_excel, build_shinkok_df
 from modules.matcher import build_song_list
 from modules.musicbrainz import _hms_to_sec, mb_search_url, search_recording
 from modules.musicforest import (
@@ -98,356 +95,6 @@ EDITABLE_COLS = [
     "メモ",
 ]
 
-# 申告フォーマット列 → songs_df 列の逆引きマッピング（on_change コールバック用）
-_SHINKOK_RENAME_REV: dict[str, str] = {v: k for k, v in _SHINKOK_RENAME.items()}
-# 申告フォーマットに固有の追加列（_SHINKOK_RENAME に含まれないが songs_df に直接対応する列）
-_SHINKOK_EXTRA_COLS = ("確認ステータス", "委任者", "CD名")
-
-# JASRACコード変更時にクリアすべき songs_df 列
-_CLEAR_ON_JCD_CHANGE = [
-    "CD番号", "CD名", "レコード会社名", "委任者",
-    "邦洋区分", "原訳詞区分", "I/V区分",
-    "作詞者", "作曲者", "編曲者", "訳詞者",
-]
-
-
-def _normalize_jcd(s: str) -> str:
-    """JASRACコードをハイフン・空白除去 + 大文字化した正規化文字列で返す（比較用）。"""
-    return re.sub(r"[-\s]", "", str(s)).upper().strip()
-
-
-def _apply_clear_on_jcd_change(row_idx: int, new_jcd: str) -> None:
-    """JASRACコードが変わる場合に関連フィールドを空文字クリアする。"""
-    songs = st.session_state.songs_df
-    if "JASRAC作品コード" not in songs.columns:
-        return
-    cur_norm = _normalize_jcd(str(songs.at[row_idx, "JASRAC作品コード"]))
-    new_norm = _normalize_jcd(new_jcd)
-    if new_norm and cur_norm and new_norm != cur_norm:
-        for col in _CLEAR_ON_JCD_CHANGE:
-            if col in songs.columns:
-                songs.at[row_idx, col] = ""
-
-
-def _sync_shinkok_to_songs() -> None:
-    """申告フォーマット data_editor の編集内容を songs_df へ即時反映するコールバック。"""
-    edited: pd.DataFrame | None = st.session_state.get("shinkok_editor")
-    songs: pd.DataFrame | None = st.session_state.get("songs_df")
-    if edited is None or songs is None or "イベント名" not in edited.columns:
-        return
-    for _, erow in edited.iterrows():
-        ev_name = str(erow.get("イベント名", "")).strip()
-        if not ev_name:
-            continue
-        mask = songs["イベント名"] == ev_name
-        if not mask.any():
-            continue
-        song_idx = songs.index[mask][0]
-        for sh_col, s_col in _SHINKOK_RENAME_REV.items():
-            if sh_col not in erow.index or s_col not in songs.columns:
-                continue
-            val = erow[sh_col]
-            songs.at[song_idx, s_col] = "" if pd.isna(val) else val
-        for col in _SHINKOK_EXTRA_COLS:
-            if col in erow.index and col in songs.columns:
-                val = erow[col]
-                songs.at[song_idx, col] = "" if pd.isna(val) else val
-
-
-def _show_cd_panel(
-    jcd: str, row_idx: int, key_prefix: str, title: str = "", artist: str = ""
-) -> None:
-    """JASRACコードに紐づくCDリストを折りたたみなしでインライン表示し、申告フォーマットに反映できるようにする。"""
-    if not jcd or str(jcd).strip().lower() in ("", "nan"):
-        return
-    _cp_res_key = f"cpanel_res_{key_prefix}"
-    _cp_btn_key = f"cpanel_btn_{key_prefix}"
-
-    if st.button("🔍 このJASRACコードのCDを検索（MINC）", key=_cp_btn_key, use_container_width=True):
-        with st.spinner("CDリストを取得中..."):
-            try:
-                _cp_r = _get_mf_client().search_cds_by_jasrac(jcd, title=title)
-                st.session_state[_cp_res_key] = _cp_r
-                for _ck in [k for k in st.session_state if k.startswith(f"cpanel_det_{key_prefix}_")]:
-                    del st.session_state[_ck]
-            except MusicForestError as _cp_e:
-                st.session_state[_cp_res_key] = {"cds": [], "error": str(_cp_e)}
-
-    _render_cd_results(st.session_state.get(_cp_res_key), row_idx, key_prefix, artist)
-
-
-def _render_cd_results(
-    _cp_res: dict | None, row_idx: int, key_prefix: str, artist_filter: str = ""
-) -> None:
-    """search_cds_by_jasrac の結果（CD商品リスト全件）を一覧＋反映UIとして描画する。"""
-    if not _cp_res:
-        return
-    if _cp_res.get("error") and not _cp_res.get("cds"):
-        st.error(f"CD検索エラー: {_cp_res['error']}")
-        if _cp_res.get("search_url"):
-            st.caption(f"🔗 MINCで直接開く: [{_cp_res['search_url']}]({_cp_res['search_url']})")
-        return
-    if not _cp_res.get("cds"):
-        st.warning("収録CDが見つかりませんでした。")
-        if _cp_res.get("search_url"):
-            st.caption(f"🔗 MINCで直接開く: [{_cp_res['search_url']}]({_cp_res['search_url']})")
-        return
-    if _cp_res.get("error"):
-        st.warning(f"⚠️ 一部エラー: {_cp_res['error']}")
-
-    _cp_items = _cp_res["cds"]
-    _cp_head = [f"💿 「{_cp_res.get('作品名', '')}」（{_cp_res.get('作品コード', '')}）"]
-    for _cp_k in ("作曲者", "作詞者"):
-        if _cp_res.get(_cp_k):
-            _cp_head.append(f"{_cp_k}: {_cp_res[_cp_k]}")
-    st.caption(
-        "　／　".join(_cp_head)
-        + f"　／　CD商品 **{_cp_res.get('件数', len(_cp_items))} 件**"
-    )
-
-    # ── 検索時に指定されたアーティストで事前に絞り込む ──────────────────────
-    #   0件になる場合（オムニバス盤は (V.A.) 表記）は全件表示にフォールバック
-    _cp_art = str(artist_filter or "").strip()
-    if _cp_art.lower() == "nan":
-        _cp_art = ""
-    if _cp_art:
-        _cp_artl = _cp_art.lower()
-        _cp_hit = [c for c in _cp_items if _cp_artl in c.get("アーティスト", "").lower()]
-        if _cp_hit:
-            st.caption(f"🎤 アーティスト「{_cp_art}」で絞り込み: **{len(_cp_hit)}** / {len(_cp_items)} 件")
-            _cp_items = _cp_hit
-        else:
-            st.caption(
-                f"🎤 アーティスト「{_cp_art}」に一致するCDが無いため全件表示しています"
-                "（オムニバス盤は (V.A.) 表記です）"
-            )
-
-    # ── 絞り込み（品番／CD商品タイトル／アーティスト／会社名の部分一致）────────
-    _cp_q = st.text_input(
-        "絞り込み（品番・CDタイトル・アーティスト・会社名）",
-        key=f"cpanel_q_{key_prefix}",
-        placeholder="例: TOCT / ベスト / チューリップ",
-    ).strip()
-    if _cp_q:
-        _cp_ql = _cp_q.lower()
-        _cp_view = [
-            c for c in _cp_items
-            if _cp_ql in " ".join([
-                c.get("品番", ""), c.get("CD商品タイトル", ""),
-                c.get("アーティスト", ""), c.get("発売会社", ""), c.get("販売会社", ""),
-            ]).lower()
-        ]
-    else:
-        _cp_view = _cp_items
-
-    if not _cp_view:
-        st.info(f"「{_cp_q}」に一致するCDはありません。")
-        return
-
-    # ── 全件一覧（行クリックで下の「反映するCDを選択」に連動）──────────────
-    _cp_sel_key  = f"cpanel_sel_{key_prefix}"
-    _cp_last_key = f"cpanel_tblrow_{key_prefix}"
-
-    # 絞り込みで件数が変わった場合に備え、保持中の選択インデックスを丸める
-    if not isinstance(st.session_state.get(_cp_sel_key), int) or \
-            not (0 <= st.session_state.get(_cp_sel_key, -1) < len(_cp_view)):
-        st.session_state[_cp_sel_key] = 0
-
-    _cp_ev = st.dataframe(
-        pd.DataFrame([
-            {
-                "No":            c.get("No", ""),
-                "品番":           c.get("品番", ""),
-                "CD商品タイトル":  c.get("CD商品タイトル", ""),
-                "アーティスト":    c.get("アーティスト", ""),
-                "形態":           c.get("形態", ""),
-                "曲数":           c.get("曲数", ""),
-                "発売日":         c.get("発売日", ""),
-                "発売会社":        c.get("発売会社", ""),
-                "販売会社":        c.get("販売会社", ""),
-                "権利":           "/".join(c.get("権利", [])),
-                "初回盤":         "○" if c.get("初回盤") else "",
-            }
-            for c in _cp_view
-        ]),
-        use_container_width=True,
-        hide_index=True,
-        height=min(400, 40 + 35 * len(_cp_view)),
-        on_select="rerun",
-        selection_mode="single-row",
-        key=f"cpanel_tbl_{key_prefix}",
-    )
-    st.caption("表の行をクリックすると、下の「反映するCDを選択」に反映されます。")
-
-    # 表で選ばれた行 → セレクトボックスへ反映（変化したときだけ上書きし、
-    # セレクトボックス側の手動変更を潰さないようにする）
-    try:
-        _cp_rows = list(_cp_ev.selection.rows)
-    except AttributeError:
-        _cp_rows = list((_cp_ev or {}).get("selection", {}).get("rows", []))
-    if _cp_rows:
-        _cp_row = int(_cp_rows[0])
-        if 0 <= _cp_row < len(_cp_view) and st.session_state.get(_cp_last_key) != _cp_row:
-            st.session_state[_cp_last_key] = _cp_row
-            st.session_state[_cp_sel_key] = _cp_row
-    else:
-        st.session_state.pop(_cp_last_key, None)
-
-    # ── 1枚選んで申告フォーマットへ反映 ──────────────────────────────────
-    _cp_sel = st.selectbox(
-        "反映するCDを選択",
-        options=list(range(len(_cp_view))),
-        format_func=lambda i: (
-            f"{_cp_view[i].get('品番', '')}｜{_cp_view[i].get('CD商品タイトル', '')}"
-            f"｜{_cp_view[i].get('発売日', '')}｜{_cp_view[i].get('発売会社', '')}"
-        ),
-        key=_cp_sel_key,
-    )
-    _cp_item = _cp_view[_cp_sel]
-    _cp_a = _cp_item.get("album_id", "")
-    _cp_t = _cp_item.get("track_id", "")
-
-    _cp_det_key = f"cpanel_det_{key_prefix}_{_cp_a}"
-    _cp_det = st.session_state.get(_cp_det_key, {})
-    _cp_dlg = _cp_det.get("集中管理", "")
-
-    _cp_dc1, _cp_dc2, _cp_dc3 = st.columns(3)
-    _cp_dc1.text_input("品番",         value=_cp_item.get("品番", ""),           key=f"cpanel_cat_{key_prefix}", disabled=True)
-    _cp_dc2.text_input("レコード会社", value=_cp_item.get("レコード会社名", ""), key=f"cpanel_rco_{key_prefix}", disabled=True)
-    _cp_dc3.text_input("委任者区分",   value=_cp_dlg or "(詳細取得で確認)",      key=f"cpanel_dlg_{key_prefix}", disabled=True)
-
-    _cp_b1, _cp_b2 = st.columns(2)
-    with _cp_b1:
-        if st.button(
-            "🎵 収録曲を表示（このCDから曲を逆引き）",
-            key=f"cpanel_fetch_{key_prefix}",
-            use_container_width=True,
-            disabled=not _cp_a,
-            help="CD商品詳細から全収録曲（曲順・曲名・IV・収録時間・ISRC・JASRACコード）と委任者区分を取得します",
-        ):
-            with st.spinner("収録曲を取得中..."):
-                try:
-                    _cp_fd = _get_mf_client().fetch_track_list(
-                        _cp_a, _cp_t, title=_cp_res.get("作品名", "")
-                    )
-                    st.session_state[_cp_det_key] = _cp_fd
-                    if _cp_fd.get("error"):
-                        st.toast(f"エラー: {_cp_fd['error']}", icon="❌")
-                    else:
-                        st.toast(
-                            f"{len(_cp_fd.get('tracks', []))}曲を取得  "
-                            f"委任者={_cp_fd.get('集中管理', '(なし)')}",
-                            icon="✅",
-                        )
-                except MusicForestError as _cp_fe:
-                    st.toast(f"エラー: {_cp_fe}", icon="❌")
-    with _cp_b2:
-        if st.button(
-            "✅ CD番号・レコード会社を反映",
-            key=f"cpanel_apply_{key_prefix}",
-            use_container_width=True,
-            disabled=not (_cp_item.get("品番") or _cp_item.get("レコード会社名")),
-        ):
-            _cp_apply = {
-                "CD番号":         _cp_item.get("品番", ""),
-                "CD名":           _cp_item.get("CD商品タイトル", ""),
-                "レコード会社名": _cp_item.get("レコード会社名", ""),
-                "委任者":         _cp_dlg,
-            }
-            for _cp_col, _cp_val in _cp_apply.items():
-                if _cp_val and _cp_col in st.session_state.songs_df.columns:
-                    st.session_state.songs_df.at[row_idx, _cp_col] = _cp_val
-            _cp_iv_str = {"I": "インスト", "V": "ヴォーカル"}.get(_cp_det.get("IV", ""), "")
-            _cp_cur_iv = str(
-                st.session_state.songs_df.at[row_idx, "I/V区分"]
-                if "I/V区分" in st.session_state.songs_df.columns else ""
-            ).strip()
-            if _cp_iv_str and not _cp_cur_iv:
-                st.session_state.songs_df.at[row_idx, "I/V区分"] = _cp_iv_str
-            st.session_state["_apply_msg"] = (
-                f"CD番号・レコード会社名を反映しました。（{_cp_item.get('品番', '')}）"
-            )
-            st.session_state.pop("songs_editor", None)
-            st.rerun()
-
-    # ── 収録曲（CD → 曲の逆引き）────────────────────────────────────────
-    _cp_tracks = _cp_det.get("tracks") or []
-    if _cp_det.get("error") and not _cp_tracks:
-        st.warning(f"収録曲を取得できませんでした: {_cp_det['error']}")
-        if _cp_det.get("attempts"):
-            with st.expander("🔍 試したURLと応答", expanded=False):
-                for _cp_at in _cp_det["attempts"]:
-                    st.markdown(f"- [{_cp_at['url']}]({_cp_at['url']}) → `{_cp_at['result']}`")
-    if _cp_tracks:
-        st.markdown(
-            f"**🎵 収録曲（{len(_cp_tracks)}曲）** — "
-            f"{_cp_det.get('CD商品タイトル', '') or _cp_item.get('CD商品タイトル', '')}"
-        )
-        st.dataframe(
-            pd.DataFrame([
-                {
-                    "曲順":            t.get("曲順", ""),
-                    "曲名":            t.get("曲名", ""),
-                    "IV":             t.get("IV", ""),
-                    "収録時間":         t.get("収録時間", ""),
-                    "アーティスト":     t.get("アーティスト", ""),
-                    "ISRC":           t.get("ISRC", ""),
-                    "JASRAC作品コード":  t.get("JASRAC作品コード", ""),
-                    "NexTone作品コード": t.get("NexTone作品コード", ""),
-                }
-                for t in _cp_tracks
-            ]),
-            use_container_width=True,
-            hide_index=True,
-            height=min(400, 40 + 35 * len(_cp_tracks)),
-        )
-
-        _cp_tsel = st.selectbox(
-            "この曲を申告フォーマットに反映",
-            options=list(range(len(_cp_tracks))),
-            format_func=lambda i: (
-                f"{_cp_tracks[i].get('曲順', '')}. {_cp_tracks[i].get('曲名', '')}"
-                f"（{_cp_tracks[i].get('収録時間', '')}／{_cp_tracks[i].get('IV', '')}）"
-            ),
-            key=f"cpanel_tsel_{key_prefix}",
-        )
-        _cp_trk = _cp_tracks[_cp_tsel]
-        if st.button(
-            "✅ この曲＋CD情報を反映",
-            key=f"cpanel_tapply_{key_prefix}",
-            use_container_width=True,
-            disabled=not _cp_trk.get("曲名"),
-        ):
-            _cp_tapply = {
-                "曲名":             _cp_trk.get("曲名", ""),
-                "JASRAC作品コード":  _cp_trk.get("JASRAC作品コード", ""),
-                "アーティスト":      _cp_trk.get("アーティスト", ""),
-                "CD番号":           _cp_item.get("品番", "") or _cp_det.get("品番", ""),
-                "CD名":             _cp_det.get("CD商品タイトル", "") or _cp_item.get("CD商品タイトル", ""),
-                "レコード会社名":     _cp_item.get("レコード会社名", "") or _cp_det.get("レコード会社名", ""),
-                "委任者":           _cp_det.get("集中管理", ""),
-                "I/V区分":          {"I": "インスト", "V": "ヴォーカル"}.get(_cp_trk.get("IV", ""), ""),
-            }
-            for _cp_col, _cp_val in _cp_tapply.items():
-                if _cp_val and _cp_col in st.session_state.songs_df.columns:
-                    st.session_state.songs_df.at[row_idx, _cp_col] = _cp_val
-            st.session_state["_apply_msg"] = (
-                f"{_cp_trk.get('曲順', '')}曲目「{_cp_trk.get('曲名', '')}」"
-                f"（{_cp_trk.get('収録時間', '')}）とCD情報を反映しました。"
-            )
-            st.session_state.pop("songs_editor", None)
-            st.rerun()
-
-    # ── 参照したMINCのURL ───────────────────────────────────────────────
-    _cp_urls = []
-    if _cp_res.get("search_url"):
-        _cp_urls.append(f"[CD商品リスト]({_cp_res['search_url']})")
-    if _cp_item.get("detail_url"):
-        _cp_urls.append(f"[選択中のCDの商品詳細]({_cp_item['detail_url']})")
-    if _cp_urls:
-        st.caption("🔗 MINC: " + "　／　".join(_cp_urls))
-
-
 # DB 読み込み時に不足する可能性がある列とそのデフォルト値
 _SONG_DEFAULTS: dict[str, str] = {
     "使用形態": "背景",
@@ -512,15 +159,9 @@ def _get_mf_client() -> MusicForestClient:
     ローテーション（新クッキー）を引き継いだままにし、ログイン状態が切れるのを防ぐ。
     認証確認ボタン押下時は st.session_state['mf_client'] を削除してから呼ぶこと。
     """
-    _c = st.session_state.get("mf_client")
-    # modules/musicforest.py を編集するとモジュールが再読み込みされ、クラスオブジェクト
-    # が差し替わる。session_state に残った旧クラスのインスタンスは古いメソッド定義を
-    # 持ったままなので（TypeError: unexpected keyword argument の原因）、
-    # 型が一致しない場合は作り直す。
-    if not isinstance(_c, MusicForestClient):
-        _c = load_client()
-        st.session_state["mf_client"] = _c
-    return _c
+    if "mf_client" not in st.session_state:
+        st.session_state["mf_client"] = load_client()
+    return st.session_state["mf_client"]
 
 
 # =====================================================================
@@ -1028,6 +669,8 @@ with tabs[0]:
                     _mb_best = _pip.get("mb_best")
                     if _mb_best and _mb_best.get("score", 0) >= int(mb_bulk_thresh):
                         _mb_stats["MB命中"] += 1
+                        if _mb_best.get("artist"):
+                            st.session_state.songs_df.at[_mb_idx, "アーティスト"] = _mb_best["artist"]
 
                     # Spotify 結果で補完（MusicBrainz 未取得 or 低スコアのとき）
                     _sp_best = _pip.get("sp_best")
@@ -1705,12 +1348,6 @@ with tabs[0]:
                                 # 委任者（MINC CD詳細から取得）
                                 _m_alb = _mfr.get("_album_id", "")
                                 _m_trk = _mfr.get("_track_id", "")
-                                # album_id なし（配信曲/作品テーブル）→ ページ内 CD リンクが1件なら自動補完
-                                if not (_m_alb and _m_trk):
-                                    _pg_lnks = _mf_bulk.get("_page_cd_links", [])
-                                    if len(_pg_lnks) == 1:
-                                        _m_alb = _pg_lnks[0]["album_id"]
-                                        _m_trk = _pg_lnks[0]["track_id"]
                                 if _m_alb and _m_trk and not updates.get("委任者"):
                                     try:
                                         _delg_b = _mf_c.fetch_product_detail(_m_alb, _m_trk)
@@ -1807,99 +1444,39 @@ with tabs[0]:
         if _shinkok_events is not None and len(_shinkok_events) > 0:
             _shinkok_df = build_shinkok_df(_shinkok_songs, _shinkok_events)
             _preview_cols = [c for c in _shinkok_df.columns if c not in {"トラック", "START TIME", "使用尺"}]
-
-            # スクロールJS（ナビゲーションボタン押下後の rerun で実行）
-            _sh_scroll = st.session_state.pop("_scroll_target", None)
-            if _sh_scroll:
-                _stc.html(
-                    f"<script>setTimeout(function(){{var e=parent.document.getElementById('{_sh_scroll}');"
-                    "if(e)e.scrollIntoView({behavior:'smooth'});},450);</script>",
-                    height=0,
-                )
-
-            _SHINKOK_COL_CFG = {
-                "使用時間（分）": st.column_config.NumberColumn("分", width="small", format="%d"),
-                "使用時間（秒）": st.column_config.NumberColumn("秒", width="small", format="%d"),
-                "使用形態":      st.column_config.TextColumn("使用形態", width="small"),
-                "音源区分":      st.column_config.TextColumn("音源区分", width="small"),
-                "I/V区分":      st.column_config.TextColumn("I/V区分",  width="small"),
-                "邦・洋区分":    st.column_config.TextColumn("邦・洋区分", width="small"),
-                "原・訳詞区分":  st.column_config.TextColumn("原・訳詞区分", width="small"),
-                "確認ステータス": st.column_config.TextColumn("確認ステータス", width="medium"),
-                "委任者":        st.column_config.TextColumn("委任者", width="small"),
-                "CD名":          st.column_config.TextColumn("CD名", width="medium"),
-            }
-
             st.caption(
                 f"申告フォーマット：{len(_shinkok_df)} 行 ／ {_shinkok_songs['イベント名'].nunique()} 曲"
-                "　行をクリックして選択 → 下のボタンで補完検索に移動できます。"
+                "　ダブルクリックで直接編集できます。編集内容は CSV でダウンロードされます。"
             )
-            _shinkok_view = st.dataframe(
+            _edited_shinkok = st.data_editor(
                 _shinkok_df[_preview_cols],
                 use_container_width=True,
                 hide_index=True,
-                height=420,
-                on_select="rerun",
-                selection_mode="single-row",
-                key="shinkok_view",
-                column_config=_SHINKOK_COL_CFG,
+                height=500,
+                key="shinkok_editor",
+                column_config={
+                    "使用時間（分）": st.column_config.NumberColumn("分", width="small", format="%d"),
+                    "使用時間（秒）": st.column_config.NumberColumn("秒", width="small", format="%d"),
+                    "使用形態":      st.column_config.TextColumn("使用形態", width="small"),
+                    "音源区分":      st.column_config.TextColumn("音源区分", width="small"),
+                    "I/V区分":      st.column_config.TextColumn("I/V区分",  width="small"),
+                    "邦・洋区分":    st.column_config.TextColumn("邦・洋区分", width="small"),
+                    "原・訳詞区分":  st.column_config.TextColumn("原・訳詞区分", width="small"),
+                    "確認ステータス": st.column_config.TextColumn("確認ステータス", width="medium"),
+                    "委任者":        st.column_config.TextColumn("委任者", width="small"),
+                    "CD名":          st.column_config.TextColumn("CD名", width="medium"),
+                },
             )
-
-            # 行選択時：選択曲のナビゲーションボタンを即表示
-            _sel_rows = _shinkok_view.selection.rows if hasattr(_shinkok_view, "selection") else []
-            if _sel_rows:
-                _sel_ev = str(_shinkok_df.iloc[_sel_rows[0]].get("イベント名", "")).strip()
-                _smatch2 = (
-                    _shinkok_songs[_shinkok_songs["イベント名"] == _sel_ev]
-                    if _sel_ev else pd.DataFrame()
-                )
-                if not _smatch2.empty:
-                    _sm2 = _smatch2.iloc[0]
-                    _no2 = int(_sm2["No"])
-                    _name2 = str(_sm2.get("曲名", _sel_ev) or _sel_ev).strip() or _sel_ev
-                    _status2 = str(_sm2.get("確認ステータス", "未調査") or "未調査").strip()
-                    _sel_label2 = f"{_no2}. [{_status2}] {_sel_ev}"
-                    _gbc1, _gbc2, _gbc3, _gbc4 = st.columns([2.5, 2.5, 2.5, 3.5])
-                    with _gbc1:
-                        if st.button("🌲 MINC で調査", key="shin_goto_minc", use_container_width=True):
-                            st.session_state["search_song_select"] = _sel_label2
-                            st.session_state["_scroll_target"] = "sec-minc-individual"
-                            st.rerun()
-                    with _gbc2:
-                        if st.button("🔄 パイプラインで調査", key="shin_goto_pip", use_container_width=True):
-                            st.session_state["search_song_select"] = _sel_label2
-                            st.session_state["_scroll_target"] = "sec-pipeline"
-                            st.rerun()
-                    with _gbc3:
-                        if st.button("💿 CD情報を検索", key="shin_goto_cds", use_container_width=True):
-                            st.session_state["search_song_select"] = _sel_label2
-                            st.session_state["_scroll_target"] = "sec-cd-search"
-                            st.rerun()
-                    with _gbc4:
-                        st.caption(f"📍 **{_name2}** [{_status2}]")
-
-            # 直接編集・CSV ダウンロード
-            with st.expander("✏️ 直接編集 / CSV ダウンロード", expanded=False):
-                st.caption("ダブルクリックで直接編集できます。編集内容は楽曲まとめに自動保存されます。")
-                _edited_shinkok = st.data_editor(
-                    _shinkok_df[_preview_cols],
+            _sh_dl_col, _sh_gap = st.columns([2, 3])
+            with _sh_dl_col:
+                _shinkok_csv = _edited_shinkok.to_csv(index=False, encoding="utf-8-sig")
+                st.download_button(
+                    label="⬇️ 申告フォーマット CSV（編集済み）",
+                    data=_shinkok_csv.encode("utf-8-sig"),
+                    file_name="申告フォーマット.csv",
+                    mime="text/csv",
                     use_container_width=True,
-                    hide_index=True,
-                    height=400,
-                    key="shinkok_editor",
-                    column_config=_SHINKOK_COL_CFG,
-                    on_change=_sync_shinkok_to_songs,
                 )
-                _sh_dl_col, _sh_gap = st.columns([2, 3])
-                with _sh_dl_col:
-                    _shinkok_csv = _edited_shinkok.to_csv(index=False, encoding="utf-8-sig")
-                    st.download_button(
-                        label="⬇️ 申告フォーマット CSV（編集済み）",
-                        data=_shinkok_csv.encode("utf-8-sig"),
-                        file_name="申告フォーマット.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    )
 
 
 # =====================================================================
@@ -2019,36 +1596,6 @@ with tabs[0]:
             row_idx = songs_df[songs_df["No"] == selected_no].index[0]
             row = songs_df.loc[row_idx]
 
-            # 選択曲名 + セクション移動ボタン
-            _sel_song_name = str(row.get("曲名") or row.get("イベント名", "")).strip()
-            if _sel_song_name and _sel_song_name.lower() != "nan":
-                st.caption(f"🎵 {_sel_song_name}")
-            st.markdown(
-                """
-                <div style="display:flex;gap:8px;margin:4px 0 8px">
-                  <a href="#sec-minc-individual"
-                     style="flex:1;text-align:center;padding:7px 4px;
-                            background:#1565C0;color:#fff;border-radius:6px;
-                            text-decoration:none;font-size:13px;font-weight:600">
-                    🌲 MINC 楽曲検索（個別）
-                  </a>
-                  <a href="#sec-cd-search"
-                     style="flex:1;text-align:center;padding:7px 4px;
-                            background:#1565C0;color:#fff;border-radius:6px;
-                            text-decoration:none;font-size:13px;font-weight:600">
-                    💿 CD情報検索
-                  </a>
-                  <a href="#sec-pipeline"
-                     style="flex:1;text-align:center;padding:7px 4px;
-                            background:#1565C0;color:#fff;border-radius:6px;
-                            text-decoration:none;font-size:13px;font-weight:600">
-                    🔄 全自動パイプライン
-                  </a>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
             # 選択曲が変わったとき、Excel確認タブのフィルターを自動更新
             if st.session_state.get("_ex_auto_from_no") != selected_no:
                 st.session_state["_ex_auto_from_no"] = selected_no
@@ -2091,1299 +1638,6 @@ with tabs[0]:
             encoded = urllib.parse.quote(main_term)
 
             st.subheader(f"No.{selected_no} ／ {row.get('イベント名', '')}")
-        # ---- MINC 楽曲検索（個別・保険）----
-        st.divider()
-        st.markdown('<a id="sec-minc-individual"></a>', unsafe_allow_html=True)
-        st.markdown("#### 🌲 MINC 楽曲検索（個別）")
-        st.caption(
-            "まずここで検索して候補を確認してください。"
-            "　minc.or.jp にログイン済みの Cookie を使って作曲者・作詞者・JASRAC コード・CD情報・I/V区分・委任者を取得します。"
-        )
-
-        # 認証状態バー（アプリ全体で1つのキーを使いまわす）
-        _mf_auth_col, _mf_btn_col = st.columns([4, 1])
-        with _mf_btn_col:
-            _mf_check = st.button("🔄 認証確認", key=f"mf_check_{selected_no}", use_container_width=True)
-        if _mf_check:
-            st.session_state.pop("mf_auth_state", None)
-            st.session_state.pop("mf_client", None)  # 再ログイン後は新クライアントを作成
-        if "mf_auth_state" not in st.session_state:
-            try:
-                _mf_ok, _mf_msg = check_session(_get_mf_client())
-            except MusicForestError as _e:
-                _mf_ok, _mf_msg = False, str(_e)
-            st.session_state["mf_auth_state"] = (_mf_ok, _mf_msg)
-        _mf_ok, _mf_msg = st.session_state["mf_auth_state"]
-        with _mf_auth_col:
-            if _mf_ok:
-                st.success(f"✅ {_mf_msg}")
-            else:
-                st.warning(
-                    f"⚠️ {_mf_msg}\n\n"
-                    f"ログイン: `.venv\\Scripts\\python.exe "
-                    f"H:\\PROGRAM\\search_music\\src\\login_browser.py`"
-                )
-
-        if _mf_ok:
-            _mf_s1, _mf_s2, _mf_s3 = st.columns([3, 2, 1])
-            with _mf_s1:
-                _mf_term_opts = [f"[{lbl}]  {val}" for lbl, val in term_candidates]
-                _mf_term_sel = st.selectbox(
-                    "検索語候補",
-                    options=_mf_term_opts,
-                    key=f"mf_title_{selected_no}",
-                )
-                _mf_title_val = term_candidates[_mf_term_opts.index(_mf_term_sel)][1]
-            with _mf_s2:
-                # 他セクション（パイプライン等）から著作者名を流し込む場合は
-                # ウィジェット生成「前」のここで反映する
-                # （生成後に session_state を書き換えると StreamlitAPIException）
-                _mf_author_pending = st.session_state.pop(f"mf_author_pending_{selected_no}", None)
-                if _mf_author_pending is not None:
-                    st.session_state[f"mf_author_{selected_no}"] = _mf_author_pending
-                _mf_author_val = st.text_input(
-                    "著作者名（任意・絞り込み用）",
-                    value="",
-                    key=f"mf_author_{selected_no}",
-                    placeholder=str(row.get("作曲者", "")).strip() or "例: 加藤達也",
-                )
-            with _mf_s3:
-                _mf_match = st.selectbox(
-                    "一致方式",
-                    options=["2: 前方一致", "3: キーワード", "1: 完全一致"],
-                    key=f"mf_match_{selected_no}",
-                    help="match=1 は MINC 側でキーワード扱いになり別の曲が返ることがあります。前方一致が最も安定します。",
-                )
-            _mf_match_int = int(_mf_match[0])
-
-            # 選択語を編集できるinput（候補が変わったときリセット）
-            _mf_edit_key = f"mf_term_edit_{selected_no}"
-            _mf_prev_key = f"mf_term_prev_{selected_no}"
-            if st.session_state.get(_mf_prev_key) != _mf_title_val:
-                if _mf_edit_key in st.session_state:
-                    del st.session_state[_mf_edit_key]
-                st.session_state[_mf_prev_key] = _mf_title_val
-            _mf_search_term = st.text_input(
-                "検索語（編集可）",
-                key=_mf_edit_key,
-                value=_mf_title_val,
-                help="候補から自動入力。不要な語を削除するなど自由に編集できます。",
-            )
-
-            if st.button(
-                f"🌲 MINC で「{(_mf_search_term or _mf_title_val)[:20]}」を検索",
-                key=f"mf_search_{selected_no}",
-                type="primary",
-                use_container_width=True,
-            ):
-                with st.spinner("MINC を検索中... （1.5秒/リクエスト）"):
-                    try:
-                        _mf_client = _get_mf_client()
-                        _mf_result = _mf_client.search(
-                            _mf_search_term or _mf_title_val,
-                            author=_mf_author_val,
-                            match=_mf_match_int,
-                        )
-                        st.session_state[f"mf_results_{selected_no}"] = _mf_result
-                    except MusicForestError as e:
-                        st.session_state[f"mf_results_{selected_no}"] = {"error": str(e), "results": []}
-
-        # ---- MusicForest 検索結果表示 ----
-        _mf_res = st.session_state.get(f"mf_results_{selected_no}")
-        if _mf_res:
-            if _mf_res.get("error"):
-                st.error(f"MINC エラー: {_mf_res['error']}")
-                with st.expander("デバッグ HTML"):
-                    st.code(_mf_res.get("debug_html", "")[:3000], language="html")
-            elif not _mf_res.get("results"):
-                st.warning("MusicForest: 該当なし")
-                with st.expander("デバッグ HTML"):
-                    st.code(_mf_res.get("debug_html", "")[:3000], language="html")
-            else:
-                _mf_items = _mf_res["results"]
-                if _mf_res.get("truncated"):
-                    st.warning("⚠️ 検索結果が 500件上限に達しました。検索語を絞り込んでください。")
-                st.success(f"🌲 MINC: {len(_mf_items)} 件見つかりました")
-                st.caption(f"検索URL: {_mf_res.get('search_url','')}")
-
-                # MINC詳細取得・J-WID取得の結果を永続バナーで表示（rerun後も消えない）
-                _mf_flash_key = f"mf_flash_{selected_no}"
-                if _mf_flash_key in st.session_state:
-                    _fl = st.session_state.pop(_mf_flash_key)
-                    if _fl.get("error"):
-                        st.error(_fl["error"])
-                    else:
-                        st.success(_fl["message"])
-
-                for _mf_i, _mf_item in enumerate(_mf_items[:20]):
-                    _mf_label = (
-                        f"候補{_mf_i+1} [{_mf_item['_source_table']}]: "
-                        f"{_mf_item.get('作品名','')} ／ {_mf_item.get('アーティスト','')} "
-                        f"  JASRAC:{_mf_item.get('JASRAC作品コード','(なし)')}  "
-                        f"NexTone:{_mf_item.get('NexTone管理番号','(なし)')}"
-                    )
-                    with st.expander(_mf_label, expanded=(_mf_i == 0), key=f"mf_exp_{selected_no}_{_mf_i}"):
-                        _mf_c1, _mf_c2 = st.columns(2)
-                        _mf_c1.text_input("作品名",         value=_mf_item.get("作品名",""),          key=f"mf_name_{selected_no}_{_mf_i}", disabled=True)
-                        _mf_c1.text_input("アーティスト",   value=_mf_item.get("アーティスト",""),    key=f"mf_art_{selected_no}_{_mf_i}",  disabled=True)
-                        _mf_c1.text_input("品番（CD番号）",  value=_mf_item.get("品番",""),            key=f"mf_cat_{selected_no}_{_mf_i}",  disabled=True)
-                        _mf_c1.text_input("CD商品タイトル",  value=_mf_item.get("CD商品タイトル",""),  key=f"mf_cdtitle_{selected_no}_{_mf_i}", disabled=True)
-                        _mf_c2.text_input("JASRAC作品コード", value=_mf_item.get("JASRAC作品コード",""), key=f"mf_jcd_{selected_no}_{_mf_i}",  disabled=True)
-                        _mf_c2.text_input("NexTone管理番号", value=_mf_item.get("NexTone管理番号",""), key=f"mf_ncd_{selected_no}_{_mf_i}",  disabled=True)
-                        _mf_c2.text_input("レコード会社名",  value=_mf_item.get("レコード会社名",""),  key=f"mf_label_{selected_no}_{_mf_i}", disabled=True)
-                        _mf_c2.text_input("発売会社／販売会社（生）", value=_mf_item.get("発売会社販売会社",""), key=f"mf_pub_{selected_no}_{_mf_i}", disabled=True)
-
-                        # キー定義（ハンドラ・詳細フィールド共用）
-                        _mf_detail_key = f"mf_detail_{selected_no}_{_mf_i}"
-                        _jwid_minc_key = f"mf_jwid_{selected_no}_{_mf_i}"
-                        _mf_delg_key   = f"mf_delg_{selected_no}_{_mf_i}"
-                        _mf_jcd    = _mf_item.get("JASRAC作品コード", "")
-                        _mf_alb_id = _mf_item.get("_album_id", "")
-                        _mf_trk_id = _mf_item.get("_track_id", "")
-
-                        # ---- ボタン列（詳細フィールドより先に描画）----
-                        # ハンドラが session_state を更新した後に下の詳細フィールドが描画されるため
-                        # st.rerun() 不要でデータが即時反映される
-                        _mf_btn1, _mf_btn_jwid, _mf_btn2 = st.columns(3)
-
-                        with _mf_btn1:
-                            if st.button(
-                                "💿 MINC CD情報取得",
-                                key=f"mf_detail_btn_{selected_no}_{_mf_i}",
-                                use_container_width=True,
-                                help=(
-                                    "アルバムIDのある候補（収録曲テーブル）のみI/V区分・委任者を取得できます。\n"
-                                    "アルバムIDがない候補（配信曲・作品テーブル）は下の「💿 CD情報取得」セクションをご利用ください。"
-                                ),
-                            ):
-                                with st.spinner("MINC 情報取得中..."):
-                                    # Step 1: 作品詳細（作曲者/作詞者）
-                                    _d_err = None
-                                    try:
-                                        _d = _get_mf_client().get_detail(_mf_item["_detail_href"])
-                                        st.session_state[_mf_detail_key] = _d
-                                        if _d.get("error"):
-                                            _d_err = _d["error"]
-                                    except MusicForestError as _e:
-                                        _d_err = str(_e)
-                                        st.session_state[_mf_detail_key] = {"error": _d_err}
-
-                                    # Step 2: CD詳細（I/V区分・委任者）
-                                    if _mf_alb_id and _mf_trk_id:
-                                        try:
-                                            _cd = _get_mf_client().fetch_product_detail(_mf_alb_id, _mf_trk_id)
-                                            st.session_state[_mf_delg_key] = _cd
-                                            _iv_label = {"I": "インスト", "V": "ヴォーカル"}.get(_cd.get("IV", ""), "不明")
-                                            _cd_err = _cd.get("error")
-                                            if _cd_err:
-                                                st.toast(f"CD情報エラー: {_cd_err}", icon="❌")
-                                            elif _d_err:
-                                                st.toast(
-                                                    f"CD情報取得完了（候補{_mf_i+1}）: I/V={_iv_label} / 委任者={_cd.get('集中管理','不明')} ※作品詳細エラー: {_d_err}",
-                                                    icon="⚠️",
-                                                )
-                                            else:
-                                                _d_data = st.session_state.get(_mf_detail_key, {})
-                                                st.toast(
-                                                    f"取得完了（候補{_mf_i+1}）: "
-                                                    f"作曲者={_d_data.get('作曲者','') or '(なし)'}　"
-                                                    f"I/V={_iv_label}　"
-                                                    f"委任者={_cd.get('集中管理','不明')}",
-                                                    icon="✅",
-                                                )
-                                        except MusicForestError as _e:
-                                            st.session_state[_mf_delg_key] = {"集中管理": "", "IV": "", "error": str(_e)}
-                                            st.toast(f"CD情報取得エラー: {_e}", icon="❌")
-                                    else:
-                                        # 収録CD情報なし（作品テーブルの場合）→ CD情報取得不可
-                                        if _d_err:
-                                            st.toast(f"MINC詳細エラー: {_d_err}", icon="❌")
-                                        else:
-                                            _d_data = st.session_state.get(_mf_detail_key, {})
-                                            st.toast(
-                                                f"作家情報取得完了（候補{_mf_i+1}）: "
-                                                f"作曲者={_d_data.get('作曲者','') or '(なし)'}　"
-                                                f"※CD情報（I/V・委任者）は収録CD情報がないため取得できません",
-                                                icon="⚠️",
-                                            )
-
-                        with _mf_btn_jwid:
-                            if st.button(
-                                "📋 J-WID作家情報",
-                                key=f"mf_jwid_btn_{selected_no}_{_mf_i}",
-                                use_container_width=True,
-                                disabled=not _mf_jcd,
-                                help=f"JASRACコード {_mf_jcd} でJ-WIDを直接引き当て。作家情報＋管理状況を取得します",
-                            ):
-                                with st.spinner("J-WID から取得中..."):
-                                    from modules.scraper import fetch_jwid_rights_by_code as _fetch_by_code
-                                    _jw = _fetch_by_code(_mf_jcd)
-                                    st.session_state[_jwid_minc_key] = _jw
-                                    if _jw.get("error"):
-                                        st.toast(f"J-WID エラー: {_jw['error']}", icon="❌")
-                                    else:
-                                        st.toast(
-                                            f"J-WID 取得完了（候補{_mf_i+1}）: "
-                                            f"作曲者: {_jw['作曲者'] or '(なし)'}　"
-                                            f"作詞者: {_jw['作詞者'] or '(なし)'}　"
-                                            f"訳詞者: {_jw['訳詞者'] or '(なし)'}", icon="✅"
-                                        )
-
-                        with _mf_btn2:
-                            if st.button(
-                                "✅ 申告フォーマットに反映",
-                                key=f"mf_apply_{selected_no}_{_mf_i}",
-                                use_container_width=True,
-                            ):
-                                _jw_d = st.session_state.get(_jwid_minc_key, {})
-                                _detail_now = st.session_state.get(_mf_detail_key, {})
-                                # 作曲者・作詞者が未取得なら MINC 詳細を自動フェッチ
-                                if not (_jw_d.get("作曲者") or _detail_now.get("作曲者") or
-                                        _jw_d.get("作詞者") or _detail_now.get("作詞者")):
-                                    try:
-                                        _ad = _get_mf_client().get_detail(_mf_item["_detail_href"])
-                                        if not _ad.get("error"):
-                                            st.session_state[_mf_detail_key] = _ad
-                                            _detail_now = _ad
-                                    except Exception:
-                                        pass
-                                # J-WID を優先、なければ MINC 詳細
-                                _composer   = _jw_d.get("作曲者") or _detail_now.get("作曲者") or ""
-                                _lyricist   = _jw_d.get("作詞者") or _detail_now.get("作詞者") or ""
-                                _translator = _jw_d.get("訳詞者") or _detail_now.get("訳詞者") or ""
-                                _arranger   = _jw_d.get("編曲者") or _detail_now.get("編曲者") or ""
-                                _delg_r = st.session_state.get(_mf_delg_key, {})
-                                _委任者 = _delg_r.get("集中管理","")
-                                _iv_raw = _delg_r.get("IV","")
-                                _iv_apply = {"I": "インスト", "V": "ヴォーカル"}.get(_iv_raw, "")
-                                _mf_jcd2 = _mf_item.get("JASRAC作品コード","") or _detail_now.get("作品コード","")
-                                # JASRACコードが変わる場合は先に関連フィールドをクリア
-                                _apply_clear_on_jcd_change(row_idx, _mf_jcd2)
-                                _mf_apply = {
-                                    "曲名":            _mf_item.get("作品名",""),
-                                    "作曲者":          _composer,
-                                    "作詞者":          _lyricist,
-                                    "訳詞者":          _translator,
-                                    "編曲者":          _arranger,
-                                    "アーティスト":    _mf_item.get("アーティスト","") or _delg_r.get("アーティスト",""),
-                                    "CD番号":          _mf_item.get("品番","") or _delg_r.get("品番",""),
-                                    "CD名":            _mf_item.get("CD商品タイトル","") or _delg_r.get("CD商品タイトル",""),
-                                    "レコード会社名":  _mf_item.get("レコード会社名",""),
-                                    "JASRAC作品コード": _mf_jcd2,
-                                    "NexTone管理番号": _mf_item.get("NexTone管理番号","") or _detail_now.get("NexTone管理番号",""),
-                                    "委任者":          _委任者,
-                                    "確認ステータス":  "候補あり",
-                                }
-                                _hy = _infer_houyo(_mf_jcd2)
-                                _cur_hy_mf = str(st.session_state.songs_df.at[row_idx, "邦洋区分"] if "邦洋区分" in st.session_state.songs_df.columns else "").strip()
-                                if _hy and not _cur_hy_mf:
-                                    _mf_apply["邦洋区分"] = _hy
-                                _cur_iv_mf = str(st.session_state.songs_df.at[row_idx, "I/V区分"] if "I/V区分" in st.session_state.songs_df.columns else "").strip()
-                                if _iv_apply and not _cur_iv_mf:
-                                    _mf_apply["I/V区分"] = _iv_apply
-                                for _col, _val in _mf_apply.items():
-                                    if _val and _col in st.session_state.songs_df.columns:
-                                        st.session_state.songs_df.at[row_idx, _col] = _val
-                                st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
-                                st.session_state.pop("songs_editor", None)
-                                st.rerun()
-
-                        # ---- 詳細フィールド（ボタンハンドラ実行後に描画 → 取得データが即反映）----
-
-                        _mf_detail = st.session_state.get(_mf_detail_key, {})
-                        _mf_dc1, _mf_dc2, _mf_dc3 = st.columns(3)
-                        _mf_dc1.text_input("作曲者（MINC詳細）", value=_mf_detail.get("作曲者",""), key=f"mf_comp_{selected_no}_{_mf_i}", disabled=True, placeholder="詳細取得で確認")
-                        _mf_dc2.text_input("作詞者（MINC詳細）", value=_mf_detail.get("作詞者",""), key=f"mf_lyric_{selected_no}_{_mf_i}", disabled=True, placeholder="詳細取得で確認")
-                        _mf_dc3.text_input("編曲者（MINC詳細）", value=_mf_detail.get("編曲者",""), key=f"mf_arr_{selected_no}_{_mf_i}", disabled=True)
-
-                        # J-WID 直接引き当て（MINCのJASRACコードを使用）
-                        _jwid_minc = st.session_state.get(_jwid_minc_key, {})
-                        if _jwid_minc and not _jwid_minc.get("error"):
-                            _jw_c1, _jw_c2, _jw_c3, _jw_c4 = st.columns(4)
-                            _jw_c1.text_input("作曲者（J-WID）", value=_jwid_minc.get("作曲者",""), key=f"mf_j_comp_{selected_no}_{_mf_i}", disabled=True)
-                            _jw_c2.text_input("作詞者（J-WID）", value=_jwid_minc.get("作詞者",""), key=f"mf_j_lyric_{selected_no}_{_mf_i}", disabled=True)
-                            _jw_c3.text_input("訳詞者（J-WID）", value=_jwid_minc.get("訳詞者",""), key=f"mf_j_tran_{selected_no}_{_mf_i}", disabled=True)
-                            _jw_c4.text_input("編曲者（J-WID）", value=_jwid_minc.get("編曲者",""), key=f"mf_j_arr_{selected_no}_{_mf_i}", disabled=True)
-                            _mgmt_minc = _jwid_minc.get("管理状況", {})
-                            if _mgmt_minc:
-                                st.markdown("**管理状況（JASRAC）:**  \n" + _format_management_status(_mgmt_minc))
-                        elif _jwid_minc.get("error"):
-                            st.error(f"J-WID 取得エラー: {_jwid_minc['error']}")
-
-                        # CD情報取得結果（I/V区分・委任者・CDメタデータ）
-                        _mf_delg = st.session_state.get(_mf_delg_key, {})
-                        if _mf_delg:
-                            if _mf_delg.get("error"):
-                                st.error(f"CD情報取得エラー: {_mf_delg['error']}")
-                            else:
-                                _iv_raw_d = _mf_delg.get("IV", "")
-                                _iv_disp = {"I": "インスト", "V": "ヴォーカル"}.get(_iv_raw_d, "")
-                                _delg_status = _mf_delg.get("集中管理", "")
-                                _cd_info_c1, _cd_info_c2 = st.columns(2)
-                                _cd_info_c1.text_input(
-                                    "I/V区分（MINC）",
-                                    value=_iv_disp or "（取得できず）",
-                                    key=f"mf_iv_disp_{selected_no}_{_mf_i}",
-                                    disabled=True,
-                                )
-                                _cd_info_c2.text_input(
-                                    "委任者（MINC）",
-                                    value=_delg_status or "（取得できず）",
-                                    key=f"mf_delg_disp_{selected_no}_{_mf_i}",
-                                    disabled=True,
-                                )
-                                # CDタイトル・トラック情報（fetch_product_detail 拡張版で取得した場合）
-                                _d_cd_title  = _mf_delg.get("CD商品タイトル", "")
-                                _d_cd_cat    = _mf_delg.get("品番", "")
-                                _d_cd_trk    = _mf_delg.get("トラック番号", "")
-                                _d_cd_name   = _mf_delg.get("曲名", "")
-                                _d_cd_dur    = _mf_delg.get("尺", "")
-                                _d_cd_art    = _mf_delg.get("アーティスト", "")
-                                _d_cd_rec_co = _mf_delg.get("レコード会社名", "")
-                                if _d_cd_title or _d_cd_trk or _d_cd_name:
-                                    _cd_meta_parts = []
-                                    if _d_cd_title:
-                                        _cd_meta_parts.append(f"**CD:** {_d_cd_title}" + (f"（{_d_cd_cat}）" if _d_cd_cat else ""))
-                                    if _d_cd_rec_co:
-                                        _cd_meta_parts.append(f"**レコード会社:** {_d_cd_rec_co}")
-                                    if _d_cd_art:
-                                        _cd_meta_parts.append(f"**アーティスト:** {_d_cd_art}")
-                                    if _d_cd_trk or _d_cd_name:
-                                        _cd_meta_parts.append(
-                                            f"**トラック{_d_cd_trk}:** {_d_cd_name}" + (f"（{_d_cd_dur}）" if _d_cd_dur else "")
-                                        )
-                                    st.markdown("  \n".join(_cd_meta_parts))
-                                if _delg_status == "委任者":
-                                    st.success(f"※集中管理: **{_delg_status}**（送信可能化権が日本レコード協会に集中管理委任済み）")
-                                elif _delg_status == "非委任者":
-                                    st.warning(f"※集中管理: **{_delg_status}**（送信可能化権は集中管理されていません）")
-
-                        # CD情報検索パネル（JASRACコードで収録CDリストを取得）
-                        if _mf_jcd:
-                            st.divider()
-                            _show_cd_panel(
-                                _mf_jcd, row_idx, f"mf_{selected_no}_{_mf_i}",
-                                title=_mf_item.get("作品名", ""),
-                            )
-
-                        st.link_button(
-                            "🌲 MINC で詳細を確認",
-                            f"https://www.minc.or.jp/saku/detail/?{_mf_item['_detail_href']}",
-                            use_container_width=True,
-                        )
-                        if _mf_item.get("_row_html"):
-                            with st.expander("🔍 デバッグ: 検索結果行の HTML（album_id が取れない場合に確認）"):
-                                st.code(_mf_item["_row_html"], language="html")
-
-                # ---- CD情報取得（収録CD情報なし候補向け） ----
-                _no_cd_indices = [i for i, it in enumerate(_mf_items[:20]) if not it.get("_album_id")]
-                _page_cd_links = _mf_res.get("_page_cd_links", [])
-
-                if _no_cd_indices:
-                    _exp_label = "💿 CD情報取得" if _page_cd_links else "💿 CD情報 手動取得（URLから直接指定）"
-                    with st.expander(_exp_label, expanded=bool(_page_cd_links)):
-                        # 2つのボタンが共有する変数（どちらかのボタンが押されたときにセットされる）
-                        _m_alb = ""
-                        _m_trk = ""
-                        _man_target_idx = None
-                        _m_cd_result = None
-                        _m_fetch_err = ""
-
-                        _man_cand_opts = [f"候補{i+1}: {_mf_items[i].get('作品名','')}" for i in _no_cd_indices]
-
-                        # ── ① ページ内CDリスト（推奨） ──────────────────────────
-                        if _page_cd_links:
-                            st.markdown("##### 📋 検索結果ページ内のCDリスト")
-                            st.caption("MINCの検索結果ページで見つかったCDです。候補に紐付けてください。")
-                            _pg_labels = [lnk["label"] for lnk in _page_cd_links]
-                            _pg_sel_label = st.selectbox(
-                                "CD",
-                                options=_pg_labels,
-                                key=f"mf_pg_cd_{selected_no}",
-                            )
-                            _pg_sel_lnk = _page_cd_links[_pg_labels.index(_pg_sel_label)]
-                            _pg_cand_sel = st.selectbox(
-                                "適用する候補",
-                                options=_man_cand_opts,
-                                key=f"mf_pg_cand_{selected_no}",
-                            )
-                            _pg_target_idx = _no_cd_indices[_man_cand_opts.index(_pg_cand_sel)]
-                            if st.button("💿 このCDで情報を取得", key=f"mf_pg_fetch_{selected_no}"):
-                                _m_alb = _pg_sel_lnk["album_id"]
-                                _m_trk = _pg_sel_lnk["track_id"]
-                                _man_target_idx = _pg_target_idx
-                                with st.spinner("CD情報を取得中..."):
-                                    try:
-                                        _m_cd_result = _get_mf_client().fetch_product_detail(_m_alb, _m_trk)
-                                    except Exception as _pe:
-                                        _m_fetch_err = str(_pe)
-
-                            st.divider()
-                            st.markdown("##### 🔗 URLから直接指定（上のリストにない場合）")
-                        else:
-                            st.caption(
-                                "MINCの **検索URL**（/music/list?tr=…）または **CD詳細URL**（/parts/product/detail?album_id=…）"
-                                "を貼り付けてください。"
-                            )
-
-                        # ── ② URL入力 ─────────────────────────────────────────
-                        _man_url = st.text_input(
-                            "MINC URL（検索URLまたはCD詳細URL）",
-                            key=f"mf_manual_url_{selected_no}",
-                            placeholder="https://www.minc.or.jp/music/list?tr=... または /parts/product/detail?album_id=...",
-                        )
-                        _man_sel = st.selectbox(
-                            "適用する候補" if not _page_cd_links else "適用する候補（URL指定用）",
-                            options=_man_cand_opts,
-                            key=f"mf_manual_cand_{selected_no}",
-                        )
-                        _man_url_target_idx = _no_cd_indices[_man_cand_opts.index(_man_sel)] if _man_sel else None
-                        if st.button(
-                            "💿 URLからCD情報を取得",
-                            key=f"mf_manual_fetch_{selected_no}",
-                            disabled=not _man_url,
-                        ):
-                            try:
-                                _m_parsed = urllib.parse.urlparse(_man_url.strip())
-                                _m_q = dict(urllib.parse.parse_qsl(_m_parsed.query))
-                                if "product/detail" in _m_parsed.path:
-                                    _m_alb = _m_q.get("album_id", "")
-                                    _m_trk = _m_q.get("track_id", "")
-                                    if not _m_alb or not _m_trk:
-                                        _m_fetch_err = "URLから album_id / track_id を取得できませんでした。"
-                                elif "music/list" in _m_parsed.path:
-                                    _m_title = _m_q.get("tr", "")
-                                    _m_author = _m_q.get("ka", "")
-                                    _m_match = int(_m_q.get("match", "2"))
-                                    if not _m_title:
-                                        _m_fetch_err = "URLから検索語（tr パラメータ）を取得できませんでした。"
-                                    else:
-                                        with st.spinner(f"MINC で「{_m_title}」を検索中..."):
-                                            _m_res = _get_mf_client().search(_m_title, author=_m_author, match=_m_match)
-                                        _m_hits = [it for it in _m_res.get("results", []) if it.get("_album_id")]
-                                        if _m_hits:
-                                            _m_alb = _m_hits[0]["_album_id"]
-                                            _m_trk = _m_hits[0]["_track_id"]
-                                        else:
-                                            _m_fetch_err = "CD情報付き結果が見つかりませんでした。CD詳細URLを直接貼り付けてください。"
-                                else:
-                                    _m_fetch_err = "MINCの検索URL（/music/list）またはCD詳細URL（/parts/product/detail）を貼り付けてください。"
-                                if not _m_fetch_err and _m_alb and _m_trk:
-                                    with st.spinner("CD情報を取得中..."):
-                                        _m_cd_result = _get_mf_client().fetch_product_detail(_m_alb, _m_trk)
-                                    _man_target_idx = _man_url_target_idx
-                            except Exception as _me:
-                                _m_fetch_err = str(_me)
-
-                        if _m_fetch_err:
-                            st.error(_m_fetch_err)
-
-                        # ── 共通: 取得結果の処理 ────────────────────────────────
-                        if _m_cd_result is not None:
-                            if _m_cd_result.get("error"):
-                                st.error(f"エラー: {_m_cd_result['error']}")
-                            else:
-                                if _man_target_idx is not None:
-                                    st.session_state[f"mf_delg_{selected_no}_{_man_target_idx}"] = _m_cd_result
-                                    _mf_res_ss_u = st.session_state.get(f"mf_results_{selected_no}", {})
-                                    if "results" in _mf_res_ss_u and _man_target_idx < len(_mf_res_ss_u["results"]):
-                                        _ss_item = _mf_res_ss_u["results"][_man_target_idx]
-                                        for _fk, _fv in {
-                                            "品番":           _m_cd_result.get("品番", ""),
-                                            "CD商品タイトル": _m_cd_result.get("CD商品タイトル", ""),
-                                            "アーティスト":   _m_cd_result.get("アーティスト", ""),
-                                            "_album_id":      _m_alb,
-                                            "_track_id":      _m_trk,
-                                        }.items():
-                                            if _fv and not _ss_item.get(_fk):
-                                                _ss_item[_fk] = _fv
-                                        for _wk in (
-                                            f"mf_cat_{selected_no}_{_man_target_idx}",
-                                            f"mf_cdtitle_{selected_no}_{_man_target_idx}",
-                                            f"mf_art_{selected_no}_{_man_target_idx}",
-                                        ):
-                                            st.session_state.pop(_wk, None)
-                                _cd_iv_raw  = _m_cd_result.get("IV", "")
-                                _cd_iv_appl = {"I": "インスト", "V": "ヴォーカル"}.get(_cd_iv_raw, "")
-                                _cd_title_d = _m_cd_result.get("CD商品タイトル", "")
-                                _cd_cat_d   = _m_cd_result.get("品番", "")
-                                _cd_art_d   = _m_cd_result.get("アーティスト", "")
-                                _cd_trk_d   = _m_cd_result.get("トラック番号", "")
-                                _cd_name_d  = _m_cd_result.get("曲名", "")
-                                _cd_dur_d   = _m_cd_result.get("尺", "")
-                                _cd_delg_d  = _m_cd_result.get("集中管理", "")
-                                _cd_rec_co  = _m_cd_result.get("レコード会社名", "")
-                                _m_direct = {
-                                    "委任者":         _cd_delg_d,
-                                    "CD番号":         _cd_cat_d,
-                                    "CD名":           _cd_title_d,
-                                    "アーティスト":   _cd_art_d,
-                                    "レコード会社名": _cd_rec_co,
-                                }
-                                if _cd_iv_appl and not str(row.get("I/V区分", "")).strip():
-                                    _m_direct["I/V区分"] = _cd_iv_appl
-                                for _col, _val in _m_direct.items():
-                                    if _val and _col in st.session_state.songs_df.columns:
-                                        st.session_state.songs_df.at[row_idx, _col] = _val
-                                st.session_state.pop("songs_editor", None)
-                                _msg_lines = [
-                                    f"✅ MINC CD情報を楽曲まとめに反映しました  "
-                                    f"IV={_cd_iv_appl or '(取得不可)'}  委任者={_cd_delg_d or '(取得不可)'}"
-                                ]
-                                if _cd_title_d or _cd_cat_d:
-                                    _msg_lines.append(f"CD: {_cd_title_d}" + (f"（{_cd_cat_d}）" if _cd_cat_d else ""))
-                                if _cd_rec_co:
-                                    _msg_lines.append(f"レコード会社: {_cd_rec_co}")
-                                if _cd_trk_d or _cd_name_d:
-                                    _msg_lines.append(
-                                        f"トラック{_cd_trk_d}: {_cd_name_d}" + (f"（{_cd_dur_d}）" if _cd_dur_d else "")
-                                    )
-                                st.session_state["_apply_msg"] = "  \n".join(_msg_lines)
-                                st.session_state[f"mf_manual_dbg_{selected_no}"] = _m_cd_result.get("debug_html", "")[:3000]
-                                st.rerun()
-
-                # デバッグ HTML 表示（手動取得で品番・CD名が取れなかった場合、rerun後も表示）
-                _mf_manual_dbg = st.session_state.get(f"mf_manual_dbg_{selected_no}", "")
-                if _mf_manual_dbg:
-                    with st.expander("🔍 デバッグ HTML（品番・CD名が取得できなかった場合）", expanded=True):
-                        st.caption("このHTMLを確認すると、ページ構造から正確なパーサーを書けます。")
-                        st.code(_mf_manual_dbg, language="html")
-                        if st.button("デバッグHTML削除", key=f"mf_dbg_clear_{selected_no}"):
-                            del st.session_state[f"mf_manual_dbg_{selected_no}"]
-                            st.rerun()
-
-        # ---- CD情報検索 ----
-        st.divider()
-        st.markdown('<a id="sec-cd-search"></a>', unsafe_allow_html=True)
-        st.markdown("#### 💿 CD情報検索")
-        st.caption(
-            "JASRACコードまたは曲名でMINCを検索し、収録CDリストから品番・レコード会社名を申告フォーマットに反映します。"
-        )
-        if not _mf_ok:
-            st.info("⚠️ MINCにログインするとCD情報検索が使えます。")
-        else:
-            _cds_jcd_default = str(row.get("JASRAC作品コード", "")).strip()
-            _cds_jcd_default = "" if _cds_jcd_default.lower() == "nan" else _cds_jcd_default
-            _cds_title_default = str(row.get("曲名", "")).strip()
-            _cds_title_default = "" if _cds_title_default.lower() == "nan" else _cds_title_default
-
-            _cds_artist_default = str(row.get("アーティスト", "")).strip()
-            _cds_artist_default = "" if _cds_artist_default.lower() == "nan" else _cds_artist_default
-
-            _cds_c1, _cds_c2, _cds_c3 = st.columns(3)
-            with _cds_c1:
-                _cds_jcd_input = st.text_input(
-                    "JASRACコード",
-                    value=_cds_jcd_default,
-                    key=f"cds_jcd_{selected_no}",
-                    placeholder="例: 123-4567-8",
-                    help="JASRACコードがあれば優先して検索します",
-                )
-            with _cds_c2:
-                _cds_title_input = st.text_input(
-                    "曲名（JASRACコードがない場合）",
-                    value=_cds_title_default,
-                    key=f"cds_title_{selected_no}",
-                    placeholder="曲名で検索",
-                )
-            with _cds_c3:
-                _cds_artist_input = st.text_input(
-                    "アーティスト（任意・絞り込み用）",
-                    value=_cds_artist_default,
-                    key=f"cds_artist_{selected_no}",
-                    placeholder="例: EXILE",
-                    help=(
-                        "CD商品リストをこのアーティストで絞り込みます。"
-                        "曲名検索のときは、同名曲から作品を選ぶ手がかりにも使います。"
-                        "一致が0件のときは全件表示します（オムニバス盤は (V.A.) 表記）。"
-                    ),
-                )
-
-            if st.button("🔍 CDリストを検索", key=f"cds_search_{selected_no}", type="primary", use_container_width=True):
-                with st.spinner("MINCからCDリストを取得中..."):
-                    try:
-                        _cds_client = _get_mf_client()
-                        if _cds_jcd_input.strip():
-                            _cds_raw = _cds_client.search_cds_by_jasrac(
-                                _cds_jcd_input.strip(),
-                                title=_cds_title_input.strip() or _cds_title_default,
-                            )
-                        else:
-                            _cds_term = _cds_title_input.strip() or _cds_title_default
-                            if not _cds_term:
-                                _cds_raw = {"cds": [], "error": "JASRACコードまたは曲名を入力してください。"}
-                            else:
-                                # 曲名のみ → まず作品を検索し、ヒットしたJASRACコードで
-                                #            CD商品リスト（全件）を取得する
-                                _cds_sr = _cds_client.search(_cds_term)
-                                _cds_hits = _cds_sr.get("results") or [{}]
-                                # アーティスト指定があれば、それに一致する作品を優先する
-                                _cds_ai = _cds_artist_input.strip().lower()
-                                if _cds_ai:
-                                    _cds_hits = [
-                                        h for h in _cds_hits
-                                        if _cds_ai in str(h.get("アーティスト", "")).lower()
-                                    ] or _cds_hits
-                                _cds_first = _cds_hits[0]
-                                _cds_fjcd = str(_cds_first.get("JASRAC作品コード", "")).strip()
-                                if _cds_fjcd:
-                                    _cds_raw = _cds_client.search_cds_by_jasrac(
-                                        _cds_fjcd,
-                                        title=_cds_first.get("作品名", "") or _cds_term,
-                                        ncd=str(_cds_first.get("NexTone管理番号", "")).strip(),
-                                    )
-                                else:
-                                    _cds_raw = {
-                                        "cds": [],
-                                        "error": (
-                                            _cds_sr.get("error")
-                                            or f"「{_cds_term}」に一致する作品が見つかりませんでした。"
-                                        ),
-                                    }
-                        # 検索時点のアーティスト指定を結果と一緒に保持する
-                        _cds_raw["_artist_filter"] = _cds_artist_input.strip()
-                        st.session_state[f"cds_results_{selected_no}"] = _cds_raw
-                        for _cds_ck in list(st.session_state.keys()):
-                            if _cds_ck.startswith(f"cds_detail_{selected_no}_"):
-                                del st.session_state[_cds_ck]
-                    except MusicForestError as _cds_ce:
-                        st.session_state[f"cds_results_{selected_no}"] = {"cds": [], "error": str(_cds_ce)}
-
-            _cds_res_cur = st.session_state.get(f"cds_results_{selected_no}")
-            _render_cd_results(
-                _cds_res_cur,
-                row_idx,
-                f"cds_{selected_no}",
-                artist_filter=(_cds_res_cur or {}).get("_artist_filter", ""),
-            )
-
-        if selected_label:
-            st.divider()
-
-            # ---- 全自動パイプライン ----
-            st.markdown('<a id="sec-pipeline"></a>', unsafe_allow_html=True)
-            st.markdown("#### 🔄 全自動調査パイプライン（MusicBrainz → MINC / J-WID / NexTone）")
-            st.caption("① 曲名抽出 → ② MusicBrainz で正式タイトル & ISRC 取得 → ③ MINC / J-WID / NexTone で著作権情報取得")
-
-            _pip_mf_ok, _ = st.session_state.get("mf_auth_state", (False, ""))
-
-            pip_col1, pip_col2, pip_col3 = st.columns([2, 1, 1])
-            with pip_col1:
-                pip_tolerance = st.slider(
-                    "尺の許容誤差（秒）— MusicBrainz / Spotify 共通",
-                    min_value=5, max_value=60, value=15, step=5,
-                    key=f"pip_tol_{selected_no}",
-                )
-            with pip_col2:
-                pip_threshold = st.number_input(
-                    "MB スコア閾値（以上で正式タイトル使用）",
-                    min_value=0, max_value=100, value=80, step=5,
-                    key=f"pip_thresh_{selected_no}",
-                )
-            with pip_col3:
-                _pip_mf_match_sel = st.selectbox(
-                    "MINC 一致方式",
-                    options=["2: 前方一致", "3: キーワード", "1: 完全一致"],
-                    key=f"pip_mf_match_{selected_no}",
-                    disabled=not _pip_mf_ok,
-                    help="パイプライン実行時の MINC 検索方式",
-                )
-            _pip_mf_match_int = int(_pip_mf_match_sel.split(":")[0])
-
-            pip_opt1, pip_opt2, pip_opt3 = st.columns(3)
-            with pip_opt1:
-                pip_use_minc = st.checkbox(
-                    "MINC も使う",
-                    value=_pip_mf_ok,
-                    key=f"pip_use_minc_{selected_no}",
-                    disabled=not _pip_mf_ok,
-                    help="CD番号・レコード会社名・委任者をMINCから取得します" if _pip_mf_ok else "MINCにログインしてください",
-                )
-            with pip_opt2:
-                _pip_claude_avail = False
-                try:
-                    from modules.claude_lookup import is_available as _pip_claude_check
-                    _pip_claude_avail = _pip_claude_check()
-                except Exception:
-                    pass
-                pip_use_claude = st.checkbox(
-                    "Claude API も使う",
-                    value=False,
-                    key=f"pip_use_claude_{selected_no}",
-                    disabled=not _pip_claude_avail,
-                    help="CD名・作曲者等をClaudeに問い合わせます" if _pip_claude_avail else "ANTHROPIC_API_KEY が未設定",
-                )
-            with pip_opt3:
-                _pip_sp_avail = spotify_available()
-                pip_use_spotify = st.checkbox(
-                    "Spotify API も使う",
-                    value=False,
-                    key=f"pip_use_spotify_{selected_no}",
-                    disabled=not _pip_sp_avail,
-                    help="アーティスト・アルバム・ISRCをSpotifyから取得します" if _pip_sp_avail else "SPOTIFY_CLIENT_ID / SECRET が未設定",
-                )
-
-            wav_dur_raw = str(row.get("WAVフル尺", "")).strip()
-            wav_dur_sec_val = _hms_to_sec(wav_dur_raw)
-            if wav_dur_raw and wav_dur_raw.lower() != "nan":
-                st.caption(f"WAV フル尺: {wav_dur_raw}（{wav_dur_sec_val:.1f} 秒）をMusicBrainz の尺絞り込みに使用します。")
-            else:
-                st.caption("WAV フル尺が未取得のため MusicBrainz は尺絞り込みなしで検索します。")
-
-            # 検索語候補セレクト
-            if len(term_candidates) > 1:
-                _pip_term_opts = [f"[{label}] {val}" for label, val in term_candidates]
-                _pip_term_sel = st.radio(
-                    "検索語候補",
-                    options=_pip_term_opts,
-                    key=f"pip_term_{selected_no}",
-                    horizontal=True,
-                )
-                _pip_song_title = term_candidates[_pip_term_opts.index(_pip_term_sel)][1]
-            else:
-                _pip_song_title = term_candidates[0][1] if term_candidates else ""
-
-            # 選択語を編集できるinput（候補が変わったときリセット）
-            _pip_edit_key  = f"pip_term_edit_{selected_no}"
-            _pip_prev_key  = f"pip_term_prev_{selected_no}"
-            if st.session_state.get(_pip_prev_key) != _pip_song_title:
-                if _pip_edit_key in st.session_state:
-                    del st.session_state[_pip_edit_key]
-                st.session_state[_pip_prev_key] = _pip_song_title
-            _pip_search_term = st.text_input(
-                "検索語（編集可）",
-                key=_pip_edit_key,
-                value=_pip_song_title,
-                help="不要な語を削除するなど自由に編集できます。候補を変えると自動リセットされます。",
-            )
-
-            st.caption("🔍 J-WID 事前絞り込み（検索時に J-WID サーバーへ渡します。空欄 = 全件取得）")
-            _pf1, _pf2, _pf3, _pf4 = st.columns(4)
-            _pf1.text_input("作品名の一部",        placeholder="曲名キーワード",  key=f"jf_title_{selected_no}")
-            _pf2.text_input("アーティスト名",       placeholder="例: EXILE",       key=f"jf_artist_{selected_no}",
-                            help="J-WID の IN_ARTIST_NAME1 に渡してサーバー側で絞り込みます")
-            _pf3.text_input("著作者名",             placeholder="作曲者・作詞者",  key=f"jf_author_{selected_no}")
-            _pf4.text_input("JASRAC コード",        placeholder="作品コード",      key=f"jf_code_{selected_no}")
-
-            if st.button(
-                "🔄 全自動調査パイプラインを実行",
-                key=f"pipeline_btn_{selected_no}",
-                type="primary",
-                use_container_width=True,
-            ):
-                with st.spinner("① 検索語決定 → ② Claude/MusicBrainz/Spotify → ③ MINC / J-WID / NexTone 検索 中..."):
-                    pip_result = run_pipeline(
-                        event_name=str(row.get("イベント名", "")),
-                        wav_full_duration=wav_dur_raw,
-                        wav_detected_title=str(row.get("WAV検出タイトル", "")),
-                        song_title=_pip_search_term or _pip_song_title,
-                        jwid_artist=st.session_state.get(f"jf_artist_{selected_no}", ""),
-                        tolerance_sec=float(pip_tolerance),
-                        mb_score_threshold=int(pip_threshold),
-                        use_claude=bool(pip_use_claude),
-                        use_spotify=bool(pip_use_spotify),
-                    )
-                st.session_state[f"pipeline_result_{selected_no}"] = pip_result
-                # 再実行のたびに自動フェッチフラグをリセット（新規ページ結果を取得し直すため）
-                st.session_state.pop(f"pip_j_auto_fetched_{selected_no}", None)
-
-                # MINC 検索（セッション有効かつチェックONのみ）
-                if pip_use_minc and _pip_mf_ok:
-                    _pip_minc_term = pip_result.get("search_title", _pip_search_term or _pip_song_title)
-                    _pip_mb_artist = (pip_result.get("mb_best") or {}).get("artist", "")
-                    with st.spinner(f"MINC で「{_pip_minc_term[:30]}」を検索中..."):
-                        try:
-                            _pip_mf_c = _get_mf_client()
-                            _pip_mf_r = _pip_mf_c.search(_pip_minc_term, match=_pip_mf_match_int)
-                            # 全結果が "作品" テーブル（_album_id なし）のとき、
-                            # mb_best アーティスト名を加えて前方一致で再検索し CD 情報を補完する
-                            if (
-                                _pip_mb_artist
-                                and _pip_mf_r.get("results")
-                                and all(not it.get("_album_id") for it in _pip_mf_r["results"])
-                            ):
-                                _pip_mf_r2 = _pip_mf_c.search(_pip_minc_term, author=_pip_mb_artist, match=2)
-                                if any(it.get("_album_id") for it in _pip_mf_r2.get("results", [])):
-                                    _pip_mf_r2["_cd_fallback_artist"] = _pip_mb_artist
-                                    _pip_mf_r = _pip_mf_r2
-                            st.session_state[f"pipeline_minc_{selected_no}"] = _pip_mf_r
-                        except MusicForestError as _me:
-                            st.session_state[f"pipeline_minc_{selected_no}"] = {"error": str(_me), "results": []}
-                else:
-                    st.session_state.pop(f"pipeline_minc_{selected_no}", None)
-
-            # ---- パイプライン結果表示 ----
-            pip_result = st.session_state.get(f"pipeline_result_{selected_no}")
-            if pip_result:
-                st.markdown("---")
-
-                # ステップ 1: 検索語
-                st.markdown(f"**① 検索タイトル:** `{pip_result['search_title']}`")
-
-                # ステップ 2: Claude API（オプション）
-                _cl_res = pip_result.get("claude_result")
-                if _cl_res is not None:
-                    if _cl_res.get("error"):
-                        st.warning(f"② Claude: エラー — {_cl_res['error']}")
-                    else:
-                        _conf = _cl_res.get("confidence", "")
-                        _conf_icon = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(_conf, "⚪")
-                        with st.expander(
-                            f"② Claude 情報 {_conf_icon} 確信度:{_conf}  "
-                            f"『{_cl_res.get('official_title','')}』/ {_cl_res.get('artist','')}",
-                            expanded=True,
-                        ):
-                            cl_c1, cl_c2 = st.columns(2)
-                            cl_c1.text_input("正式タイトル", value=_cl_res.get("official_title",""), key=f"cl_title_{selected_no}", disabled=True)
-                            cl_c1.text_input("アーティスト", value=_cl_res.get("artist",""),         key=f"cl_art_{selected_no}",   disabled=True)
-                            cl_c1.text_input("CD / アルバム名", value=_cl_res.get("cd_name",""),     key=f"cl_cd_{selected_no}",    disabled=True)
-                            cl_c2.text_input("作曲者",        value=_cl_res.get("composer",""),      key=f"cl_comp_{selected_no}",  disabled=True)
-                            cl_c2.text_input("作詞者",        value=_cl_res.get("lyricist",""),      key=f"cl_lyric_{selected_no}", disabled=True)
-                            cl_c2.text_input("ISRC",          value=_cl_res.get("isrc",""),          key=f"cl_isrc_{selected_no}",  disabled=True)
-                            if _cl_res.get("notes"):
-                                st.caption(f"備考: {_cl_res['notes']}")
-                            if st.button("✅ Claude 情報を適用", key=f"cl_apply_{selected_no}", use_container_width=True):
-                                for col, val in {
-                                    "アーティスト": _cl_res.get("artist",""),
-                                    "作曲者":       _cl_res.get("composer",""),
-                                    "作詞者":       _cl_res.get("lyricist",""),
-                                    "CD名":         _cl_res.get("cd_name",""),
-                                    "確認ステータス": "候補あり",
-                                }.items():
-                                    if val and col in st.session_state.songs_df.columns:
-                                        st.session_state.songs_df.at[row_idx, col] = val
-                                st.success("楽曲まとめに反映しました。")
-
-                # ステップ 3: MusicBrainz
-                mb_best = pip_result.get("mb_best")
-                mb_all = [r for r in pip_result.get("mb_results", []) if "error" not in r]
-                mb_err = next((r["error"] for r in pip_result.get("mb_results", []) if "error" in r), None)
-
-                if mb_err:
-                    st.warning(f"③ MusicBrainz エラー: {mb_err}")
-                elif not mb_all:
-                    st.warning("③ MusicBrainz: 該当なし — 検索タイトルで J-WID を検索しました")
-                else:
-                    score = mb_best.get("score", 0) if mb_best else 0
-                    dur_disp = f"{mb_best['duration_sec']:.1f}s" if mb_best and mb_best.get("duration_sec") else ""
-                    isrc_disp = mb_best.get("isrc", "") if mb_best else ""
-                    official_title = mb_best.get("title", "") if mb_best else ""
-                    st.success(
-                        f"③ MusicBrainz: **{official_title}** ／ {mb_best.get('artist','') if mb_best else ''}"
-                        f"  スコア:{score}  尺:{dur_disp}  ISRC:{isrc_disp or '(なし)'}"
-                    )
-                    if len(mb_all) > 1:
-                        with st.expander(f"MusicBrainz 全候補（{len(mb_all)}件）"):
-                            for i, r in enumerate(mb_all):
-                                d = f"{r['duration_sec']:.1f}s" if r.get("duration_sec") else ""
-                                st.markdown(
-                                    f"`[{r['score']}]` **{r['title']}** / {r['artist']}  {d}  "
-                                    f"ISRC:{r.get('isrc','(なし)')}  "
-                                    f"[MBリンク]({r.get('mb_url','')})"
-                                )
-
-                # ステップ 4: Spotify（オプション）
-                _sp_res = pip_result.get("sp_results", [])
-                _sp_best = pip_result.get("sp_best")
-                if _sp_res:
-                    _sp_err = next((r["error"] for r in _sp_res if "error" in r), None)
-                    if _sp_err:
-                        st.warning(f"④ Spotify エラー: {_sp_err}")
-                    elif not [r for r in _sp_res if "error" not in r]:
-                        st.info("④ Spotify: 該当なし")
-                    else:
-                        _sp_valid = [r for r in _sp_res if "error" not in r]
-                        _spb = _sp_best or _sp_valid[0]
-                        st.success(
-                            f"④ Spotify: **{_spb.get('title','')}** ／ {_spb.get('artist','')}  "
-                            f"アルバム:{_spb.get('album','')}  "
-                            f"尺:{_spb.get('duration_sec',0):.1f}s  "
-                            f"ISRC:{_spb.get('isrc','(なし)')}"
-                        )
-                        _sp_apply_col, _sp_link_col = st.columns([3, 1])
-                        with _sp_link_col:
-                            if _spb.get("spotify_url"):
-                                st.link_button("🎵 Spotify で開く", _spb["spotify_url"], use_container_width=True)
-                        with _sp_apply_col:
-                            if st.button("✅ Spotify 情報を適用", key=f"sp_apply_pip_{selected_no}", use_container_width=True):
-                                for col, val in {
-                                    "アーティスト": _spb.get("artist", ""),
-                                    "CD名":         _spb.get("album", ""),
-                                    "確認ステータス": "候補あり",
-                                }.items():
-                                    if val and col in st.session_state.songs_df.columns:
-                                        st.session_state.songs_df.at[row_idx, col] = val
-                                st.success("楽曲まとめに反映しました。")
-                        if len(_sp_valid) > 1:
-                            with st.expander(f"Spotify 全候補（{len(_sp_valid)}件）"):
-                                for i, r in enumerate(_sp_valid):
-                                    d = f"{r['duration_sec']:.1f}s" if r.get("duration_sec") else ""
-                                    st.markdown(
-                                        f"`[{r['score']}]` **{r['title']}** / {r['artist']}  "
-                                        f"『{r.get('album','')}』  {d}  "
-                                        f"ISRC:{r.get('isrc','(なし)')}  "
-                                        f"[Spotify]({r.get('spotify_url','')})"
-                                    )
-
-                # ステップ 5: 検索語
-                st.markdown(f"**⑤ J-WID / NexTone 検索語:** `{pip_result['jwid_search_term']}`")
-
-                # ステップ 5: J-WID 結果
-                jwid_r = pip_result["jwid_results"]
-                ntone_r = pip_result["nextone_results"]
-
-                # タブラベル: J-WID は先頭結果のアーティスト/著作者、MINC は先頭結果の作品名
-                _j_first = (jwid_r.get("results") or [{}])[0]
-                _j_lbl_hint = _j_first.get("アーティスト", "") or _j_first.get("著作者名", "")
-                _j_pages = jwid_r.get("pages_fetched", 1)
-                _j_cnt = len(jwid_r.get("results") or [])
-                _j_cnt_str = f"{_j_cnt}件" + (f"/{_j_pages}p" if _j_pages > 1 else "")
-                _j_tab_lbl = "📋 J-WID" + (f" {_j_lbl_hint[:15]}" if _j_lbl_hint else "") + (f" [{_j_cnt_str}]" if _j_cnt else "")
-                _mf_r_pip = st.session_state.get(f"pipeline_minc_{selected_no}") or {}
-                _mf_first = (_mf_r_pip.get("results") or [{}])[0]
-                _mf_lbl_hint = _mf_first.get("作品名", "") or _mf_first.get("アーティスト", "")
-                _mf_tab_lbl = "🌲 MINC" + (f" {_mf_lbl_hint[:18]}" if _mf_lbl_hint else "")
-
-                pip_tab_j, pip_tab_n, pip_tab_mf = st.tabs([_j_tab_lbl, "📋 NexTone 結果", _mf_tab_lbl])
-
-                def _nkfc(s: str) -> str:
-                    return unicodedata.normalize("NFKC", s).lower()
-
-                with pip_tab_j:
-                    st.caption(f"検索URL: {jwid_r.get('search_url','')}")
-                    if jwid_r.get("error"):
-                        st.error(f"エラー: {jwid_r['error']}")
-                    elif not jwid_r.get("results"):
-                        st.warning("J-WID: 該当なし")
-                        with st.expander("デバッグ HTML"):
-                            st.code(jwid_r.get("debug_html", "")[:3000], language="html")
-                    else:
-                        _j_pages_disp = jwid_r.get("pages_fetched", 1)
-                        _j_total_disp = len(jwid_r["results"])
-                        _j_page_str = f"（{_j_pages_disp} ページ分）" if _j_pages_disp > 1 else ""
-                        st.success(f"{_j_total_disp} 件{_j_page_str}")
-                        _mb_artist_hint = mb_best.get("artist", "") if mb_best else ""
-                        if _mb_artist_hint:
-                            st.caption(f"💡 MusicBrainz アーティスト参照: **{_mb_artist_hint}**")
-
-                        # 未取得の詳細を自動フェッチ（MINCと同理由：詳細ページは別URL）
-                        _jwid_auto_key = f"pip_j_auto_fetched_{selected_no}"
-                        if not st.session_state.get(_jwid_auto_key):
-                            _jwid_need = [
-                                (i, it) for i, it in enumerate(jwid_r["results"])
-                                if not st.session_state.get(f"jwid_detail_{selected_no}_{i}")
-                                and it.get("_detail_url","")
-                            ]
-                            if _jwid_need:
-                                from modules.scraper import fetch_jwid_detail as _fetch_detail_auto
-                                with st.spinner(f"J-WID 詳細を自動取得中（{len(_jwid_need)} 件）…"):
-                                    for _ji, _jit in _jwid_need:
-                                        _jd = _fetch_detail_auto(_jit.get("_detail_url",""))
-                                        st.session_state[f"jwid_detail_{selected_no}_{_ji}"] = _jd
-                            st.session_state[_jwid_auto_key] = True
-                            if _jwid_need:
-                                st.rerun()
-
-                        # フィルター値はパイプラインボタン上部の入力から読む
-                        _jf_title  = st.session_state.get(f"jf_title_{selected_no}",  "")
-                        _jf_artist = st.session_state.get(f"jf_artist_{selected_no}", "")
-                        _jf_author = st.session_state.get(f"jf_author_{selected_no}", "")
-                        _jf_code   = st.session_state.get(f"jf_code_{selected_no}",   "")
-
-                        # フィルター済みインデックスを先に計算して件数表示
-                        _jf_indices = [
-                            i for i, it in enumerate(jwid_r["results"])
-                            if (not _jf_title  or _nkfc(_jf_title)  in _nkfc(it.get("作品名",      "")))
-                            and (not _jf_artist or _nkfc(_jf_artist) in _nkfc(it.get("アーティスト","")))
-                            and (not _jf_author or _nkfc(_jf_author) in _nkfc(it.get("著作者名",    "")))
-                            and (not _jf_code   or _nkfc(_jf_code)   in _nkfc(it.get("作品コード",  "")))
-                        ]
-                        _jf_total = len(jwid_r["results"])
-                        if any([_jf_title, _jf_artist, _jf_author, _jf_code]):
-                            st.caption(f"絞り込み結果: {len(_jf_indices)} / {_jf_total} 件")
-                            if not _jf_indices:
-                                _art_vals = sorted({it.get("アーティスト","") for it in jwid_r["results"] if it.get("アーティスト","")})
-                                st.warning("フィルター条件に一致する候補がありません。")
-                                if _art_vals:
-                                    st.caption("このJ-WID結果に含まれるアーティスト: " + "　/　".join(_art_vals))
-
-                        for _disp_idx, i in enumerate(_jf_indices):
-                            item = jwid_r["results"][i]
-                            _j_art = item.get("アーティスト","")
-                            with st.expander(
-                                f"候補{_disp_idx + 1}: {item.get('作品名','')}"
-                                + (f"  アーティスト:{_j_art}" if _j_art else "")
-                                + f"  著作者:{item.get('著作者名','')}  コード:{item.get('作品コード','(なし)')}",
-                                expanded=(_disp_idx == 0),
-                            ):
-                                # 詳細ページから作曲者/作詞者を取得済みかチェック
-                                _detail_key = f"jwid_detail_{selected_no}_{i}"
-                                _detail = st.session_state.get(_detail_key, {})
-
-                                # ウィジェット描画前に session_state を同期（描画後は変更不可）
-                                if _detail:
-                                    st.session_state[f"pip_j_comp_{selected_no}_{i}"] = _detail.get("作曲者", "")
-                                    st.session_state[f"pip_j_lyric_{selected_no}_{i}"] = _detail.get("作詞者", "")
-                                    st.session_state[f"pip_j_arr_{selected_no}_{i}"] = _detail.get("編曲者", "")
-                                    st.session_state[f"pip_j_tran_{selected_no}_{i}"] = _detail.get("訳詞者", "")
-
-                                pc1, pc2 = st.columns(2)
-                                pc1.text_input("作品コード",      value=item.get("作品コード",""),   key=f"pip_j_code_{selected_no}_{i}",   disabled=True)
-                                pc1.text_input("作品名",          value=item.get("作品名",""),       key=f"pip_j_title_{selected_no}_{i}",  disabled=True)
-                                pc1.text_input("アーティスト名",  value=item.get("アーティスト",""), key=f"pip_j_artist_{selected_no}_{i}", disabled=True)
-                                pc1.text_input("著作者名（一覧）", value=item.get("著作者名",""),    key=f"pip_j_auth_{selected_no}_{i}",   disabled=True)
-                                _comp_disp = _detail.get("作曲者","（詳細取得で確認）") if not _detail else _detail.get("作曲者","")
-                                _lyric_disp = _detail.get("作詞者","（詳細取得で確認）") if not _detail else _detail.get("作詞者","")
-                                pc2.text_input("作曲者", value=_comp_disp, key=f"pip_j_comp_{selected_no}_{i}", disabled=True)
-                                pc2.text_input("作詞者", value=_lyric_disp, key=f"pip_j_lyric_{selected_no}_{i}", disabled=True)
-                                pc2.text_input("編曲者", value=_detail.get("編曲者",""),    key=f"pip_j_arr_{selected_no}_{i}", disabled=True)
-                                pc2.text_input("訳詞者", value=_detail.get("訳詞者",""),    key=f"pip_j_tran_{selected_no}_{i}", disabled=True)
-
-                                # 管理状況を表示（詳細取得済みの場合）
-                                _mgmt_pip = _detail.get("管理状況", {})
-                                if _mgmt_pip:
-                                    st.markdown("**管理状況（JASRAC）:**  \n" + _format_management_status(_mgmt_pip))
-                                if _detail and not _detail.get("作曲者"):
-                                    with st.expander("⚠️ デバッグ情報（作曲者が取得できなかった場合）"):
-                                        st.write(f"**error**: `{_detail.get('error')}`")
-                                        st.write(f"**著作者リスト**: {_detail.get('著作者リスト')}")
-                                        if _detail.get("debug_html"):
-                                            st.code(_detail["debug_html"][:5000], language="html")
-                                        else:
-                                            st.warning("debug_html が空です（セッションエラーまたはdetail_urlが空の可能性）")
-
-                                btn_col1, btn_col2 = st.columns(2)
-                                with btn_col1:
-                                    if st.button("🔄 J-WID詳細を再取得", key=f"pip_detail_j_{selected_no}_{i}", use_container_width=True):
-                                        with st.spinner("詳細ページ取得中..."):
-                                            from modules.scraper import fetch_jwid_detail as _fetch_detail
-                                            _d = _fetch_detail(item.get("_detail_url", ""))
-                                        st.session_state[_detail_key] = _d
-                                        if _d.get("作曲者"):
-                                            # MINC個別検索の著作者欄はこの時点で生成済みのため
-                                            # 直接代入せず、次回の描画時に反映させる
-                                            st.session_state[f"mf_author_pending_{selected_no}"] = _d["作曲者"].strip()
-                                        if _d.get("error"):
-                                            st.error(f"詳細取得エラー: {_d['error']}")
-                                        elif not _d.get("作曲者") and not _d.get("作詞者"):
-                                            st.warning("作曲者・作詞者が取得できませんでした。下の「デバッグ HTML」を確認してください。")
-                                        else:
-                                            st.success(f"作曲者: {_d['作曲者']} ／ 作詞者: {_d['作詞者']}")
-                                        st.rerun()
-                                with btn_col2:
-                                    if st.button("✅ 申告フォーマットに反映", key=f"pip_apply_j_{selected_no}_{i}", use_container_width=True):
-                                        _pip_j_jcd = item.get("作品コード","")
-                                        # JASRACコードが変わる場合は先に関連フィールドをクリア
-                                        _apply_clear_on_jcd_change(row_idx, _pip_j_jcd)
-                                        _pip_j_apply = {
-                                            "曲名":           item.get("作品名",""),
-                                            "作曲者":         _detail.get("作曲者") or item.get("著作者名",""),
-                                            "作詞者":         _detail.get("作詞者",""),
-                                            "編曲者":         _detail.get("編曲者",""),
-                                            "訳詞者":         _detail.get("訳詞者",""),
-                                            "JASRAC作品コード": _pip_j_jcd,
-                                            "アーティスト":   item.get("アーティスト","") or (mb_best.get("artist","") if mb_best else ""),
-                                            "確認ステータス": "確定",
-                                        }
-                                        _hy = _infer_houyo(_pip_j_jcd)
-                                        _cur_hy = str(st.session_state.songs_df.at[row_idx, "邦洋区分"] if "邦洋区分" in st.session_state.songs_df.columns else "").strip()
-                                        if _hy and not _cur_hy:
-                                            _pip_j_apply["邦洋区分"] = _hy
-                                        for col, val in _pip_j_apply.items():
-                                            if val and col in st.session_state.songs_df.columns:
-                                                st.session_state.songs_df.at[row_idx, col] = val
-                                        st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
-                                        st.session_state.pop("songs_editor", None)
-                                        st.rerun()
-
-                                # CD情報検索パネル
-                                _pipj_jcd = item.get("作品コード", "")
-                                if _pipj_jcd and _mf_ok:
-                                    st.divider()
-                                    _show_cd_panel(
-                                        _pipj_jcd, row_idx, f"pipj_{selected_no}_{i}",
-                                        title=item.get("作品名", ""),
-                                    )
-
-                with pip_tab_n:
-                    st.caption(f"検索URL: {ntone_r.get('search_url','')}")
-                    if ntone_r.get("error"):
-                        st.error(f"エラー: {ntone_r['error']}")
-                    elif not ntone_r.get("results"):
-                        st.warning("NexTone: 該当なし")
-                    else:
-                        st.success(f"{len(ntone_r['results'])} 件")
-                        _nfc1, _nfc2 = st.columns(2)
-                        _nf_title  = _nfc1.text_input("曲名で絞り込み",          placeholder="作品名の一部",    key=f"nf_title_{selected_no}")
-                        _nf_artist = _nfc2.text_input("アーティスト名で絞り込み", placeholder="アーティスト名",  key=f"nf_artist_{selected_no}")
-                        _nf_disp = 0
-                        for i, item in enumerate(ntone_r["results"]):
-                            if _nf_title  and _nkfc(_nf_title)  not in _nkfc(item.get("作品名",       "")): continue
-                            if _nf_artist and _nkfc(_nf_artist) not in _nkfc(item.get("アーティスト", "")): continue
-                            _nf_disp += 1
-                            with st.expander(
-                                f"候補{_nf_disp}: {item.get('作品名','')} ／ {item.get('管理番号','')}",
-                                expanded=(_nf_disp == 1),
-                            ):
-                                nc1, nc2 = st.columns(2)
-                                nc1.text_input("管理番号",    value=item.get("管理番号",""),    key=f"pip_n_id_{selected_no}_{i}",    disabled=True)
-                                nc1.text_input("作品名",      value=item.get("作品名",""),      key=f"pip_n_title_{selected_no}_{i}", disabled=True)
-                                nc1.text_input("作曲者",      value=item.get("作曲者",""),      key=f"pip_n_comp_{selected_no}_{i}",  disabled=True)
-                                nc2.text_input("作詞者",      value=item.get("作詞者",""),      key=f"pip_n_lyric_{selected_no}_{i}", disabled=True)
-                                nc2.text_input("アーティスト", value=item.get("アーティスト",""), key=f"pip_n_art_{selected_no}_{i}",   disabled=True)
-                                if st.button("✅ 申告フォーマットに反映", key=f"pip_apply_n_{selected_no}_{i}", use_container_width=True):
-                                    for col, val in {
-                                        "作曲者": item.get("作曲者",""),
-                                        "作詞者": item.get("作詞者",""),
-                                        "NexTone管理番号": item.get("管理番号",""),
-                                        "アーティスト": item.get("アーティスト","") or (mb_best.get("artist","") if mb_best else ""),
-                                        "確認ステータス": "候補あり",
-                                    }.items():
-                                        if val and col in st.session_state.songs_df.columns:
-                                            st.session_state.songs_df.at[row_idx, col] = val
-                                    st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
-                                    st.session_state.pop("songs_editor", None)
-                                    st.rerun()
-
-                with pip_tab_mf:
-                    _pip_mf_res = st.session_state.get(f"pipeline_minc_{selected_no}")
-                    if _pip_mf_res is None:
-                        if _pip_mf_ok:
-                            st.info("パイプライン実行時に「MINC も使う」をチェックすると自動で検索されます。")
-                        else:
-                            st.warning("MINCにログインしてから「MINC も使う」チェックを入れて実行してください。")
-                    elif _pip_mf_res.get("error"):
-                        st.error(f"MINC エラー: {_pip_mf_res['error']}")
-                        with st.expander("デバッグ HTML"):
-                            st.code(_pip_mf_res.get("debug_html","")[:3000], language="html")
-                    elif not _pip_mf_res.get("results"):
-                        st.warning("MINC: 該当なし")
-                        with st.expander("デバッグ HTML"):
-                            st.code(_pip_mf_res.get("debug_html","")[:3000], language="html")
-                    else:
-                        _pip_mf_items = _pip_mf_res["results"]
-                        st.success(f"🌲 MINC: {len(_pip_mf_items)} 件")
-                        st.caption(f"検索URL: {_pip_mf_res.get('search_url','')}")
-                        if _pip_mf_res.get("_cd_fallback_artist"):
-                            st.info(f"💡 タイトルのみでは全結果が「作品」テーブル（CD情報なし）だったため、アーティスト「{_pip_mf_res['_cd_fallback_artist']}」を追加して再検索しました。")
-
-                        # 未取得の詳細を自動フェッチ（キー未存在＝未取得として判定、エラー時もキーをセットして無限ループ防止）
-                        _mf_need_fetch = [
-                            (_auto_pmi, _auto_it) for _auto_pmi, _auto_it in enumerate(_pip_mf_items[:10])
-                            if f"pip_mf_ddetail_{selected_no}_{_auto_pmi}" not in st.session_state
-                            and _auto_it.get("_detail_href", "")
-                        ]
-                        if _mf_need_fetch:
-                            _mf_auto_c = _get_mf_client()
-                            with st.spinner(f"MINC 詳細を自動取得中（{len(_mf_need_fetch)} 件）…"):
-                                for _auto_pmi, _auto_it in _mf_need_fetch:
-                                    _auto_dkey = f"pip_mf_ddetail_{selected_no}_{_auto_pmi}"
-                                    try:
-                                        st.session_state[_auto_dkey] = _mf_auto_c.get_detail(_auto_it["_detail_href"])
-                                    except Exception as _auto_e:
-                                        st.session_state[_auto_dkey] = {"error": str(_auto_e), "debug_html": f"例外: {type(_auto_e).__name__}: {_auto_e}"}
-                            st.rerun()
-
-                        for _pmi, _pm_item in enumerate(_pip_mf_items[:10]):
-                            _pm_label = (
-                                f"候補{_pmi+1}: {_pm_item.get('作品名','')} ／ {_pm_item.get('アーティスト','')} "
-                                f"  CD:{_pm_item.get('CD商品タイトル','') or '(CD情報なし)'}  "
-                                f"JASRAC:{_pm_item.get('JASRAC作品コード','(なし)')}  "
-                                f"品番:{_pm_item.get('品番','(なし)')}"
-                            )
-                            _pm_detail_key = f"pip_mf_ddetail_{selected_no}_{_pmi}"
-                            _pm_detail_data = st.session_state.get(_pm_detail_key, {})
-
-                            with st.expander(_pm_label, expanded=(_pmi == 0)):
-                                _pm_c1, _pm_c2 = st.columns(2)
-                                _pm_c1.text_input("作品名",        value=_pm_item.get("作品名",""),         key=f"pip_mf_name_{selected_no}_{_pmi}", disabled=True)
-                                _pm_c1.text_input("アーティスト",  value=_pm_item.get("アーティスト",""),   key=f"pip_mf_art_{selected_no}_{_pmi}",  disabled=True)
-                                _pm_c1.text_input("品番（CD番号）", value=_pm_item.get("品番",""),           key=f"pip_mf_cat_{selected_no}_{_pmi}",  disabled=True)
-                                _pm_c1.text_input("CD商品タイトル", value=_pm_item.get("CD商品タイトル",""), key=f"pip_mf_cdtitle_{selected_no}_{_pmi}", disabled=True)
-                                _pm_c2.text_input("JASRAC作品コード", value=_pm_item.get("JASRAC作品コード",""), key=f"pip_mf_jcd_{selected_no}_{_pmi}", disabled=True)
-                                _pm_c2.text_input("NexTone管理番号",  value=_pm_item.get("NexTone管理番号",""), key=f"pip_mf_ncd_{selected_no}_{_pmi}", disabled=True)
-                                _pm_c2.text_input("レコード会社名",   value=_pm_item.get("レコード会社名",""),  key=f"pip_mf_label_{selected_no}_{_pmi}", disabled=True)
-
-                                # 詳細フィールド（作曲者/作詞者/編曲者/訳詞者）
-                                # session_state をウィジェット描画前に同期
-                                if _pm_detail_data:
-                                    st.session_state[f"pip_mf_comp_{selected_no}_{_pmi}"]  = _pm_detail_data.get("作曲者","")
-                                    st.session_state[f"pip_mf_lyric_{selected_no}_{_pmi}"] = _pm_detail_data.get("作詞者","")
-                                    st.session_state[f"pip_mf_arr2_{selected_no}_{_pmi}"]  = _pm_detail_data.get("編曲者","")
-                                    st.session_state[f"pip_mf_tran_{selected_no}_{_pmi}"]  = _pm_detail_data.get("訳詞者","")
-                                _pm_d4 = st.columns(4)
-                                _pm_d4[0].text_input("作曲者",
-                                    value=_pm_detail_data.get("作曲者","") if _pm_detail_data else "（詳細取得で確認）",
-                                    key=f"pip_mf_comp_{selected_no}_{_pmi}", disabled=True)
-                                _pm_d4[1].text_input("作詞者",
-                                    value=_pm_detail_data.get("作詞者","") if _pm_detail_data else "（詳細取得で確認）",
-                                    key=f"pip_mf_lyric_{selected_no}_{_pmi}", disabled=True)
-                                _pm_d4[2].text_input("編曲者",
-                                    value=_pm_detail_data.get("編曲者","") if _pm_detail_data else "",
-                                    key=f"pip_mf_arr2_{selected_no}_{_pmi}", disabled=True)
-                                _pm_d4[3].text_input("訳詞者",
-                                    value=_pm_detail_data.get("訳詞者","") if _pm_detail_data else "",
-                                    key=f"pip_mf_tran_{selected_no}_{_pmi}", disabled=True)
-
-                                _pm_btn1, _pm_btn2 = st.columns(2)
-                                with _pm_btn1:
-                                    if st.button("🔄 MINC詳細を再取得", key=f"pip_mf_dget_{selected_no}_{_pmi}", use_container_width=True):
-                                        with st.spinner("MINC詳細取得中..."):
-                                            try:
-                                                _pm_dd = _get_mf_client().get_detail(_pm_item.get("_detail_href",""))
-                                                st.session_state[_pm_detail_key] = _pm_dd
-                                            except Exception as _pm_e:
-                                                st.session_state[_pm_detail_key] = {"error": str(_pm_e), "debug_html": f"例外: {type(_pm_e).__name__}: {_pm_e}"}
-                                        st.rerun()
-                                # 詳細取得エラーまたはデバッグ情報
-                                # エラー時のみデバッグ情報を表示
-                                if _pm_detail_data and _pm_detail_data.get("error"):
-                                    st.error(f"MINC詳細エラー: {_pm_detail_data['error']}")
-                                    _dbg = _pm_detail_data.get("debug_html", "")
-                                    if _dbg:
-                                        with st.expander("🔍 デバッグ HTML"):
-                                            st.code(_dbg[:3000], language="html")
-
-                                with _pm_btn2:
-                                    if st.button("✅ MINC情報を申告フォーマットに反映", key=f"pip_mf_apply_{selected_no}_{_pmi}", use_container_width=True):
-                                        _pm_jcd = _pm_item.get("JASRAC作品コード","")
-                                        # JASRACコードが変わる場合は先に関連フィールドをクリア
-                                        _apply_clear_on_jcd_change(row_idx, _pm_jcd)
-                                        _pm_apply = {
-                                            "曲名":            _pm_item.get("作品名",""),
-                                            "アーティスト":    _pm_item.get("アーティスト",""),
-                                            "CD番号":          _pm_item.get("品番",""),
-                                            "CD名":            _pm_item.get("CD商品タイトル",""),
-                                            "レコード会社名":  _pm_item.get("レコード会社名",""),
-                                            "JASRAC作品コード": _pm_jcd,
-                                            "NexTone管理番号": _pm_item.get("NexTone管理番号",""),
-                                            "確認ステータス":  "候補あり",
-                                        }
-                                        _hy = _infer_houyo(_pm_jcd)
-                                        _cur_hy_pm = str(st.session_state.songs_df.at[row_idx, "邦洋区分"] if "邦洋区分" in st.session_state.songs_df.columns else "").strip()
-                                        if _hy and not _cur_hy_pm:
-                                            _pm_apply["邦洋区分"] = _hy
-                                        # 詳細取得済みの場合のみ作曲者等を追加（自動フェッチはしない）
-                                        _cached = st.session_state.get(_pm_detail_key, {})
-                                        if _cached and not _cached.get("error"):
-                                            for _ak in ["作曲者","作詞者","編曲者","訳詞者"]:
-                                                if _cached.get(_ak): _pm_apply[_ak] = _cached[_ak]
-                                        for _col, _val in _pm_apply.items():
-                                            if _val and _col in st.session_state.songs_df.columns:
-                                                st.session_state.songs_df.at[row_idx, _col] = _val
-                                        st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
-                                        st.session_state.pop("songs_editor", None)
-                                        st.rerun()
-
-                                # CD情報検索パネル
-                                _pipmf_jcd = _pm_item.get("JASRAC作品コード", "")
-                                if _pipmf_jcd:
-                                    st.divider()
-                                    _show_cd_panel(
-                                        _pipmf_jcd, row_idx, f"pipmf_{selected_no}_{_pmi}",
-                                        title=_pm_item.get("作品名", ""),
-                                    )
-
 
             # ---- 検索語と手動リンク ----
             col_terms, col_links = st.columns([3, 2])
@@ -3513,6 +1767,860 @@ with tabs[0]:
                         st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
                         st.session_state.pop("songs_editor", None)
                         st.rerun()
+
+            st.divider()
+
+            # ---- 全自動パイプライン ----
+            st.markdown("#### 🔄 全自動調査パイプライン（MusicBrainz → MINC / J-WID / NexTone）")
+            st.caption("① 曲名抽出 → ② MusicBrainz で正式タイトル & ISRC 取得 → ③ MINC / J-WID / NexTone で著作権情報取得")
+
+            pip_col1, pip_col2, pip_col3 = st.columns([2, 1, 1])
+            with pip_col1:
+                pip_tolerance = st.slider(
+                    "尺の許容誤差（秒）— MusicBrainz / Spotify 共通",
+                    min_value=5, max_value=60, value=15, step=5,
+                    key=f"pip_tol_{selected_no}",
+                )
+            with pip_col2:
+                pip_threshold = st.number_input(
+                    "MB スコア閾値（以上で正式タイトル使用）",
+                    min_value=0, max_value=100, value=80, step=5,
+                    key=f"pip_thresh_{selected_no}",
+                )
+            with pip_col3:
+                _pip_mf_match_sel = st.selectbox(
+                    "MINC 一致方式",
+                    options=["2: 前方一致", "3: キーワード", "1: 完全一致"],
+                    key=f"pip_mf_match_{selected_no}",
+                    disabled=not _pip_mf_ok,
+                    help="パイプライン実行時の MINC 検索方式",
+                )
+            _pip_mf_match_int = int(_pip_mf_match_sel.split(":")[0])
+
+            pip_opt1, pip_opt2, pip_opt3 = st.columns(3)
+            with pip_opt1:
+                _pip_mf_ok, _ = st.session_state.get("mf_auth_state", (False, ""))
+                pip_use_minc = st.checkbox(
+                    "MINC も使う",
+                    value=_pip_mf_ok,
+                    key=f"pip_use_minc_{selected_no}",
+                    disabled=not _pip_mf_ok,
+                    help="CD番号・レコード会社名・委任者をMINCから取得します" if _pip_mf_ok else "MINCにログインしてください",
+                )
+            with pip_opt2:
+                _pip_claude_avail = False
+                try:
+                    from modules.claude_lookup import is_available as _pip_claude_check
+                    _pip_claude_avail = _pip_claude_check()
+                except Exception:
+                    pass
+                pip_use_claude = st.checkbox(
+                    "Claude API も使う",
+                    value=False,
+                    key=f"pip_use_claude_{selected_no}",
+                    disabled=not _pip_claude_avail,
+                    help="CD名・作曲者等をClaudeに問い合わせます" if _pip_claude_avail else "ANTHROPIC_API_KEY が未設定",
+                )
+            with pip_opt3:
+                _pip_sp_avail = spotify_available()
+                pip_use_spotify = st.checkbox(
+                    "Spotify API も使う",
+                    value=False,
+                    key=f"pip_use_spotify_{selected_no}",
+                    disabled=not _pip_sp_avail,
+                    help="アーティスト・アルバム・ISRCをSpotifyから取得します" if _pip_sp_avail else "SPOTIFY_CLIENT_ID / SECRET が未設定",
+                )
+
+            wav_dur_raw = str(row.get("WAVフル尺", "")).strip()
+            wav_dur_sec_val = _hms_to_sec(wav_dur_raw)
+            if wav_dur_raw and wav_dur_raw.lower() != "nan":
+                st.caption(f"WAV フル尺: {wav_dur_raw}（{wav_dur_sec_val:.1f} 秒）をMusicBrainz の尺絞り込みに使用します。")
+            else:
+                st.caption("WAV フル尺が未取得のため MusicBrainz は尺絞り込みなしで検索します。")
+
+            # 検索語候補セレクト
+            if len(term_candidates) > 1:
+                _pip_term_opts = [f"[{label}] {val}" for label, val in term_candidates]
+                _pip_term_sel = st.radio(
+                    "検索語候補",
+                    options=_pip_term_opts,
+                    key=f"pip_term_{selected_no}",
+                    horizontal=True,
+                )
+                _pip_song_title = term_candidates[_pip_term_opts.index(_pip_term_sel)][1]
+            else:
+                _pip_song_title = term_candidates[0][1] if term_candidates else ""
+
+            # 選択語を編集できるinput（候補が変わったときリセット）
+            _pip_edit_key  = f"pip_term_edit_{selected_no}"
+            _pip_prev_key  = f"pip_term_prev_{selected_no}"
+            if st.session_state.get(_pip_prev_key) != _pip_song_title:
+                if _pip_edit_key in st.session_state:
+                    del st.session_state[_pip_edit_key]
+                st.session_state[_pip_prev_key] = _pip_song_title
+            _pip_search_term = st.text_input(
+                "検索語（編集可）",
+                key=_pip_edit_key,
+                value=_pip_song_title,
+                help="不要な語を削除するなど自由に編集できます。候補を変えると自動リセットされます。",
+            )
+
+            if st.button(
+                "🔄 全自動調査パイプラインを実行",
+                key=f"pipeline_btn_{selected_no}",
+                type="primary",
+                use_container_width=True,
+            ):
+                with st.spinner("① 検索語決定 → ② Claude/MusicBrainz/Spotify → ③ MINC / J-WID / NexTone 検索 中..."):
+                    pip_result = run_pipeline(
+                        event_name=str(row.get("イベント名", "")),
+                        wav_full_duration=wav_dur_raw,
+                        wav_detected_title=str(row.get("WAV検出タイトル", "")),
+                        song_title=_pip_search_term or _pip_song_title,
+                        tolerance_sec=float(pip_tolerance),
+                        mb_score_threshold=int(pip_threshold),
+                        use_claude=bool(pip_use_claude),
+                        use_spotify=bool(pip_use_spotify),
+                    )
+                st.session_state[f"pipeline_result_{selected_no}"] = pip_result
+
+                # MINC 検索（セッション有効かつチェックONのみ）
+                if pip_use_minc and _pip_mf_ok:
+                    _pip_minc_term = pip_result.get("search_title", _pip_search_term or _pip_song_title)
+                    with st.spinner(f"MINC で「{_pip_minc_term[:30]}」を検索中..."):
+                        try:
+                            _pip_mf_c = _get_mf_client()
+                            _pip_mf_r = _pip_mf_c.search(_pip_minc_term, match=_pip_mf_match_int)
+                            st.session_state[f"pipeline_minc_{selected_no}"] = _pip_mf_r
+                        except MusicForestError as _me:
+                            st.session_state[f"pipeline_minc_{selected_no}"] = {"error": str(_me), "results": []}
+                else:
+                    st.session_state.pop(f"pipeline_minc_{selected_no}", None)
+
+            # ---- パイプライン結果表示 ----
+            pip_result = st.session_state.get(f"pipeline_result_{selected_no}")
+            if pip_result:
+                st.markdown("---")
+
+                # ステップ 1: 検索語
+                st.markdown(f"**① 検索タイトル:** `{pip_result['search_title']}`")
+
+                # ステップ 2: Claude API（オプション）
+                _cl_res = pip_result.get("claude_result")
+                if _cl_res is not None:
+                    if _cl_res.get("error"):
+                        st.warning(f"② Claude: エラー — {_cl_res['error']}")
+                    else:
+                        _conf = _cl_res.get("confidence", "")
+                        _conf_icon = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(_conf, "⚪")
+                        with st.expander(
+                            f"② Claude 情報 {_conf_icon} 確信度:{_conf}  "
+                            f"『{_cl_res.get('official_title','')}』/ {_cl_res.get('artist','')}",
+                            expanded=True,
+                        ):
+                            cl_c1, cl_c2 = st.columns(2)
+                            cl_c1.text_input("正式タイトル", value=_cl_res.get("official_title",""), key=f"cl_title_{selected_no}", disabled=True)
+                            cl_c1.text_input("アーティスト", value=_cl_res.get("artist",""),         key=f"cl_art_{selected_no}",   disabled=True)
+                            cl_c1.text_input("CD / アルバム名", value=_cl_res.get("cd_name",""),     key=f"cl_cd_{selected_no}",    disabled=True)
+                            cl_c2.text_input("作曲者",        value=_cl_res.get("composer",""),      key=f"cl_comp_{selected_no}",  disabled=True)
+                            cl_c2.text_input("作詞者",        value=_cl_res.get("lyricist",""),      key=f"cl_lyric_{selected_no}", disabled=True)
+                            cl_c2.text_input("ISRC",          value=_cl_res.get("isrc",""),          key=f"cl_isrc_{selected_no}",  disabled=True)
+                            if _cl_res.get("notes"):
+                                st.caption(f"備考: {_cl_res['notes']}")
+                            if st.button("✅ Claude 情報を適用", key=f"cl_apply_{selected_no}", use_container_width=True):
+                                for col, val in {
+                                    "アーティスト": _cl_res.get("artist",""),
+                                    "作曲者":       _cl_res.get("composer",""),
+                                    "作詞者":       _cl_res.get("lyricist",""),
+                                    "CD名":         _cl_res.get("cd_name",""),
+                                    "確認ステータス": "候補あり",
+                                }.items():
+                                    if val and col in st.session_state.songs_df.columns:
+                                        st.session_state.songs_df.at[row_idx, col] = val
+                                st.success("楽曲まとめに反映しました。")
+
+                # ステップ 3: MusicBrainz
+                mb_best = pip_result.get("mb_best")
+                mb_all = [r for r in pip_result.get("mb_results", []) if "error" not in r]
+                mb_err = next((r["error"] for r in pip_result.get("mb_results", []) if "error" in r), None)
+
+                if mb_err:
+                    st.warning(f"③ MusicBrainz エラー: {mb_err}")
+                elif not mb_all:
+                    st.warning("③ MusicBrainz: 該当なし — 検索タイトルで J-WID を検索しました")
+                else:
+                    score = mb_best.get("score", 0) if mb_best else 0
+                    dur_disp = f"{mb_best['duration_sec']:.1f}s" if mb_best and mb_best.get("duration_sec") else ""
+                    isrc_disp = mb_best.get("isrc", "") if mb_best else ""
+                    official_title = mb_best.get("title", "") if mb_best else ""
+                    st.success(
+                        f"③ MusicBrainz: **{official_title}** ／ {mb_best.get('artist','') if mb_best else ''}"
+                        f"  スコア:{score}  尺:{dur_disp}  ISRC:{isrc_disp or '(なし)'}"
+                    )
+                    if len(mb_all) > 1:
+                        with st.expander(f"MusicBrainz 全候補（{len(mb_all)}件）"):
+                            for i, r in enumerate(mb_all):
+                                d = f"{r['duration_sec']:.1f}s" if r.get("duration_sec") else ""
+                                st.markdown(
+                                    f"`[{r['score']}]` **{r['title']}** / {r['artist']}  {d}  "
+                                    f"ISRC:{r.get('isrc','(なし)')}  "
+                                    f"[MBリンク]({r.get('mb_url','')})"
+                                )
+
+                # ステップ 4: Spotify（オプション）
+                _sp_res = pip_result.get("sp_results", [])
+                _sp_best = pip_result.get("sp_best")
+                if _sp_res:
+                    _sp_err = next((r["error"] for r in _sp_res if "error" in r), None)
+                    if _sp_err:
+                        st.warning(f"④ Spotify エラー: {_sp_err}")
+                    elif not [r for r in _sp_res if "error" not in r]:
+                        st.info("④ Spotify: 該当なし")
+                    else:
+                        _sp_valid = [r for r in _sp_res if "error" not in r]
+                        _spb = _sp_best or _sp_valid[0]
+                        st.success(
+                            f"④ Spotify: **{_spb.get('title','')}** ／ {_spb.get('artist','')}  "
+                            f"アルバム:{_spb.get('album','')}  "
+                            f"尺:{_spb.get('duration_sec',0):.1f}s  "
+                            f"ISRC:{_spb.get('isrc','(なし)')}"
+                        )
+                        _sp_apply_col, _sp_link_col = st.columns([3, 1])
+                        with _sp_link_col:
+                            if _spb.get("spotify_url"):
+                                st.link_button("🎵 Spotify で開く", _spb["spotify_url"], use_container_width=True)
+                        with _sp_apply_col:
+                            if st.button("✅ Spotify 情報を適用", key=f"sp_apply_pip_{selected_no}", use_container_width=True):
+                                for col, val in {
+                                    "アーティスト": _spb.get("artist", ""),
+                                    "CD名":         _spb.get("album", ""),
+                                    "確認ステータス": "候補あり",
+                                }.items():
+                                    if val and col in st.session_state.songs_df.columns:
+                                        st.session_state.songs_df.at[row_idx, col] = val
+                                st.success("楽曲まとめに反映しました。")
+                        if len(_sp_valid) > 1:
+                            with st.expander(f"Spotify 全候補（{len(_sp_valid)}件）"):
+                                for i, r in enumerate(_sp_valid):
+                                    d = f"{r['duration_sec']:.1f}s" if r.get("duration_sec") else ""
+                                    st.markdown(
+                                        f"`[{r['score']}]` **{r['title']}** / {r['artist']}  "
+                                        f"『{r.get('album','')}』  {d}  "
+                                        f"ISRC:{r.get('isrc','(なし)')}  "
+                                        f"[Spotify]({r.get('spotify_url','')})"
+                                    )
+
+                # ステップ 5: 検索語
+                st.markdown(f"**⑤ J-WID / NexTone 検索語:** `{pip_result['jwid_search_term']}`")
+
+                # ステップ 5: J-WID 結果
+                jwid_r = pip_result["jwid_results"]
+                ntone_r = pip_result["nextone_results"]
+
+                pip_tab_j, pip_tab_n, pip_tab_mf = st.tabs(["📋 J-WID 結果", "📋 NexTone 結果", "🌲 MINC 結果"])
+
+                with pip_tab_j:
+                    st.caption(f"検索URL: {jwid_r.get('search_url','')}")
+                    if jwid_r.get("error"):
+                        st.error(f"エラー: {jwid_r['error']}")
+                    elif not jwid_r.get("results"):
+                        st.warning("J-WID: 該当なし")
+                        with st.expander("デバッグ HTML"):
+                            st.code(jwid_r.get("debug_html", "")[:3000], language="html")
+                    else:
+                        st.success(f"{len(jwid_r['results'])} 件")
+
+                        # 未取得の詳細を自動フェッチ（MINCと同理由：詳細ページは別URL）
+                        _jwid_auto_key = f"pip_j_auto_fetched_{selected_no}"
+                        if not st.session_state.get(_jwid_auto_key):
+                            _jwid_need = [
+                                (i, it) for i, it in enumerate(jwid_r["results"])
+                                if not st.session_state.get(f"jwid_detail_{selected_no}_{i}")
+                                and it.get("_detail_url","")
+                            ]
+                            if _jwid_need:
+                                from modules.scraper import fetch_jwid_detail as _fetch_detail_auto
+                                with st.spinner(f"J-WID 詳細を自動取得中（{len(_jwid_need)} 件）…"):
+                                    for _ji, _jit in _jwid_need:
+                                        _jd = _fetch_detail_auto(_jit.get("_detail_url",""))
+                                        st.session_state[f"jwid_detail_{selected_no}_{_ji}"] = _jd
+                            st.session_state[_jwid_auto_key] = True
+                            if _jwid_need:
+                                st.rerun()
+
+                        for i, item in enumerate(jwid_r["results"]):
+                            _j_artist_lbl = (mb_best.get("artist","") if mb_best else "")
+                            with st.expander(
+                                f"候補{i+1}: {item.get('作品名','')}  著作者:{item.get('著作者名','')}  コード:{item.get('作品コード','(なし)')}"
+                                + (f"  アーティスト:{_j_artist_lbl}" if _j_artist_lbl else ""),
+                                expanded=(i == 0),
+                            ):
+                                # 詳細ページから作曲者/作詞者を取得済みかチェック
+                                _detail_key = f"jwid_detail_{selected_no}_{i}"
+                                _detail = st.session_state.get(_detail_key, {})
+
+                                # ウィジェット描画前に session_state を同期（描画後は変更不可）
+                                if _detail:
+                                    st.session_state[f"pip_j_comp_{selected_no}_{i}"] = _detail.get("作曲者", "")
+                                    st.session_state[f"pip_j_lyric_{selected_no}_{i}"] = _detail.get("作詞者", "")
+                                    st.session_state[f"pip_j_arr_{selected_no}_{i}"] = _detail.get("編曲者", "")
+                                    st.session_state[f"pip_j_tran_{selected_no}_{i}"] = _detail.get("訳詞者", "")
+
+                                pc1, pc2 = st.columns(2)
+                                pc1.text_input("作品コード", value=item.get("作品コード",""), key=f"pip_j_code_{selected_no}_{i}", disabled=True)
+                                pc1.text_input("作品名",    value=item.get("作品名",""),    key=f"pip_j_title_{selected_no}_{i}", disabled=True)
+                                pc1.text_input("著作者名（一覧）", value=item.get("著作者名",""), key=f"pip_j_auth_{selected_no}_{i}", disabled=True)
+                                _comp_disp = _detail.get("作曲者","（詳細取得で確認）") if not _detail else _detail.get("作曲者","")
+                                _lyric_disp = _detail.get("作詞者","（詳細取得で確認）") if not _detail else _detail.get("作詞者","")
+                                pc2.text_input("作曲者", value=_comp_disp, key=f"pip_j_comp_{selected_no}_{i}", disabled=True)
+                                pc2.text_input("作詞者", value=_lyric_disp, key=f"pip_j_lyric_{selected_no}_{i}", disabled=True)
+                                pc2.text_input("編曲者", value=_detail.get("編曲者",""),    key=f"pip_j_arr_{selected_no}_{i}", disabled=True)
+                                pc2.text_input("訳詞者", value=_detail.get("訳詞者",""),    key=f"pip_j_tran_{selected_no}_{i}", disabled=True)
+
+                                # 管理状況を表示（詳細取得済みの場合）
+                                _mgmt_pip = _detail.get("管理状況", {})
+                                if _mgmt_pip:
+                                    st.markdown("**管理状況（JASRAC）:**  \n" + _format_management_status(_mgmt_pip))
+                                if _detail and not _detail.get("作曲者"):
+                                    with st.expander("⚠️ デバッグ情報（作曲者が取得できなかった場合）"):
+                                        st.write(f"**error**: `{_detail.get('error')}`")
+                                        st.write(f"**著作者リスト**: {_detail.get('著作者リスト')}")
+                                        if _detail.get("debug_html"):
+                                            st.code(_detail["debug_html"][:5000], language="html")
+                                        else:
+                                            st.warning("debug_html が空です（セッションエラーまたはdetail_urlが空の可能性）")
+
+                                btn_col1, btn_col2 = st.columns(2)
+                                with btn_col1:
+                                    if st.button("🔄 J-WID詳細を再取得", key=f"pip_detail_j_{selected_no}_{i}", use_container_width=True):
+                                        with st.spinner("詳細ページ取得中..."):
+                                            from modules.scraper import fetch_jwid_detail as _fetch_detail
+                                            _d = _fetch_detail(item.get("_detail_url", ""))
+                                        st.session_state[_detail_key] = _d
+                                        if _d.get("作曲者"):
+                                            st.session_state[f"mf_author_{selected_no}"] = _d["作曲者"].strip()
+                                        if _d.get("error"):
+                                            st.error(f"詳細取得エラー: {_d['error']}")
+                                        elif not _d.get("作曲者") and not _d.get("作詞者"):
+                                            st.warning("作曲者・作詞者が取得できませんでした。下の「デバッグ HTML」を確認してください。")
+                                        else:
+                                            st.success(f"作曲者: {_d['作曲者']} ／ 作詞者: {_d['作詞者']}")
+                                        st.rerun()
+                                with btn_col2:
+                                    if st.button("✅ 申告フォーマットに反映", key=f"pip_apply_j_{selected_no}_{i}", use_container_width=True):
+                                        _pip_j_jcd = item.get("作品コード","")
+                                        _pip_j_apply = {
+                                            "作曲者": _detail.get("作曲者") or item.get("著作者名",""),
+                                            "作詞者": _detail.get("作詞者",""),
+                                            "編曲者": _detail.get("編曲者",""),
+                                            "訳詞者": _detail.get("訳詞者",""),
+                                            "JASRAC作品コード": _pip_j_jcd,
+                                            "アーティスト": mb_best.get("artist","") if mb_best else "",
+                                            "確認ステータス": "確定",
+                                        }
+                                        _hy = _infer_houyo(_pip_j_jcd)
+                                        if _hy and not str(row.get("邦洋区分","")).strip():
+                                            _pip_j_apply["邦洋区分"] = _hy
+                                        for col, val in _pip_j_apply.items():
+                                            if val and col in st.session_state.songs_df.columns:
+                                                st.session_state.songs_df.at[row_idx, col] = val
+                                        st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
+                                        st.session_state.pop("songs_editor", None)
+                                        st.rerun()
+
+                with pip_tab_n:
+                    st.caption(f"検索URL: {ntone_r.get('search_url','')}")
+                    if ntone_r.get("error"):
+                        st.error(f"エラー: {ntone_r['error']}")
+                    elif not ntone_r.get("results"):
+                        st.warning("NexTone: 該当なし")
+                    else:
+                        st.success(f"{len(ntone_r['results'])} 件")
+                        for i, item in enumerate(ntone_r["results"]):
+                            with st.expander(
+                                f"候補{i+1}: {item.get('作品名','')} ／ {item.get('管理番号','')}",
+                                expanded=(i == 0),
+                            ):
+                                nc1, nc2 = st.columns(2)
+                                nc1.text_input("管理番号",    value=item.get("管理番号",""),    key=f"pip_n_id_{selected_no}_{i}",    disabled=True)
+                                nc1.text_input("作品名",      value=item.get("作品名",""),      key=f"pip_n_title_{selected_no}_{i}", disabled=True)
+                                nc1.text_input("作曲者",      value=item.get("作曲者",""),      key=f"pip_n_comp_{selected_no}_{i}",  disabled=True)
+                                nc2.text_input("作詞者",      value=item.get("作詞者",""),      key=f"pip_n_lyric_{selected_no}_{i}", disabled=True)
+                                nc2.text_input("アーティスト", value=item.get("アーティスト",""), key=f"pip_n_art_{selected_no}_{i}",   disabled=True)
+                                if st.button("✅ 申告フォーマットに反映", key=f"pip_apply_n_{selected_no}_{i}", use_container_width=True):
+                                    for col, val in {
+                                        "作曲者": item.get("作曲者",""),
+                                        "作詞者": item.get("作詞者",""),
+                                        "NexTone管理番号": item.get("管理番号",""),
+                                        "アーティスト": item.get("アーティスト","") or (mb_best.get("artist","") if mb_best else ""),
+                                        "確認ステータス": "候補あり",
+                                    }.items():
+                                        if val and col in st.session_state.songs_df.columns:
+                                            st.session_state.songs_df.at[row_idx, col] = val
+                                    st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
+                                    st.session_state.pop("songs_editor", None)
+                                    st.rerun()
+
+                with pip_tab_mf:
+                    _pip_mf_res = st.session_state.get(f"pipeline_minc_{selected_no}")
+                    if _pip_mf_res is None:
+                        if _pip_mf_ok:
+                            st.info("パイプライン実行時に「MINC も使う」をチェックすると自動で検索されます。")
+                        else:
+                            st.warning("MINCにログインしてから「MINC も使う」チェックを入れて実行してください。")
+                    elif _pip_mf_res.get("error"):
+                        st.error(f"MINC エラー: {_pip_mf_res['error']}")
+                        with st.expander("デバッグ HTML"):
+                            st.code(_pip_mf_res.get("debug_html","")[:3000], language="html")
+                    elif not _pip_mf_res.get("results"):
+                        st.warning("MINC: 該当なし")
+                        with st.expander("デバッグ HTML"):
+                            st.code(_pip_mf_res.get("debug_html","")[:3000], language="html")
+                    else:
+                        _pip_mf_items = _pip_mf_res["results"]
+                        st.success(f"🌲 MINC: {len(_pip_mf_items)} 件")
+                        st.caption(f"検索URL: {_pip_mf_res.get('search_url','')}")
+
+                        # 未取得の詳細を自動フェッチ（キー未存在＝未取得として判定、エラー時もキーをセットして無限ループ防止）
+                        _mf_need_fetch = [
+                            (_auto_pmi, _auto_it) for _auto_pmi, _auto_it in enumerate(_pip_mf_items[:10])
+                            if f"pip_mf_ddetail_{selected_no}_{_auto_pmi}" not in st.session_state
+                            and _auto_it.get("_detail_href", "")
+                        ]
+                        if _mf_need_fetch:
+                            _mf_auto_c = _get_mf_client()
+                            with st.spinner(f"MINC 詳細を自動取得中（{len(_mf_need_fetch)} 件）…"):
+                                for _auto_pmi, _auto_it in _mf_need_fetch:
+                                    _auto_dkey = f"pip_mf_ddetail_{selected_no}_{_auto_pmi}"
+                                    try:
+                                        st.session_state[_auto_dkey] = _mf_auto_c.get_detail(_auto_it["_detail_href"])
+                                    except Exception as _auto_e:
+                                        st.session_state[_auto_dkey] = {"error": str(_auto_e), "debug_html": f"例外: {type(_auto_e).__name__}: {_auto_e}"}
+                            st.rerun()
+
+                        for _pmi, _pm_item in enumerate(_pip_mf_items[:10]):
+                            _pm_label = (
+                                f"候補{_pmi+1}: {_pm_item.get('作品名','')} ／ {_pm_item.get('アーティスト','')} "
+                                f"  CD:{_pm_item.get('CD商品タイトル','') or '(CD情報なし)'}  "
+                                f"JASRAC:{_pm_item.get('JASRAC作品コード','(なし)')}  "
+                                f"品番:{_pm_item.get('品番','(なし)')}"
+                            )
+                            _pm_detail_key = f"pip_mf_ddetail_{selected_no}_{_pmi}"
+                            _pm_detail_data = st.session_state.get(_pm_detail_key, {})
+
+                            with st.expander(_pm_label, expanded=(_pmi == 0)):
+                                _pm_c1, _pm_c2 = st.columns(2)
+                                _pm_c1.text_input("作品名",        value=_pm_item.get("作品名",""),         key=f"pip_mf_name_{selected_no}_{_pmi}", disabled=True)
+                                _pm_c1.text_input("アーティスト",  value=_pm_item.get("アーティスト",""),   key=f"pip_mf_art_{selected_no}_{_pmi}",  disabled=True)
+                                _pm_c1.text_input("品番（CD番号）", value=_pm_item.get("品番",""),           key=f"pip_mf_cat_{selected_no}_{_pmi}",  disabled=True)
+                                _pm_c1.text_input("CD商品タイトル", value=_pm_item.get("CD商品タイトル",""), key=f"pip_mf_cdtitle_{selected_no}_{_pmi}", disabled=True)
+                                _pm_c2.text_input("JASRAC作品コード", value=_pm_item.get("JASRAC作品コード",""), key=f"pip_mf_jcd_{selected_no}_{_pmi}", disabled=True)
+                                _pm_c2.text_input("NexTone管理番号",  value=_pm_item.get("NexTone管理番号",""), key=f"pip_mf_ncd_{selected_no}_{_pmi}", disabled=True)
+                                _pm_c2.text_input("レコード会社名",   value=_pm_item.get("レコード会社名",""),  key=f"pip_mf_label_{selected_no}_{_pmi}", disabled=True)
+
+                                # 詳細フィールド（作曲者/作詞者/編曲者/訳詞者）
+                                # session_state をウィジェット描画前に同期
+                                if _pm_detail_data:
+                                    st.session_state[f"pip_mf_comp_{selected_no}_{_pmi}"]  = _pm_detail_data.get("作曲者","")
+                                    st.session_state[f"pip_mf_lyric_{selected_no}_{_pmi}"] = _pm_detail_data.get("作詞者","")
+                                    st.session_state[f"pip_mf_arr2_{selected_no}_{_pmi}"]  = _pm_detail_data.get("編曲者","")
+                                    st.session_state[f"pip_mf_tran_{selected_no}_{_pmi}"]  = _pm_detail_data.get("訳詞者","")
+                                _pm_d4 = st.columns(4)
+                                _pm_d4[0].text_input("作曲者",
+                                    value=_pm_detail_data.get("作曲者","") if _pm_detail_data else "（詳細取得で確認）",
+                                    key=f"pip_mf_comp_{selected_no}_{_pmi}", disabled=True)
+                                _pm_d4[1].text_input("作詞者",
+                                    value=_pm_detail_data.get("作詞者","") if _pm_detail_data else "（詳細取得で確認）",
+                                    key=f"pip_mf_lyric_{selected_no}_{_pmi}", disabled=True)
+                                _pm_d4[2].text_input("編曲者",
+                                    value=_pm_detail_data.get("編曲者","") if _pm_detail_data else "",
+                                    key=f"pip_mf_arr2_{selected_no}_{_pmi}", disabled=True)
+                                _pm_d4[3].text_input("訳詞者",
+                                    value=_pm_detail_data.get("訳詞者","") if _pm_detail_data else "",
+                                    key=f"pip_mf_tran_{selected_no}_{_pmi}", disabled=True)
+
+                                _pm_btn1, _pm_btn2 = st.columns(2)
+                                with _pm_btn1:
+                                    if st.button("🔄 MINC詳細を再取得", key=f"pip_mf_dget_{selected_no}_{_pmi}", use_container_width=True):
+                                        with st.spinner("MINC詳細取得中..."):
+                                            try:
+                                                _pm_dd = _get_mf_client().get_detail(_pm_item.get("_detail_href",""))
+                                                st.session_state[_pm_detail_key] = _pm_dd
+                                            except Exception as _pm_e:
+                                                st.session_state[_pm_detail_key] = {"error": str(_pm_e), "debug_html": f"例外: {type(_pm_e).__name__}: {_pm_e}"}
+                                        st.rerun()
+                                # 詳細取得エラーまたはデバッグ情報
+                                # エラー時のみデバッグ情報を表示
+                                if _pm_detail_data and _pm_detail_data.get("error"):
+                                    st.error(f"MINC詳細エラー: {_pm_detail_data['error']}")
+                                    _dbg = _pm_detail_data.get("debug_html", "")
+                                    if _dbg:
+                                        with st.expander("🔍 デバッグ HTML"):
+                                            st.code(_dbg[:3000], language="html")
+
+                                with _pm_btn2:
+                                    if st.button("✅ MINC情報を申告フォーマットに反映", key=f"pip_mf_apply_{selected_no}_{_pmi}", use_container_width=True):
+                                        _pm_jcd = _pm_item.get("JASRAC作品コード","")
+                                        _pm_apply = {
+                                            "アーティスト":    _pm_item.get("アーティスト",""),
+                                            "CD番号":          _pm_item.get("品番",""),
+                                            "CD名":            _pm_item.get("CD商品タイトル",""),
+                                            "レコード会社名":  _pm_item.get("レコード会社名",""),
+                                            "JASRAC作品コード": _pm_jcd,
+                                            "NexTone管理番号": _pm_item.get("NexTone管理番号",""),
+                                            "確認ステータス":  "候補あり",
+                                        }
+                                        _hy = _infer_houyo(_pm_jcd)
+                                        if _hy and not str(row.get("邦洋区分","")).strip():
+                                            _pm_apply["邦洋区分"] = _hy
+                                        # 詳細取得済みの場合のみ作曲者等を追加（自動フェッチはしない）
+                                        _cached = st.session_state.get(_pm_detail_key, {})
+                                        if _cached and not _cached.get("error"):
+                                            for _ak in ["作曲者","作詞者","編曲者","訳詞者"]:
+                                                if _cached.get(_ak): _pm_apply[_ak] = _cached[_ak]
+                                        for _col, _val in _pm_apply.items():
+                                            if _val and _col in st.session_state.songs_df.columns:
+                                                st.session_state.songs_df.at[row_idx, _col] = _val
+                                        st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
+                                        st.session_state.pop("songs_editor", None)
+                                        st.rerun()
+
+        # ---- MINC 楽曲検索（個別・保険）----
+        st.divider()
+        st.markdown("#### 🌲 MINC 楽曲検索（個別）")
+        st.caption(
+            "全自動パイプラインがうまくいかなかった場合の保険として使ってください。"
+            "　minc.or.jp にログイン済みの Cookie を使って作曲者・作詞者・JASRAC コード・品番・委任者を取得します。"
+        )
+
+        # 認証状態バー（アプリ全体で1つのキーを使いまわす）
+        _mf_auth_col, _mf_btn_col = st.columns([4, 1])
+        with _mf_btn_col:
+            _mf_check = st.button("🔄 認証確認", key=f"mf_check_{selected_no}", use_container_width=True)
+        if _mf_check:
+            st.session_state.pop("mf_auth_state", None)
+            st.session_state.pop("mf_client", None)  # 再ログイン後は新クライアントを作成
+        if "mf_auth_state" not in st.session_state:
+            try:
+                _mf_ok, _mf_msg = check_session(_get_mf_client())
+            except MusicForestError as _e:
+                _mf_ok, _mf_msg = False, str(_e)
+            st.session_state["mf_auth_state"] = (_mf_ok, _mf_msg)
+        _mf_ok, _mf_msg = st.session_state["mf_auth_state"]
+        with _mf_auth_col:
+            if _mf_ok:
+                st.success(f"✅ {_mf_msg}")
+            else:
+                st.warning(
+                    f"⚠️ {_mf_msg}\n\n"
+                    f"ログイン: `.venv\\Scripts\\python.exe "
+                    f"H:\\PROGRAM\\search_music\\src\\login_browser.py`"
+                )
+
+        if _mf_ok:
+            _mf_s1, _mf_s2, _mf_s3 = st.columns([3, 2, 1])
+            with _mf_s1:
+                _mf_term_opts = [f"[{lbl}]  {val}" for lbl, val in term_candidates]
+                _mf_term_sel = st.selectbox(
+                    "検索語候補",
+                    options=_mf_term_opts,
+                    key=f"mf_title_{selected_no}",
+                )
+                _mf_title_val = term_candidates[_mf_term_opts.index(_mf_term_sel)][1]
+            with _mf_s2:
+                _mf_author_val = st.text_input(
+                    "著作者名（任意・絞り込み用）",
+                    value="",
+                    key=f"mf_author_{selected_no}",
+                    placeholder=str(row.get("作曲者", "")).strip() or "例: 加藤達也",
+                )
+            with _mf_s3:
+                _mf_match = st.selectbox(
+                    "一致方式",
+                    options=["2: 前方一致", "3: キーワード", "1: 完全一致"],
+                    key=f"mf_match_{selected_no}",
+                    help="match=1 は MINC 側でキーワード扱いになり別の曲が返ることがあります。前方一致が最も安定します。",
+                )
+            _mf_match_int = int(_mf_match[0])
+
+            # 選択語を編集できるinput（候補が変わったときリセット）
+            _mf_edit_key = f"mf_term_edit_{selected_no}"
+            _mf_prev_key = f"mf_term_prev_{selected_no}"
+            if st.session_state.get(_mf_prev_key) != _mf_title_val:
+                if _mf_edit_key in st.session_state:
+                    del st.session_state[_mf_edit_key]
+                st.session_state[_mf_prev_key] = _mf_title_val
+            _mf_search_term = st.text_input(
+                "検索語（編集可）",
+                key=_mf_edit_key,
+                value=_mf_title_val,
+                help="候補から自動入力。不要な語を削除するなど自由に編集できます。",
+            )
+
+            if st.button(
+                f"🌲 MINC で「{(_mf_search_term or _mf_title_val)[:20]}」を検索",
+                key=f"mf_search_{selected_no}",
+                type="primary",
+                use_container_width=True,
+            ):
+                with st.spinner("MINC を検索中... （1.5秒/リクエスト）"):
+                    try:
+                        _mf_client = _get_mf_client()
+                        _mf_result = _mf_client.search(
+                            _mf_search_term or _mf_title_val,
+                            author=_mf_author_val,
+                            match=_mf_match_int,
+                        )
+                        st.session_state[f"mf_results_{selected_no}"] = _mf_result
+                    except MusicForestError as e:
+                        st.session_state[f"mf_results_{selected_no}"] = {"error": str(e), "results": []}
+
+        # ---- MusicForest 検索結果表示 ----
+        _mf_res = st.session_state.get(f"mf_results_{selected_no}")
+        if _mf_res:
+            if _mf_res.get("error"):
+                st.error(f"MINC エラー: {_mf_res['error']}")
+                with st.expander("デバッグ HTML"):
+                    st.code(_mf_res.get("debug_html", "")[:3000], language="html")
+            elif not _mf_res.get("results"):
+                st.warning("MusicForest: 該当なし")
+                with st.expander("デバッグ HTML"):
+                    st.code(_mf_res.get("debug_html", "")[:3000], language="html")
+            else:
+                _mf_items = _mf_res["results"]
+                if _mf_res.get("truncated"):
+                    st.warning("⚠️ 検索結果が 500件上限に達しました。検索語を絞り込んでください。")
+                st.success(f"🌲 MINC: {len(_mf_items)} 件見つかりました")
+                st.caption(f"検索URL: {_mf_res.get('search_url','')}")
+
+                # MINC詳細取得・J-WID取得の結果を永続バナーで表示（rerun後も消えない）
+                _mf_flash_key = f"mf_flash_{selected_no}"
+                if _mf_flash_key in st.session_state:
+                    _fl = st.session_state.pop(_mf_flash_key)
+                    if _fl.get("error"):
+                        st.error(_fl["error"])
+                    else:
+                        st.success(_fl["message"])
+
+                for _mf_i, _mf_item in enumerate(_mf_items[:20]):
+                    _mf_label = (
+                        f"候補{_mf_i+1} [{_mf_item['_source_table']}]: "
+                        f"{_mf_item.get('作品名','')} ／ {_mf_item.get('アーティスト','')} "
+                        f"  JASRAC:{_mf_item.get('JASRAC作品コード','(なし)')}  "
+                        f"NexTone:{_mf_item.get('NexTone管理番号','(なし)')}"
+                    )
+                    with st.expander(_mf_label, expanded=(_mf_i == 0), key=f"mf_exp_{selected_no}_{_mf_i}"):
+                        _mf_c1, _mf_c2 = st.columns(2)
+                        _mf_c1.text_input("作品名",         value=_mf_item.get("作品名",""),          key=f"mf_name_{selected_no}_{_mf_i}", disabled=True)
+                        _mf_c1.text_input("アーティスト",   value=_mf_item.get("アーティスト",""),    key=f"mf_art_{selected_no}_{_mf_i}",  disabled=True)
+                        _mf_c1.text_input("品番（CD番号）",  value=_mf_item.get("品番",""),            key=f"mf_cat_{selected_no}_{_mf_i}",  disabled=True)
+                        _mf_c1.text_input("CD商品タイトル",  value=_mf_item.get("CD商品タイトル",""),  key=f"mf_cdtitle_{selected_no}_{_mf_i}", disabled=True)
+                        _mf_c2.text_input("JASRAC作品コード", value=_mf_item.get("JASRAC作品コード",""), key=f"mf_jcd_{selected_no}_{_mf_i}",  disabled=True)
+                        _mf_c2.text_input("NexTone管理番号", value=_mf_item.get("NexTone管理番号",""), key=f"mf_ncd_{selected_no}_{_mf_i}",  disabled=True)
+                        _mf_c2.text_input("レコード会社名",  value=_mf_item.get("レコード会社名",""),  key=f"mf_label_{selected_no}_{_mf_i}", disabled=True)
+                        _mf_c2.text_input("発売会社／販売会社（生）", value=_mf_item.get("発売会社販売会社",""), key=f"mf_pub_{selected_no}_{_mf_i}", disabled=True)
+
+                        # キー定義（ハンドラ・詳細フィールド共用）
+                        _mf_detail_key = f"mf_detail_{selected_no}_{_mf_i}"
+                        _jwid_minc_key = f"mf_jwid_{selected_no}_{_mf_i}"
+                        _mf_delg_key   = f"mf_delg_{selected_no}_{_mf_i}"
+                        _mf_jcd    = _mf_item.get("JASRAC作品コード", "")
+                        _mf_alb_id = _mf_item.get("_album_id", "")
+                        _mf_trk_id = _mf_item.get("_track_id", "")
+
+                        # ---- ボタン列（詳細フィールドより先に描画）----
+                        # ハンドラが session_state を更新した後に下の詳細フィールドが描画されるため
+                        # st.rerun() 不要でデータが即時反映される
+                        _mf_btn1, _mf_btn_jwid, _mf_btn2 = st.columns(3)
+
+                        with _mf_btn1:
+                            if st.button(
+                                "💿 MINC CD情報取得",
+                                key=f"mf_detail_btn_{selected_no}_{_mf_i}",
+                                use_container_width=True,
+                                help="作曲者/作詞者（作品詳細）＋I/V区分・委任者（CD詳細）を取得します",
+                            ):
+                                with st.spinner("MINC 情報取得中..."):
+                                    # Step 1: 作品詳細（作曲者/作詞者）
+                                    _d_err = None
+                                    try:
+                                        _d = _get_mf_client().get_detail(_mf_item["_detail_href"])
+                                        st.session_state[_mf_detail_key] = _d
+                                        if _d.get("error"):
+                                            _d_err = _d["error"]
+                                    except MusicForestError as _e:
+                                        _d_err = str(_e)
+                                        st.session_state[_mf_detail_key] = {"error": _d_err}
+
+                                    # Step 2: CD詳細（I/V区分・委任者）
+                                    if _mf_alb_id and _mf_trk_id:
+                                        try:
+                                            _cd = _get_mf_client().fetch_product_detail(_mf_alb_id, _mf_trk_id)
+                                            st.session_state[_mf_delg_key] = _cd
+                                            _iv_label = {"I": "インスト", "V": "ヴォーカル"}.get(_cd.get("IV", ""), "不明")
+                                            _cd_err = _cd.get("error")
+                                            if _cd_err:
+                                                st.toast(f"CD情報エラー: {_cd_err}", icon="❌")
+                                            elif _d_err:
+                                                st.toast(
+                                                    f"CD情報取得完了（候補{_mf_i+1}）: I/V={_iv_label} / 委任者={_cd.get('集中管理','不明')} ※作品詳細エラー: {_d_err}",
+                                                    icon="⚠️",
+                                                )
+                                            else:
+                                                _d_data = st.session_state.get(_mf_detail_key, {})
+                                                st.toast(
+                                                    f"取得完了（候補{_mf_i+1}）: "
+                                                    f"作曲者={_d_data.get('作曲者','') or '(なし)'}　"
+                                                    f"I/V={_iv_label}　"
+                                                    f"委任者={_cd.get('集中管理','不明')}",
+                                                    icon="✅",
+                                                )
+                                        except MusicForestError as _e:
+                                            st.session_state[_mf_delg_key] = {"集中管理": "", "IV": "", "error": str(_e)}
+                                            st.toast(f"CD情報取得エラー: {_e}", icon="❌")
+                                    else:
+                                        # 収録CD情報なし（作品テーブルの場合）→ CD情報取得不可
+                                        if _d_err:
+                                            st.toast(f"MINC詳細エラー: {_d_err}", icon="❌")
+                                        else:
+                                            _d_data = st.session_state.get(_mf_detail_key, {})
+                                            st.toast(
+                                                f"作家情報取得完了（候補{_mf_i+1}）: "
+                                                f"作曲者={_d_data.get('作曲者','') or '(なし)'}　"
+                                                f"※CD情報（I/V・委任者）は収録CD情報がないため取得できません",
+                                                icon="⚠️",
+                                            )
+
+                        with _mf_btn_jwid:
+                            if st.button(
+                                "📋 J-WID作家情報",
+                                key=f"mf_jwid_btn_{selected_no}_{_mf_i}",
+                                use_container_width=True,
+                                disabled=not _mf_jcd,
+                                help=f"JASRACコード {_mf_jcd} でJ-WIDを直接引き当て。作家情報＋管理状況を取得します",
+                            ):
+                                with st.spinner("J-WID から取得中..."):
+                                    from modules.scraper import fetch_jwid_rights_by_code as _fetch_by_code
+                                    _jw = _fetch_by_code(_mf_jcd)
+                                    st.session_state[_jwid_minc_key] = _jw
+                                    if _jw.get("error"):
+                                        st.toast(f"J-WID エラー: {_jw['error']}", icon="❌")
+                                    else:
+                                        st.toast(
+                                            f"J-WID 取得完了（候補{_mf_i+1}）: "
+                                            f"作曲者: {_jw['作曲者'] or '(なし)'}　"
+                                            f"作詞者: {_jw['作詞者'] or '(なし)'}　"
+                                            f"訳詞者: {_jw['訳詞者'] or '(なし)'}", icon="✅"
+                                        )
+
+                        with _mf_btn2:
+                            if st.button(
+                                "✅ 申告フォーマットに反映",
+                                key=f"mf_apply_{selected_no}_{_mf_i}",
+                                use_container_width=True,
+                            ):
+                                _jw_d = st.session_state.get(_jwid_minc_key, {})
+                                _detail_now = st.session_state.get(_mf_detail_key, {})
+                                # 作曲者・作詞者が未取得なら MINC 詳細を自動フェッチ
+                                if not (_jw_d.get("作曲者") or _detail_now.get("作曲者") or
+                                        _jw_d.get("作詞者") or _detail_now.get("作詞者")):
+                                    try:
+                                        _ad = _get_mf_client().get_detail(_mf_item["_detail_href"])
+                                        if not _ad.get("error"):
+                                            st.session_state[_mf_detail_key] = _ad
+                                            _detail_now = _ad
+                                    except Exception:
+                                        pass
+                                # J-WID を優先、なければ MINC 詳細
+                                _composer   = _jw_d.get("作曲者") or _detail_now.get("作曲者") or ""
+                                _lyricist   = _jw_d.get("作詞者") or _detail_now.get("作詞者") or ""
+                                _translator = _jw_d.get("訳詞者") or _detail_now.get("訳詞者") or ""
+                                _arranger   = _jw_d.get("編曲者") or _detail_now.get("編曲者") or ""
+                                _delg_r = st.session_state.get(_mf_delg_key, {})
+                                _委任者 = _delg_r.get("集中管理","")
+                                _iv_raw = _delg_r.get("IV","")
+                                _iv_apply = {"I": "インスト", "V": "ヴォーカル"}.get(_iv_raw, "")
+                                _mf_jcd2 = _mf_item.get("JASRAC作品コード","") or _detail_now.get("作品コード","")
+                                _mf_apply = {
+                                    "作曲者":          _composer,
+                                    "作詞者":          _lyricist,
+                                    "訳詞者":          _translator,
+                                    "編曲者":          _arranger,
+                                    "アーティスト":    _mf_item.get("アーティスト",""),
+                                    "CD番号":          _mf_item.get("品番",""),
+                                    "CD名":            _mf_item.get("CD商品タイトル",""),
+                                    "レコード会社名":  _mf_item.get("レコード会社名",""),
+                                    "JASRAC作品コード": _mf_jcd2,
+                                    "NexTone管理番号": _mf_item.get("NexTone管理番号","") or _detail_now.get("NexTone管理番号",""),
+                                    "委任者":          _委任者,
+                                    "確認ステータス":  "候補あり",
+                                }
+                                _hy = _infer_houyo(_mf_jcd2)
+                                if _hy and not str(row.get("邦洋区分","")).strip():
+                                    _mf_apply["邦洋区分"] = _hy
+                                if _iv_apply and not str(row.get("I/V区分","")).strip():
+                                    _mf_apply["I/V区分"] = _iv_apply
+                                for _col, _val in _mf_apply.items():
+                                    if _val and _col in st.session_state.songs_df.columns:
+                                        st.session_state.songs_df.at[row_idx, _col] = _val
+                                st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
+                                st.session_state.pop("songs_editor", None)
+                                st.rerun()
+
+                        # ---- 詳細フィールド（ボタンハンドラ実行後に描画 → 取得データが即反映）----
+
+                        _mf_detail = st.session_state.get(_mf_detail_key, {})
+                        _mf_dc1, _mf_dc2, _mf_dc3 = st.columns(3)
+                        _mf_dc1.text_input("作曲者（MINC詳細）", value=_mf_detail.get("作曲者",""), key=f"mf_comp_{selected_no}_{_mf_i}", disabled=True, placeholder="詳細取得で確認")
+                        _mf_dc2.text_input("作詞者（MINC詳細）", value=_mf_detail.get("作詞者",""), key=f"mf_lyric_{selected_no}_{_mf_i}", disabled=True, placeholder="詳細取得で確認")
+                        _mf_dc3.text_input("編曲者（MINC詳細）", value=_mf_detail.get("編曲者",""), key=f"mf_arr_{selected_no}_{_mf_i}", disabled=True)
+
+                        # J-WID 直接引き当て（MINCのJASRACコードを使用）
+                        _jwid_minc = st.session_state.get(_jwid_minc_key, {})
+                        if _jwid_minc and not _jwid_minc.get("error"):
+                            _jw_c1, _jw_c2, _jw_c3, _jw_c4 = st.columns(4)
+                            _jw_c1.text_input("作曲者（J-WID）", value=_jwid_minc.get("作曲者",""), key=f"mf_j_comp_{selected_no}_{_mf_i}", disabled=True)
+                            _jw_c2.text_input("作詞者（J-WID）", value=_jwid_minc.get("作詞者",""), key=f"mf_j_lyric_{selected_no}_{_mf_i}", disabled=True)
+                            _jw_c3.text_input("訳詞者（J-WID）", value=_jwid_minc.get("訳詞者",""), key=f"mf_j_tran_{selected_no}_{_mf_i}", disabled=True)
+                            _jw_c4.text_input("編曲者（J-WID）", value=_jwid_minc.get("編曲者",""), key=f"mf_j_arr_{selected_no}_{_mf_i}", disabled=True)
+                            _mgmt_minc = _jwid_minc.get("管理状況", {})
+                            if _mgmt_minc:
+                                st.markdown("**管理状況（JASRAC）:**  \n" + _format_management_status(_mgmt_minc))
+                        elif _jwid_minc.get("error"):
+                            st.error(f"J-WID 取得エラー: {_jwid_minc['error']}")
+
+                        # CD情報取得結果（I/V区分・委任者）
+                        _mf_delg = st.session_state.get(_mf_delg_key, {})
+                        if _mf_delg:
+                            if _mf_delg.get("error"):
+                                st.error(f"CD情報取得エラー: {_mf_delg['error']}")
+                            else:
+                                _iv_raw_d = _mf_delg.get("IV", "")
+                                _iv_disp = {"I": "インスト", "V": "ヴォーカル"}.get(_iv_raw_d, "")
+                                _delg_status = _mf_delg.get("集中管理", "")
+                                _cd_info_c1, _cd_info_c2 = st.columns(2)
+                                _cd_info_c1.text_input(
+                                    "I/V区分（MINC）",
+                                    value=_iv_disp or "（取得できず）",
+                                    key=f"mf_iv_disp_{selected_no}_{_mf_i}",
+                                    disabled=True,
+                                )
+                                _cd_info_c2.text_input(
+                                    "委任者（MINC）",
+                                    value=_delg_status or "（取得できず）",
+                                    key=f"mf_delg_disp_{selected_no}_{_mf_i}",
+                                    disabled=True,
+                                )
+                                if _delg_status == "委任者":
+                                    st.success(f"※集中管理: **{_delg_status}**（送信可能化権が日本レコード協会に集中管理委任済み）")
+                                elif _delg_status == "非委任者":
+                                    st.warning(f"※集中管理: **{_delg_status}**（送信可能化権は集中管理されていません）")
+
+                        st.link_button(
+                            "🌲 MINC で詳細を確認",
+                            f"https://www.minc.or.jp/saku/detail/?{_mf_item['_detail_href']}",
+                            use_container_width=True,
+                        )
 
         # ---- 全検索語一覧 ----
         st.divider()

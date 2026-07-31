@@ -3,12 +3,39 @@ Excel 出力モジュール
 openpyxl で整形済み Excel ファイルを生成する
 """
 import io
+import re
 
 import pandas as pd
 from openpyxl import Workbook
 from modules.matcher import duration_to_min_sec
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+
+# --- 申告フォーマット用コード整形ヘルパー ---
+
+def _fmt_jasrac_code(val) -> str:
+    """JASRAC作品コードを XXX-XXXX-X(X) 形式に整形する。"""
+    if not val or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    cleaned = re.sub(r"[-\s]", "", str(val)).upper().strip()
+    if len(cleaned) < 7:
+        return cleaned
+    return cleaned[:3] + "-" + cleaned[3:7] + "-" + cleaned[7:]
+
+
+def _fmt_cd_number(val) -> str:
+    """CD番号を 英字3〜4文字-数字 形式に整形する。スペース・ハイフン・なし を統一してハイフンに。"""
+    if not val or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    s = str(val).strip()
+    if not s:
+        return ""
+    # 英字3〜4文字 + 任意の空白/ハイフン + 数字以降 → 統一フォーマット
+    m = re.match(r"^([A-Za-z]{3,4})[\s\-]*(\d.*)$", s)
+    if m:
+        return m.group(1).upper() + "-" + m.group(2)
+    return s
+
 
 # --- 確認ステータスの色定義（背景色 RGB 16進） ---
 STATUS_COLOR_MAP: dict[str, str] = {
@@ -164,6 +191,7 @@ _SHINKOK_RENAME: dict[str, str] = {
     "邦洋区分":         "邦・洋区分",
     "原訳詞区分":       "原・訳詞区分",
     "JASRAC作品コード": "JASRACコード",
+    "NexTone管理番号":  "NexTone管理番号",
     "作詞者":           "作詞",
     "作曲者":           "作曲",
     "編曲者":           "編曲",
@@ -177,7 +205,7 @@ _SHINKOK_ORDER = [
     "使用形態", "楽曲名", "音源区分", "レコード会社名", "レコード番号",
     "使用時間（分）", "使用時間（秒）",
     "I/V区分", "邦・洋区分", "原・訳詞区分",
-    "JASRACコード", "作詞", "作曲", "アーティスト", "編曲", "訳詞",
+    "JASRACコード", "NexTone管理番号", "作詞", "作曲", "アーティスト", "編曲", "訳詞",
     "自社楽曲ID",
     # 参照列（申告書には不要だが確認用）
     "トラック", "イベント名", "START TIME", "使用尺",
@@ -228,6 +256,12 @@ def build_shinkok_df(songs_df: pd.DataFrame, events_df: pd.DataFrame) -> pd.Data
     for col in _SHINKOK_INT_COLS:
         if col in result.columns:
             result[col] = pd.to_numeric(result[col], errors="coerce").fillna(0).astype(int)
+
+    # コード表示フォーマット
+    if "JASRACコード" in result.columns:
+        result["JASRACコード"] = result["JASRACコード"].apply(_fmt_jasrac_code)
+    if "レコード番号" in result.columns:
+        result["レコード番号"] = result["レコード番号"].apply(_fmt_cd_number)
 
     return result
 

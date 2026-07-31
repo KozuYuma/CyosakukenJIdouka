@@ -27,6 +27,7 @@ def run_pipeline(
     wav_detected_title: str = "",
     song_title: str = "",
     composer: str = "",
+    jwid_artist: str = "",
     tolerance_sec: float = 15.0,
     mb_score_threshold: int = 80,
     mb_limit: int = 5,
@@ -132,8 +133,12 @@ def run_pipeline(
         except Exception as e:
             sp_results = [{"error": str(e)}]
 
+    _jwid_artist = str(jwid_artist).strip()
+    if _jwid_artist.lower() == "nan":
+        _jwid_artist = ""
+
     # ── Step 5 & 6: J-WID / NexTone（composer で絞り込み）────────────
-    search_results = search_all(jwid_search_term, composer=_comp)
+    search_results = search_all(jwid_search_term, composer=_comp, artist=_jwid_artist)
 
     return {
         "event_name":       event_name,

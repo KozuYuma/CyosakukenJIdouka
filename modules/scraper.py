@@ -87,18 +87,21 @@ def _jwid_agree() -> bool:
         return False
 
 
-def search_jwid(title: str, author: str = "") -> dict:
+def search_jwid(title: str, author: str = "", artist: str = "", max_pages: int = 3) -> dict:
     """
-    J-WID（JASRAC）でタイトル（必要に応じて著作者名）を検索して結果を返す。
+    J-WID（JASRAC）でタイトル（必要に応じて著作者名 / アーティスト名）を検索して結果を返す。
 
     Args:
-        title:  検索する曲名
-        author: 著作者名ヒント（空でも可）。指定すると J-WID 側で絞り込みを行う
+        title:     検索する曲名
+        author:    著作者名ヒント（空でも可）。指定すると J-WID 側で絞り込みを行う
+        artist:    アーティスト名ヒント（空でも可）。IN_ARTIST_NAME1 に渡して J-WID 側で絞り込む
+        max_pages: 取得する最大ページ数（1ページ20件）。デフォルト3（最大60件）
 
     Returns: {
         "source": "J-WID",
         "search_url": str,
         "results": [{"作品コード":..., "作品名":..., "作曲者":..., "アーティスト":...}, ...],
+        "pages_fetched": int,
         "error": str | None,
         "debug_html": str,
     }
@@ -108,6 +111,7 @@ def search_jwid(title: str, author: str = "") -> dict:
         "source": "J-WID",
         "search_url": JWID_SEARCH_URL,
         "results": [],
+        "pages_fetched": 1,
         "error": None,
         "debug_html": "",
     }
@@ -130,7 +134,7 @@ def search_jwid(title: str, author: str = "") -> dict:
             "IN_KEN_NAME2":                     "",
             "IN_KEN_NAME_JOB2":                 "1",
             "IN_KEN_NAME_OPTION2":              "0",
-            "IN_ARTIST_NAME1":                  "",
+            "IN_ARTIST_NAME1":                  artist,
             "IN_ARTIST_NAME_OPTION1":           "0",
             "IN_DEFAULT_SEARCH_WORKS_NAIGAI":   "0",   # 全て
             "CMD_SEARCH":                       "",
@@ -181,6 +185,34 @@ def search_jwid(title: str, author: str = "") -> dict:
 
         soup = BeautifulSoup(html, "lxml")
         out["results"] = _parse_jwid_table(soup)
+
+        # 追加ページ取得（1ページ分 = page_size 件ちょうどなら次ページが存在する可能性）
+        _page_size = int(search_params.get("IN_DEFAULT_WORKS_KOUHO_MAX", "20"))
+        _page = 1
+        while len(out["results"]) == _page * _page_size and _page < max_pages:
+            _page += 1
+            _sp = dict(search_params)
+            _sp["RESULT_CURRENT_PAGE"] = str(_page)
+            _body_p = urllib.parse.urlencode(_sp, encoding="ms932").encode("ascii")
+            _rate_limit("jasrac.or.jp")
+            _resp_p = _session.post(
+                JWID_SEARCH_URL,
+                data=_body_p,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": JWID_BASE + "main?trxID=F00100",
+                },
+                timeout=TIMEOUT,
+            )
+            _resp_p.raise_for_status()
+            _html_p = _resp_p.content.decode("ms932", errors="replace")
+            if "検索条件に該当するデータが見つかりませんでした" in _html_p:
+                break
+            _page_items = _parse_jwid_table(BeautifulSoup(_html_p, "lxml"))
+            if not _page_items:
+                break
+            out["results"].extend(_page_items)
+        out["pages_fetched"] = _page
 
     except requests.exceptions.ConnectionError:
         out["error"] = "接続エラー: J-WID サイトに接続できません。"
@@ -674,15 +706,15 @@ def _rank_by_composer(results: list[dict], composer_hint: str) -> list[dict]:
 # まとめて検索
 # =====================================================================
 
-def search_all(title: str, composer: str = "") -> dict:
+def search_all(title: str, composer: str = "", artist: str = "") -> dict:
     """
     J-WID と NexTone を連続して検索し、両方の結果を返す。
 
     Args:
         title:    検索する曲名
-        composer: 作曲者ヒント（空でも可）。
-                  指定した場合は結果を作曲者名で並び替え、
-                  各サービスの結果辞書に ``composer_matched_count`` キーを付与する。
+        composer: 作曲者ヒント（空でも可）。結果を作曲者名で並び替え、
+                  composer_matched_count キーを付与する
+        artist:   アーティスト名ヒント（空でも可）。J-WID の IN_ARTIST_NAME1 に渡す
 
     Returns:
         {"jwid": {..., "composer_matched_count": int}, "nextone": {...}}
@@ -693,7 +725,7 @@ def search_all(title: str, composer: str = "") -> dict:
 
     # J-WID はタイトルだけで検索し、作曲者は後段のランキングで使う
     # （author を渡すと J-WID 側でも絞り込まれ、ヒント誤り時に全件ゼロになるリスクがある）
-    jwid_result    = search_jwid(title)
+    jwid_result    = search_jwid(title, artist=artist)
     nextone_result = search_nextone(title)
 
     for result in [jwid_result, nextone_result]:
