@@ -1692,12 +1692,26 @@ with tabs[0]:
         st.caption(f"表示: {len(filtered_df)} 件 ／ 全 {len(songs_df)} 件")
 
         # ---- 一括検索 ----
-        with st.expander("🔍 一括検索（MINC / J-WID / NexTone）詳細設定", expanded=False):
+        # expander の中のウィジェットを操作すると再実行が走り、expanded 引数の値
+        # （False）に戻って畳まれてしまう。操作時にコールバックでフラグを立て、
+        # 開いたままにする（コールバックは再実行前に走るので次の描画に間に合う）。
+        def _keep_bulk_open() -> None:
+            st.session_state["bulk_search_open"] = True
+
+        def _keep_bulk_test_open() -> None:
+            st.session_state["bulk_search_open"] = True
+            st.session_state["bulk_test_open"] = True
+
+        with st.expander(
+            "🔍 一括検索（MINC / J-WID / NexTone）詳細設定",
+            expanded=bool(st.session_state.get("bulk_search_open")),
+        ):
             bulk_target = st.radio(
                 "検索対象",
                 ["未調査のみ", "全曲"],
                 horizontal=True,
                 key="bulk_search_target",
+                on_change=_keep_bulk_open,
             )
             target_mask = (
                 st.session_state.songs_df["確認ステータス"].isin(["未調査", "MP3補助確認"])
@@ -1724,10 +1738,19 @@ with tabs[0]:
             )
 
             # ---- テスト検索（診断用） ----
-            with st.expander("🧪 テスト検索（1曲で動作確認）", expanded=False):
-                _test_title = st.text_input("曲名", key="test_search_title", placeholder="例: 風よ運んでいいよ")
-                _test_composer = st.text_input("作曲者ヒント（任意）", key="test_search_composer")
-                if st.button("テスト検索を実行", key="test_search_btn"):
+            with st.expander(
+                "🧪 テスト検索（1曲で動作確認）",
+                expanded=bool(st.session_state.get("bulk_test_open")),
+            ):
+                _test_title = st.text_input(
+                    "曲名", key="test_search_title", placeholder="例: 風よ運んでいいよ",
+                    on_change=_keep_bulk_test_open,
+                )
+                _test_composer = st.text_input(
+                    "作曲者ヒント（任意）", key="test_search_composer",
+                    on_change=_keep_bulk_test_open,
+                )
+                if st.button("テスト検索を実行", key="test_search_btn", on_click=_keep_bulk_test_open):
                     if _test_title.strip():
                         with st.spinner("検索中..."):
                             _test_r = search_all(_test_title.strip(), composer=_test_composer.strip())
@@ -1759,6 +1782,7 @@ with tabs[0]:
                 key="bulk_search_btn",
                 type="primary",
                 disabled=target_count == 0,
+                on_click=_keep_bulk_open,
             ):
                 target_indices = st.session_state.songs_df[target_mask].index.tolist()
                 total = len(target_indices)
@@ -1965,11 +1989,17 @@ with tabs[0]:
                 )
                 if stats["エラー"]:
                     result_msg += f" ／ エラー {stats['エラー']} 件"
-                st.success(result_msg)
                 if stats.get("_last_error"):
-                    st.warning(f"J-WID/NexToneエラー: {stats['_last_error']}")
+                    result_msg += f"  \nJ-WID/NexToneエラー: {stats['_last_error']}"
                 if stats["MINCエラー"]:
-                    st.warning(f"⚠️ MINC エラー {stats['MINCエラー']} 件: {stats.get('_minc_last_error','')}")
+                    result_msg += (
+                        f"  \n⚠️ MINC エラー {stats['MINCエラー']} 件: "
+                        f"{stats.get('_minc_last_error','')}"
+                    )
+                # 直後に rerun するとこの場で出したメッセージは消えるため持ち越す
+                st.session_state["_apply_msg"] = result_msg
+                # 検索が終わったら詳細設定は畳んでよい
+                st.session_state.pop("bulk_search_open", None)
                 st.rerun()
 
         # ---- 申告フォーマット プレビュー（提出用・イベント行単位）----
