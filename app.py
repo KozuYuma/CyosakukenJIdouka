@@ -448,6 +448,15 @@ def _render_cd_results(
                 st.session_state.songs_df.at[row_idx, "I/V区分"]
                 if "I/V区分" in st.session_state.songs_df.columns else ""
             ).strip()
+            if not _cp_iv_str:
+                # MINCのCD詳細にI/V表記が無い場合は作詞者の有無から決める
+                # （作家名が取得済みの行に限る）
+                _cp_row_lyr = str(st.session_state.songs_df.at[row_idx, "作詞者"]
+                                  if "作詞者" in st.session_state.songs_df.columns else "")
+                _cp_row_cmp = str(st.session_state.songs_df.at[row_idx, "作曲者"]
+                                  if "作曲者" in st.session_state.songs_df.columns else "")
+                if not (_is_blank(_cp_row_lyr) and _is_blank(_cp_row_cmp)):
+                    _cp_iv_str = _infer_iv(_cp_row_lyr)
             if _cp_iv_str and not _cp_cur_iv:
                 st.session_state.songs_df.at[row_idx, "I/V区分"] = _cp_iv_str
             # 邦洋区分（JASRACコード2文字目）
@@ -589,6 +598,13 @@ def _render_cd_results(
                     if (_cp_cred or {}).get(_cp_ck):
                         _cp_tapply[_cp_ck] = _cp_cred[_cp_ck]
 
+                # I/V区分: MINCの収録曲表にI/V表記が無い場合は作詞者の有無で決める。
+                # 作品詳細を引けた（＝作詞者がいないと確認できた）ときだけ判定する。
+                if not _cp_tapply.get("I/V区分") and any(
+                    (_cp_cred or {}).get(k) for k in ("作曲者", "作詞者", "編曲者", "訳詞者")
+                ):
+                    _cp_tapply["I/V区分"] = _infer_iv((_cp_cred or {}).get("作詞者", ""))
+
             # 邦洋区分（JASRACコード2文字目: 数字→邦楽、英字→洋楽）
             # 別の作品を反映するときは古い値が残ると誤りになるので上書きする。
             # 同じ作品を反映し直すときは、手で直した値を潰さないよう空欄のときだけ補う。
@@ -680,6 +696,33 @@ def _infer_houyo(jasrac: str) -> str:
         if c.isalpha():
             return "洋楽"
     return ""
+
+
+def _is_blank(v) -> bool:
+    """空欄扱いの値（空文字 / nan / none）かどうか。"""
+    return str(v).strip().lower() in ("", "nan", "none")
+
+
+def _infer_iv(lyricist: str) -> str:
+    """作詞者の有無から I/V区分を推定する（作詞者あり→ヴォーカル、なし→インスト）。
+
+    作家名を取得できた（＝作詞者が本当にいないと分かる）場合にのみ使うこと。
+    未取得の空欄をインストと決めつけないため、呼び出し側で判断する。
+    """
+    return "インスト" if _is_blank(lyricist) else "ヴォーカル"
+
+
+def _apply_iv_from_credits(apply: dict) -> None:
+    """反映内容（apply dict）に作家名が含まれていれば I/V区分 を決めて書き足す。
+
+    その作品の作家名を取得できたということは作詞者の有無が確定しているので、
+    反映する作品の値として上書きする（既に I/V区分 が入っている apply は触らない）。
+    """
+    if apply.get("I/V区分"):
+        return
+    if not any(not _is_blank(apply.get(k, "")) for k in ("作曲者", "作詞者", "編曲者", "訳詞者")):
+        return
+    apply["I/V区分"] = _infer_iv(apply.get("作詞者", ""))
 
 
 def _get_mf_client() -> MusicForestClient:
@@ -1938,19 +1981,28 @@ with tabs[0]:
                             stats["MINCエラー"] += 1
                             stats.setdefault("_minc_last_error", f"{type(_me).__name__}: {_me}")
 
-                    # I/V区分 自動判定（MINC CD情報または J-WID 作詞者なし確定のみ。作詞者有無では断定しない）
+                    # I/V区分 自動判定
+                    #   ① MINC の CD情報に I/V 表記があればそれを使う
+                    #   ② 無ければ作詞者の有無で判定（作詞者あり→ヴォーカル／なし→インスト）
+                    # ②は作家名を取得できた行に限る（未取得の空欄をインストにしないため）
                     _BLANK = ("", "nan", "none")
                     _new_lyr   = updates.get("作詞者", "").strip()
                     _exist_lyr = str(row.get("作詞者", "")).strip()
+                    _lyr = _new_lyr or ("" if _exist_lyr.lower() in _BLANK else _exist_lyr)
+                    _cred_known = bool(
+                        _jwid_detail_ok
+                        or _lyr
+                        or updates.get("作曲者", "").strip()
+                        or str(row.get("作曲者", "")).strip().lower() not in _BLANK
+                    )
                     _iv_set    = str(row.get("I/V区分", "")).strip().lower() not in _BLANK
                     if not _iv_set:
                         if _minc_iv == "I":
                             updates["I/V区分"] = "インスト"
                         elif _minc_iv == "V":
                             updates["I/V区分"] = "ヴォーカル"
-                        elif _jwid_detail_ok and not (_new_lyr or (_exist_lyr and _exist_lyr.lower() not in _BLANK)):
-                            # J-WID 詳細取得済み かつ 作詞者が一切なし → インスト確定
-                            updates["I/V区分"] = "インスト"
+                        elif _cred_known:
+                            updates["I/V区分"] = _infer_iv(_lyr)
 
                     # 原訳詞区分 自動判定（作詞者ありで未設定なら "原詞"）
                     if (_new_lyr or (_exist_lyr and _exist_lyr.lower() not in _BLANK)):
@@ -2585,6 +2637,9 @@ with tabs[0]:
                                 if _hy and not _cur_hy_mf:
                                     _mf_apply["邦洋区分"] = _hy
                                 _cur_iv_mf = str(st.session_state.songs_df.at[row_idx, "I/V区分"] if "I/V区分" in st.session_state.songs_df.columns else "").strip()
+                                if not _iv_apply and not _is_blank(_composer + _lyricist + _arranger):
+                                    # CD詳細にI/V表記が無ければ作詞者の有無で判定
+                                    _iv_apply = _infer_iv(_lyricist)
                                 if _iv_apply and not _cur_iv_mf:
                                     _mf_apply["I/V区分"] = _iv_apply
                                 for _col, _val in _mf_apply.items():
@@ -2826,6 +2881,11 @@ with tabs[0]:
                                     "アーティスト":   _cd_art_d,
                                     "レコード会社名": _cd_rec_co,
                                 }
+                                if not _cd_iv_appl and not (
+                                    _is_blank(row.get("作曲者", "")) and _is_blank(row.get("作詞者", ""))
+                                ):
+                                    # CD詳細にI/V表記が無ければ、取得済みの作詞者の有無で判定
+                                    _cd_iv_appl = _infer_iv(str(row.get("作詞者", "")))
                                 if _cd_iv_appl and not str(row.get("I/V区分", "")).strip():
                                     _m_direct["I/V区分"] = _cd_iv_appl
                                 for _col, _val in _m_direct.items():
@@ -3422,6 +3482,7 @@ with tabs[0]:
                                         _cur_hy = str(st.session_state.songs_df.at[row_idx, "邦洋区分"] if "邦洋区分" in st.session_state.songs_df.columns else "").strip()
                                         if _hy and not _cur_hy:
                                             _pip_j_apply["邦洋区分"] = _hy
+                                        _apply_iv_from_credits(_pip_j_apply)
                                         for col, val in _pip_j_apply.items():
                                             if val and col in st.session_state.songs_df.columns:
                                                 st.session_state.songs_df.at[row_idx, col] = val
@@ -3465,13 +3526,15 @@ with tabs[0]:
                                 nc2.text_input("作詞者",      value=item.get("作詞者",""),      key=f"pip_n_lyric_{selected_no}_{i}", disabled=True)
                                 nc2.text_input("アーティスト", value=item.get("アーティスト",""), key=f"pip_n_art_{selected_no}_{i}",   disabled=True)
                                 if st.button("✅ 申告フォーマットに反映", key=f"pip_apply_n_{selected_no}_{i}", use_container_width=True):
-                                    for col, val in {
+                                    _pip_n_apply = {
                                         "作曲者": item.get("作曲者",""),
                                         "作詞者": item.get("作詞者",""),
                                         "NexTone管理番号": item.get("管理番号",""),
                                         "アーティスト": item.get("アーティスト","") or (mb_best.get("artist","") if mb_best else ""),
                                         "確認ステータス": "候補あり",
-                                    }.items():
+                                    }
+                                    _apply_iv_from_credits(_pip_n_apply)
+                                    for col, val in _pip_n_apply.items():
                                         if val and col in st.session_state.songs_df.columns:
                                             st.session_state.songs_df.at[row_idx, col] = val
                                     st.session_state["_apply_msg"] = "楽曲まとめ・申告フォーマットに反映しました。"
@@ -3618,6 +3681,7 @@ with tabs[0]:
                                         if _cached and not _cached.get("error"):
                                             for _ak in ["作曲者","作詞者","編曲者","訳詞者"]:
                                                 if _cached.get(_ak): _pm_apply[_ak] = _cached[_ak]
+                                            _apply_iv_from_credits(_pm_apply)
                                         for _col, _val in _pm_apply.items():
                                             if _val and _col in st.session_state.songs_df.columns:
                                                 st.session_state.songs_df.at[row_idx, _col] = _val
@@ -3757,6 +3821,7 @@ with tabs[0]:
                         _hy = _infer_houyo(_jw_manual_code.strip())
                         if _hy and not str(row.get("邦洋区分","")).strip():
                             _jw_apply["邦洋区分"] = _hy
+                        _apply_iv_from_credits(_jw_apply)
                         for _col, _val in _jw_apply.items():
                             if _val and _col in st.session_state.songs_df.columns:
                                 st.session_state.songs_df.at[row_idx, _col] = _val
