@@ -263,6 +263,12 @@ def _render_cd_results(
     """search_cds_by_jasrac の結果（CD商品リスト全件）を一覧＋反映UIとして描画する。"""
     if not _cp_res:
         return
+
+    # 収録曲取得の結果メッセージ（取得直後に rerun するのでここで出す）
+    _cp_toast_key = f"cpanel_toast_{key_prefix}"
+    if st.session_state.get(_cp_toast_key):
+        _cp_tmsg, _cp_ticon = st.session_state.pop(_cp_toast_key)
+        st.toast(_cp_tmsg, icon=_cp_ticon)
     if not _cp_res.get("cds"):
         if _cp_res.get("配信"):
             st.info(_cp_res.get("error") or "CD商品はありませんでした（配信のみの音源です）。")
@@ -418,13 +424,16 @@ def _render_cd_results(
                     )
                     st.session_state[_cp_det_key] = _cp_fd
                     if _cp_fd.get("error"):
-                        st.toast(f"エラー: {_cp_fd['error']}", icon="❌")
+                        st.session_state[_cp_toast_key] = (f"エラー: {_cp_fd['error']}", "❌")
                     else:
-                        st.toast(
+                        st.session_state[_cp_toast_key] = (
                             f"{len(_cp_fd.get('tracks', []))}曲を取得  "
                             f"委任者={_cp_fd.get('集中管理', '(なし)')}",
-                            icon="✅",
+                            "✅",
                         )
+                    # 収録曲リストや委任者欄はこのボタンより前で描画済みなので、
+                    # 取得結果を今の画面に出すには再実行が必要（2回押さないと出ない対策）
+                    st.rerun()
                 except MusicForestError as _cp_fe:
                     st.toast(f"エラー: {_cp_fe}", icon="❌")
     with _cp_b2:
