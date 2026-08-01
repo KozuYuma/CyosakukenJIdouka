@@ -601,6 +601,19 @@ def _render_cd_results(
                                 f"（MINCの作品詳細に作家名がありませんでした"
                                 f"／コード {_cp_tjcd or _cp_tncd}）"
                             )
+                    elif _mf_norm_name(_cp_trk.get("曲名", "")) == _mf_norm_name(
+                        _cp_res.get("作品名", "")
+                    ):
+                        # 作品コードが無い曲。検索した作品そのものなら、検索結果の
+                        # 「作詞／作曲」列から拾った作家名を使える（同名判定なので
+                        # CD内の別の無コード曲には適用しない）。
+                        _cp_cred = {
+                            k: _cp_res.get(k, "")
+                            for k in ("作曲者", "作詞者", "編曲者", "訳詞者")
+                            if _cp_res.get(k)
+                        }
+                        if not _cp_cred:
+                            _cp_cred_msg = "（作品コードが無いため作家名は取得できません）"
                     else:
                         _cp_cred_msg = "（作品コードが無いため作家名は取得できません）"
                 for _cp_ck in ("作曲者", "作詞者", "編曲者", "訳詞者"):
@@ -1993,6 +2006,11 @@ with tabs[0]:
                                             if _mf_d.get("訳詞者") and not updates.get("訳詞者"): updates["訳詞者"] = _mf_d["訳詞者"]
                                     except Exception:
                                         pass
+                                # 詳細ページを引けなかった／作家名が載っていなかった分は
+                                # 検索結果の「作詞／作曲」列で埋める（通信なし）
+                                for _ak in ("作曲者", "作詞者", "編曲者", "訳詞者"):
+                                    if _mfr.get(_ak) and not updates.get(_ak):
+                                        updates[_ak] = _mfr[_ak]
                         except Exception as _me:
                             stats["MINCエラー"] += 1
                             stats.setdefault("_minc_last_error", f"{type(_me).__name__}: {_me}")
@@ -2657,7 +2675,8 @@ with tabs[0]:
                                 _jw_d = st.session_state.get(_jwid_minc_key, {})
                                 _detail_now = st.session_state.get(_mf_detail_key, {})
                                 # 作曲者・作詞者が未取得なら MINC 詳細を自動フェッチ
-                                if not (_jw_d.get("作曲者") or _detail_now.get("作曲者") or
+                                if _mf_item.get("_detail_href") and not (
+                                        _jw_d.get("作曲者") or _detail_now.get("作曲者") or
                                         _jw_d.get("作詞者") or _detail_now.get("作詞者")):
                                     try:
                                         _ad = _get_mf_client().get_detail(_mf_item["_detail_href"])
@@ -2666,11 +2685,12 @@ with tabs[0]:
                                             _detail_now = _ad
                                     except Exception:
                                         pass
-                                # J-WID を優先、なければ MINC 詳細
-                                _composer   = _jw_d.get("作曲者") or _detail_now.get("作曲者") or ""
-                                _lyricist   = _jw_d.get("作詞者") or _detail_now.get("作詞者") or ""
-                                _translator = _jw_d.get("訳詞者") or _detail_now.get("訳詞者") or ""
-                                _arranger   = _jw_d.get("編曲者") or _detail_now.get("編曲者") or ""
+                                # J-WID を優先、なければ MINC 詳細、
+                                # それも無ければ検索結果の「作詞／作曲」列
+                                _composer   = _jw_d.get("作曲者") or _detail_now.get("作曲者") or _mf_item.get("作曲者", "")
+                                _lyricist   = _jw_d.get("作詞者") or _detail_now.get("作詞者") or _mf_item.get("作詞者", "")
+                                _translator = _jw_d.get("訳詞者") or _detail_now.get("訳詞者") or _mf_item.get("訳詞者", "")
+                                _arranger   = _jw_d.get("編曲者") or _detail_now.get("編曲者") or _mf_item.get("編曲者", "")
                                 _delg_r = st.session_state.get(_mf_delg_key, {})
                                 _委任者 = _delg_r.get("集中管理","")
                                 _iv_raw = _delg_r.get("IV","")
@@ -3737,12 +3757,15 @@ with tabs[0]:
                                         _cur_hy_pm = str(st.session_state.songs_df.at[row_idx, "邦洋区分"] if "邦洋区分" in st.session_state.songs_df.columns else "").strip()
                                         if _hy and not _cur_hy_pm:
                                             _pm_apply["邦洋区分"] = _hy
-                                        # 詳細取得済みの場合のみ作曲者等を追加（自動フェッチはしない）
+                                        # 検索結果の「作詞／作曲」列 → 詳細取得済みならそちらで上書き
+                                        # （どちらも無ければ空。ここでは自動フェッチはしない）
+                                        for _ak in ["作曲者","作詞者","編曲者","訳詞者"]:
+                                            if _pm_item.get(_ak): _pm_apply[_ak] = _pm_item[_ak]
                                         _cached = st.session_state.get(_pm_detail_key, {})
                                         if _cached and not _cached.get("error"):
                                             for _ak in ["作曲者","作詞者","編曲者","訳詞者"]:
                                                 if _cached.get(_ak): _pm_apply[_ak] = _cached[_ak]
-                                            _apply_iv_from_credits(_pm_apply)
+                                        _apply_iv_from_credits(_pm_apply)
                                         for _col, _val in _pm_apply.items():
                                             if _val and _col in st.session_state.songs_df.columns:
                                                 st.session_state.songs_df.at[row_idx, _col] = _val

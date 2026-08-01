@@ -774,6 +774,11 @@ class MusicForestClient:
                 _fb = self.search_fallback_by_title(cleaned, _ncd, _title)
                 out["cds"] = _fb["cds"]
                 out["配信"] = _fb["配信"]
+                # 作品コードが無い作品は詳細ページを引けないので、
+                # 検索結果テーブルの「作詞／作曲」列から拾った作家名で埋める。
+                for _ck, _cv in _fb["作家"].items():
+                    if _cv and not out.get(_ck):
+                        out[_ck] = _cv
                 if _fb["cds"]:
                     out["_cd_fallback"] = True
                     out["件数"] = len(_fb["cds"])
@@ -814,9 +819,14 @@ class MusicForestClient:
         行に作品コードがある場合は要求されたコードと一致する行だけを採用し、
         コードが無い行は曲名一致で採用する。
 
-        Returns: {"cds": [search_cds_by_jasrac と同じ形式], "配信": [...]}
+        検索結果テーブルの「作詞／作曲」列から作家名も併せて返す。作品コードが
+        無い作品は詳細ページを引けないため、ここが唯一の作家名の取得元になる。
+
+        Returns: {"cds": [search_cds_by_jasrac と同じ形式], "配信": [...],
+                  "作家": {"作曲者": str, "作詞者": str, "編曲者": str, "訳詞者": str}}
         """
-        out: dict = {"cds": [], "配信": []}
+        _CRED_KEYS = ("作曲者", "作詞者", "編曲者", "訳詞者")
+        out: dict = {"cds": [], "配信": [], "作家": {k: "" for k in _CRED_KEYS}}
         _title = str(title).strip()
         if not _title:
             return out
@@ -844,6 +854,12 @@ class MusicForestClient:
                 if not _rt or (_rt != _tnorm and _tnorm not in _rt):
                     continue
 
+            # 採用した行の作家名を拾う（先に見つかった行の値を優先）
+            _row_cred = {k: str(it.get(k, "") or "") for k in _CRED_KEYS}
+            for _k in _CRED_KEYS:
+                if _row_cred[_k] and not out["作家"][_k]:
+                    out["作家"][_k] = _row_cred[_k]
+
             if _src == "配信曲":
                 out["配信"].append({
                     "曲名":            it.get("作品名", ""),
@@ -853,6 +869,7 @@ class MusicForestClient:
                     "配信日":          it.get("配信日", ""),
                     "JASRAC作品コード": it.get("JASRAC作品コード", ""),
                     "NexTone管理番号":  it.get("NexTone管理番号", ""),
+                    **_row_cred,
                 })
                 continue
 
@@ -884,6 +901,7 @@ class MusicForestClient:
                 "track_id":      _trk,
                 "detail_url":    _product_detail_url(_alb, _trk) if _alb else "",
                 "label":         " / ".join([x for x in (_hinban, _cdt) if x]) or f"CD ({_alb})",
+                **_row_cred,
             })
         return out
 
@@ -981,6 +999,42 @@ def _parse_record_company(raw: str) -> str:
     return ""
 
 
+#: 検索結果テーブルの役割表記 → 申告フォーマットの項目名
+#: 「作曲作詞:NAME」のように 1 行で 2 役割を兼ねる表記があるため部分一致で判定する。
+_CREDIT_ROLES = (("訳詞", "訳詞者"), ("編曲", "編曲者"), ("作詞", "作詞者"), ("作曲", "作曲者"))
+
+
+def _parse_credit_cell(cell) -> dict:
+    """
+    検索結果テーブルの「作詞／作曲」列セルから作家名を役割ごとに取り出す。
+
+    MINC の表記は <br> 区切りで、実例:
+        "作詞: 財津　和夫<br>作曲: 財津　和夫<br>編曲: プロハンバーガー"
+        "作曲作詞:RICHMOND WALT<br>作曲作詞:RIPLEY STEVE"
+    役割が書かれていない行（例: "MONTGOMERY K"）は誰の何なのか判別できないため採用しない。
+
+    Returns: {"作曲者": str, "作詞者": str, "編曲者": str, "訳詞者": str}
+             同一役割に複数名いる場合は "/" 区切り（_parse_detail と同じ形式）。
+    """
+    out = {"作曲者": "", "作詞者": "", "編曲者": "", "訳詞者": ""}
+    if cell is None:
+        return out
+
+    names: dict[str, list[str]] = {k: [] for k in out}
+    for line in cell.get_text("\n").split("\n"):
+        m = re.match(r"^\s*([^:：]{1,12}?)\s*[:：]\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        role, name = m.group(1), m.group(2)
+        for kw, key in _CREDIT_ROLES:
+            if kw in role and name not in names[key]:
+                names[key].append(name)
+
+    for key, vals in names.items():
+        out[key] = "/".join(vals)
+    return out
+
+
 def _parse_search_results(soup: BeautifulSoup, include_uncoded: bool = False) -> list[dict]:
     """
     検索結果ページの 3 テーブルから楽曲情報を抽出する。
@@ -1024,6 +1078,13 @@ def _parse_search_results(soup: BeautifulSoup, include_uncoded: bool = False) ->
                 if col_name in name and idx < len(row_cells):
                     return row_cells[idx]
             return ""
+
+        def _cell_el(row_els: list, col_name: str):
+            """列名の部分一致でセル要素そのものを返す（<br> 区切りを見たい列用）。"""
+            for name, idx in col_map.items():
+                if col_name in name and idx < len(row_els):
+                    return row_els[idx]
+            return None
 
         for row in tbl.select("tr"):
             btn = row.select_one("button.saku-detail-link")
@@ -1089,7 +1150,14 @@ def _parse_search_results(soup: BeautifulSoup, include_uncoded: bool = False) ->
                     track_id = _m_trk.group(1)
 
             # データ行の全セル（th=No列 + td を含む）
-            row_cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
+            row_els = row.find_all(["td", "th"])
+            row_cells = [c.get_text(" ", strip=True) for c in row_els]
+
+            # 「作詞／作曲」列から作家名を取得（作品コードが無い行でも作家名は載っている）
+            credits = _parse_credit_cell(
+                _cell_el(row_els, "作詞") or _cell_el(row_els, "作曲")
+                or _cell_el(row_els, "著作者")
+            ) if col_map else _parse_credit_cell(None)
 
             if col_map:
                 title         = _cell(row_cells, "曲名")
@@ -1160,6 +1228,7 @@ def _parse_search_results(soup: BeautifulSoup, include_uncoded: bool = False) ->
                 "レコード会社名":    record_company,
                 "JASRAC作品コード":  jcd,
                 "NexTone管理番号":  ncd,
+                **credits,          # 作曲者 / 作詞者 / 編曲者 / 訳詞者
                 "_detail_href":     data_href,
                 "_source_table":    source_label,
                 "_album_id":        album_id,
