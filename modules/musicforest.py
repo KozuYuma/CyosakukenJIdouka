@@ -20,6 +20,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 import urllib.parse
 from pathlib import Path
 from typing import Optional
@@ -46,6 +47,12 @@ _USER_AGENT = (
 
 class MusicForestError(RuntimeError):
     """認証エラー・通信エラーなど"""
+
+
+def _norm_title(s: str) -> str:
+    """曲名照合用の正規化（NFKC・小文字化・空白/記号ゆれの除去）。"""
+    _s = unicodedata.normalize("NFKC", str(s or "")).lower()
+    return re.sub(r"[\s　・･'\"’“”~〜\-−ー]", "", _s)
 
 
 def _product_detail_url(album_id: str, track_id: str = "") -> str:
@@ -759,12 +766,22 @@ class MusicForestClient:
             if not out["件数"]:
                 out["件数"] = len(cds)
             if not cds:
-                # CD商品が無い作品（配信のみのサントラ等）は「配信曲」から音源情報を拾う
-                out["配信"] = self.search_delivery_by_jasrac(cleaned, _ncd, _title)
-                if out["配信"]:
+                # 作品コードに CD が紐付いていないケース（収録曲行に管理情報ボタンが無く、
+                # 配信行にだけ作品コードが付いている等）は検索結果ページから拾い直す。
+                _fb = self.search_fallback_by_title(cleaned, _ncd, _title)
+                out["cds"] = _fb["cds"]
+                out["配信"] = _fb["配信"]
+                if _fb["cds"]:
+                    out["_cd_fallback"] = True
+                    out["件数"] = len(_fb["cds"])
+                    out["error"] = (
+                        f"作品コード {formatted} にはCD商品が紐付いていなかったため、"
+                        f"曲名「{_title}」の検索結果からCD {len(_fb['cds'])} 件を取得しました。"
+                    )
+                elif _fb["配信"]:
                     out["error"] = (
                         f"JASRACコード {cleaned}（「{_title}」）にCD商品はありませんでした。"
-                        f"配信音源が {len(out['配信'])} 件見つかりましたので下に表示します。"
+                        f"配信音源が {len(_fb['配信'])} 件見つかりましたので下に表示します。"
                     )
                 else:
                     out["error"] = (
@@ -780,42 +797,92 @@ class MusicForestClient:
 
         return out
 
-    def search_delivery_by_jasrac(
+    def search_fallback_by_title(
         self, jcd: str, ncd: str = "", title: str = ""
-    ) -> list[dict]:
+    ) -> dict:
         """
-        CD商品が無い作品向けに、検索結果ページの「配信曲」テーブル（#haishin-list）
-        から同一作品コードの配信音源を拾う。
+        作品コード起点の CD商品リストが 0 件だったときに、曲名の検索結果ページから
+        収録曲（#track-list）と配信曲（#haishin-list）を拾い直す。
 
-        Returns: [{"曲名","アーティスト","アルバム名","ISRC","配信日",
-                   "JASRAC作品コード","NexTone管理番号"}, ...]
+        MINC では CD の収録曲行に作品コードが紐付いていない登録があり
+        （管理情報ボタンが無い行。配信曲行にだけ作品コードが付く）、
+        その場合 /product/list/from_saku は 0 件を返す。
+
+        行に作品コードがある場合は要求されたコードと一致する行だけを採用し、
+        コードが無い行は曲名一致で採用する。
+
+        Returns: {"cds": [search_cds_by_jasrac と同じ形式], "配信": [...]}
         """
-        if not str(title).strip():
-            return []
+        out: dict = {"cds": [], "配信": []}
+        _title = str(title).strip()
+        if not _title:
+            return out
         _j = re.sub(r"[-\s]", "", str(jcd)).upper()
         _n = re.sub(r"[-\s]", "", str(ncd)).upper()
+        _tnorm = _norm_title(_title)
         try:
-            res = self.search(str(title).strip(), match=3)
+            res = self.search(_title, match=3)
         except Exception:
-            return []
-        rows: list[dict] = []
+            return out
+
         for it in res.get("results", []):
-            if it.get("_source_table") != "配信曲":
+            _src = it.get("_source_table", "")
+            if _src not in ("収録曲", "配信曲"):
                 continue
             _ij = re.sub(r"[-\s]", "", str(it.get("JASRAC作品コード", ""))).upper()
             _in = re.sub(r"[-\s]", "", str(it.get("NexTone管理番号", ""))).upper()
-            if not ((_j and _ij == _j) or (_n and _in == _n)):
+            if _ij or _in:
+                # コードを持つ行は一致必須（同名異作品を拾わない）
+                if not ((_j and _ij == _j) or (_n and _in == _n)):
+                    continue
+            else:
+                # コード無しの行（今回のケース）は曲名一致で採用
+                _rt = _norm_title(it.get("作品名", ""))
+                if not _rt or (_rt != _tnorm and _tnorm not in _rt):
+                    continue
+
+            if _src == "配信曲":
+                out["配信"].append({
+                    "曲名":            it.get("作品名", ""),
+                    "アーティスト":     it.get("アーティスト", ""),
+                    "アルバム名":       it.get("アルバム名", "") or it.get("CD商品タイトル", ""),
+                    "ISRC":           it.get("ISRC", ""),
+                    "配信日":          it.get("配信日", ""),
+                    "JASRAC作品コード": it.get("JASRAC作品コード", ""),
+                    "NexTone管理番号":  it.get("NexTone管理番号", ""),
+                })
                 continue
-            rows.append({
-                "曲名":            it.get("作品名", ""),
-                "アーティスト":     it.get("アーティスト", ""),
-                "アルバム名":       it.get("アルバム名", "") or it.get("CD商品タイトル", ""),
-                "ISRC":           it.get("ISRC", ""),
-                "配信日":          it.get("配信日", ""),
-                "JASRAC作品コード": it.get("JASRAC作品コード", ""),
-                "NexTone管理番号":  it.get("NexTone管理番号", ""),
+
+            _alb = str(it.get("_album_id", "") or "")
+            if not _alb:
+                continue
+            _trk = str(it.get("_track_id", "") or "")
+            _hinban = it.get("品番", "")
+            _cdt = it.get("CD商品タイトル", "")
+            _cos = [
+                s.strip() for s in str(it.get("発売会社販売会社", "")).split("/")
+                if s.strip() and s.strip() != "-"
+            ]
+            out["cds"].append({
+                "No":            str(len(out["cds"]) + 1),
+                "品番":           _hinban,
+                "CD商品タイトル":  _cdt,
+                "アーティスト":    it.get("アーティスト", ""),
+                "形態":           "",
+                "曲数":           "",
+                "発売日":         it.get("配信日", ""),
+                "発売会社":        _cos[0] if _cos else it.get("レコード会社名", ""),
+                "販売会社":        _cos[1] if len(_cos) > 1 else "",
+                "レコード会社名":   it.get("レコード会社名", ""),
+                "権利":           [],
+                "初回盤":         False,
+                "ISRC":          it.get("ISRC", ""),
+                "album_id":      _alb,
+                "track_id":      _trk,
+                "detail_url":    _product_detail_url(_alb, _trk) if _alb else "",
+                "label":         " / ".join([x for x in (_hinban, _cdt) if x]) or f"CD ({_alb})",
             })
-        return rows
+        return out
 
     # ---- 詳細ページ -----------------------------------------------------
 
@@ -952,25 +1019,37 @@ def _parse_search_results(soup: BeautifulSoup) -> list[dict]:
 
         for row in tbl.select("tr"):
             btn = row.select_one("button.saku-detail-link")
-            if btn is None:
-                continue
-            data_href = (btn.get("data-href") or "").strip()
-            if not data_href or data_href in seen_href:
-                continue
-            seen_href.add(data_href)
-
-            params = dict(urllib.parse.parse_qsl(data_href))
-            jcd = params.get("jcd", "")
-            ncd = params.get("ncd", "")
-            # jcd に NexTone コード（NT 始まり）が入る場合は ncd へ移す
-            if re.match(r"^NT", jcd, re.IGNORECASE):
-                ncd = ncd or jcd
-                jcd = ""
 
             # CD商品タイトル anchor から album_id / track_id を取得
             _cd_a = row.select_one("a.collapseDetail[data-target]")
             album_id = str(_cd_a.get("data-target", "")) if _cd_a else ""
             track_id = str(_cd_a.get("data-track",  "")) if _cd_a else ""
+
+            if btn is None:
+                # 著作権管理情報が紐付いていない行（作品コード無し）。
+                # CD へのリンク（collapseDetail）を持つ行はCD情報として拾う価値があるので
+                # 捨てずに、コード空のまま結果に含める。
+                if not (album_id and album_id.lstrip("-").isdigit()):
+                    continue
+                data_href = ""
+                jcd = ncd = ""
+                _key = f"_nocode:{album_id}:{track_id}"
+                if _key in seen_href:
+                    continue
+                seen_href.add(_key)
+            else:
+                data_href = (btn.get("data-href") or "").strip()
+                if not data_href or data_href in seen_href:
+                    continue
+                seen_href.add(data_href)
+
+                params = dict(urllib.parse.parse_qsl(data_href))
+                jcd = params.get("jcd", "")
+                ncd = params.get("ncd", "")
+                # jcd に NexTone コード（NT 始まり）が入る場合は ncd へ移す
+                if re.match(r"^NT", jcd, re.IGNORECASE):
+                    ncd = ncd or jcd
+                    jcd = ""
 
             # album_id が数字列でない場合（例: "#..." の Bootstrap data-target）はリセット
             if album_id and not album_id.lstrip("-").isdigit():
@@ -1024,7 +1103,7 @@ def _parse_search_results(soup: BeautifulSoup) -> list[dict]:
                 album_name    = ""
                 release_date  = ""
 
-            if not title:
+            if not title and btn is not None:
                 title = btn.get_text(strip=True)
 
             # 品番が空の場合: collapseDetail アンカーのテキストから補完

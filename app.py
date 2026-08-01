@@ -274,7 +274,11 @@ def _render_cd_results(
         if _cp_res.get("search_url"):
             st.caption(f"🔗 MINCで直接開く: [{_cp_res['search_url']}]({_cp_res['search_url']})")
         return
-    if _cp_res.get("error"):
+    if _cp_res.get("_cd_fallback"):
+        # 作品コードにCDが紐付いていない登録（収録曲行に管理情報ボタンが無い）のため
+        # 検索結果ページから拾い直したケース。エラーではないので info で出す。
+        st.info(f"💡 {_cp_res['error']}")
+    elif _cp_res.get("error"):
         st.warning(f"⚠️ 一部エラー: {_cp_res['error']}")
 
     _cp_items = _cp_res["cds"]
