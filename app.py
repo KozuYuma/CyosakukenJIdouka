@@ -712,6 +712,13 @@ def _is_blank(v) -> bool:
     return str(v).strip().lower() in ("", "nan", "none")
 
 
+def _mf_norm_name(s: str) -> str:
+    """アーティスト名照合用の正規化（NFKC・小文字化・空白除去）。"""
+    if _is_blank(s):
+        return ""
+    return re.sub(r"[\s　]", "", unicodedata.normalize("NFKC", str(s))).lower()
+
+
 def _infer_iv(lyricist: str) -> str:
     """作詞者の有無から I/V区分を推定する（作詞者あり→ヴォーカル、なし→インスト）。
 
@@ -2397,8 +2404,14 @@ with tabs[0]:
                     f"H:\\PROGRAM\\search_music\\src\\login_browser.py`"
                 )
 
+        # アーティスト絞り込み（検索結果をこの名前で絞る。検索前に入れておける）
+        _mf_art_key = f"mf_artist_{selected_no}"
+        if _mf_art_key not in st.session_state:
+            _mf_row_art = str(row.get("アーティスト", "")).strip()
+            st.session_state[_mf_art_key] = "" if _is_blank(_mf_row_art) else _mf_row_art
+
         if _mf_ok:
-            _mf_s1, _mf_s2, _mf_s3 = st.columns([3, 2, 1])
+            _mf_s1, _mf_s2, _mf_s2b, _mf_s3 = st.columns([3, 2, 2, 1])
             with _mf_s1:
                 _mf_term_opts = [f"[{lbl}]  {val}" for lbl, val in term_candidates]
                 _mf_term_sel = st.selectbox(
@@ -2419,6 +2432,17 @@ with tabs[0]:
                     value="",
                     key=f"mf_author_{selected_no}",
                     placeholder=str(row.get("作曲者", "")).strip() or "例: 加藤達也",
+                )
+            with _mf_s2b:
+                st.text_input(
+                    "アーティスト（任意・絞り込み用）",
+                    key=_mf_art_key,
+                    placeholder="例: ZOO",
+                    help=(
+                        "MINCの検索結果をこのアーティスト名で絞り込みます（部分一致）。"
+                        "楽曲まとめのアーティストを初期値に入れています。"
+                        "一致する候補が無いときは全件表示に戻します。"
+                    ),
                 )
             with _mf_s3:
                 _mf_match = st.selectbox(
@@ -2488,14 +2512,36 @@ with tabs[0]:
                     else:
                         st.success(_fl["message"])
 
-                for _mf_i, _mf_item in enumerate(_mf_items[:20]):
+                # ── アーティストで絞り込み ────────────────────────────────
+                # 候補番号・session_state キーは元の並び順のインデックスを使い続ける
+                # （絞り込みで番号がずれると取得済みの詳細が別候補に付いてしまう）
+                _mf_pairs = list(enumerate(_mf_items))
+                _mf_art_q = _mf_norm_name(st.session_state.get(_mf_art_key, ""))
+                if _mf_art_q:
+                    _mf_hit = [
+                        (_i, _it) for _i, _it in _mf_pairs
+                        if _mf_art_q in _mf_norm_name(_it.get("アーティスト", ""))
+                    ]
+                    if _mf_hit:
+                        st.caption(
+                            f"🎤 アーティスト「{st.session_state[_mf_art_key].strip()}」で絞り込み: "
+                            f"**{len(_mf_hit)}** / {len(_mf_pairs)} 件"
+                        )
+                        _mf_pairs = _mf_hit
+                    else:
+                        st.caption(
+                            f"🎤 アーティスト「{st.session_state[_mf_art_key].strip()}」に一致する候補が"
+                            "無いため全件表示しています（表記ゆれの可能性があります）"
+                        )
+
+                for _mf_disp_i, (_mf_i, _mf_item) in enumerate(_mf_pairs[:20]):
                     _mf_label = (
                         f"候補{_mf_i+1} [{_mf_item['_source_table']}]: "
                         f"{_mf_item.get('作品名','')} ／ {_mf_item.get('アーティスト','')} "
                         f"  JASRAC:{_mf_item.get('JASRAC作品コード','(なし)')}  "
                         f"NexTone:{_mf_item.get('NexTone管理番号','(なし)')}"
                     )
-                    with st.expander(_mf_label, expanded=(_mf_i == 0), key=f"mf_exp_{selected_no}_{_mf_i}"):
+                    with st.expander(_mf_label, expanded=(_mf_disp_i == 0), key=f"mf_exp_{selected_no}_{_mf_i}"):
                         _mf_c1, _mf_c2 = st.columns(2)
                         _mf_c1.text_input("作品名",         value=_mf_item.get("作品名",""),          key=f"mf_name_{selected_no}_{_mf_i}", disabled=True)
                         _mf_c1.text_input("アーティスト",   value=_mf_item.get("アーティスト",""),    key=f"mf_art_{selected_no}_{_mf_i}",  disabled=True)
