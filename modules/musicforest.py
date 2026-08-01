@@ -144,11 +144,14 @@ class MusicForestClient:
         title: str,
         author: str = "",
         match: int = 3,
+        include_uncoded: bool = False,
     ) -> dict:
         """
         曲名・著作者名で MusicForest を検索する。
 
         match: 1=完全一致 / 2=前方一致 / 3=キーワード（部分一致）
+        include_uncoded: 作品コードが紐付いていない行も候補に含めるか
+            （既定 False。CD の拾い直しなど、CD情報だけ欲しいときに True）
 
         Returns: {
             "source": "MusicForest",
@@ -197,7 +200,7 @@ class MusicForestClient:
             out["debug_html"] = html[:4000]
 
             soup = BeautifulSoup(html, "lxml")
-            results = _parse_search_results(soup)
+            results = _parse_search_results(soup, include_uncoded=include_uncoded)
             out["results"] = results
 
             # ページ全体の collapseDetail リンクをスキャン
@@ -442,7 +445,7 @@ class MusicForestClient:
         if not _alb or not str(title).strip():
             return ""
         try:
-            sr = self.search(str(title).strip(), match=3)
+            sr = self.search(str(title).strip(), match=3, include_uncoded=True)
         except Exception:
             return ""
         for _r in sr.get("results", []):
@@ -821,7 +824,7 @@ class MusicForestClient:
         _n = re.sub(r"[-\s]", "", str(ncd)).upper()
         _tnorm = _norm_title(_title)
         try:
-            res = self.search(_title, match=3)
+            res = self.search(_title, match=3, include_uncoded=True)
         except Exception:
             return out
 
@@ -978,13 +981,18 @@ def _parse_record_company(raw: str) -> str:
     return ""
 
 
-def _parse_search_results(soup: BeautifulSoup) -> list[dict]:
+def _parse_search_results(soup: BeautifulSoup, include_uncoded: bool = False) -> list[dict]:
     """
     検索結果ページの 3 テーブルから楽曲情報を抽出する。
 
     各テーブルの行に button.saku-detail-link があれば
     data-href の jcd / ncd から JASRAC / NexTone コードを即時取得する。
     ヘッダー列名をキーにして抽出するため、列順が変わっても安全。
+
+    include_uncoded: 著作権管理情報（作品コード）が紐付いていない行も含めるか。
+        既定では除外する（オルゴール版・カバー盤などコード無しの収録曲行が多く、
+        候補一覧がノイズだらけになるため）。CD が見つからないときの拾い直し
+        （search_fallback_by_title）だけ True で呼ぶ。
     """
     results: list[dict] = []
     seen_href: set[str] = set()
@@ -1027,8 +1035,10 @@ def _parse_search_results(soup: BeautifulSoup) -> list[dict]:
 
             if btn is None:
                 # 著作権管理情報が紐付いていない行（作品コード無し）。
-                # CD へのリンク（collapseDetail）を持つ行はCD情報として拾う価値があるので
-                # 捨てずに、コード空のまま結果に含める。
+                # CD へのリンク（collapseDetail）を持つ行はCD情報として拾う価値があるので、
+                # 呼び出し元が求めた場合だけコード空のまま結果に含める。
+                if not include_uncoded:
+                    continue
                 if not (album_id and album_id.lstrip("-").isdigit()):
                     continue
                 data_href = ""
@@ -1088,8 +1098,11 @@ def _parse_search_results(soup: BeautifulSoup) -> list[dict]:
                 cd_title      = _cell(row_cells, "CD商品タイトル")
                 publisher_raw = _cell(row_cells, "発売会社")   # "発売会社／販売会社" に部分一致
                 isrc          = _cell(row_cells, "ISRC")
-                # 配信曲テーブルは「アルバム名」「配信日」列（CD商品タイトル／発売日は無い）
-                album_name    = _cell(row_cells, "アルバム") or cd_title
+                # 配信曲テーブルの列は「商品タイトル」「配信日」
+                # （収録曲テーブルの「CD商品タイトル」「発売会社／販売会社」とは別）
+                album_name    = (_cell(row_cells, "アルバム")
+                                 or _cell(row_cells, "商品タイトル")  # CD商品タイトルにも部分一致
+                                 or cd_title)
                 release_date  = _cell(row_cells, "配信") or _cell(row_cells, "発売日")
             else:
                 # ヘッダー取得不可時の位置ベースフォールバック
