@@ -2064,8 +2064,10 @@ with tabs[0]:
                 st.rerun()
 
         # ---- 申告フォーマット プレビュー（提出用・イベント行単位）----
-        # 反映ボタン後の成功メッセージ
-        if "_apply_msg" in st.session_state:
+        # 反映ボタン後の成功メッセージ（反映結果の表が見えるようここへ自動スクロール）
+        st.markdown('<a id="sec-shinkok"></a>', unsafe_allow_html=True)
+        _apply_done = "_apply_msg" in st.session_state
+        if _apply_done:
             st.success(st.session_state.pop("_apply_msg"))
 
         _shinkok_songs  = st.session_state.songs_df
@@ -2076,6 +2078,10 @@ with tabs[0]:
             _preview_cols = [c for c in _shinkok_df.columns if c not in {"トラック", "START TIME", "使用尺"}]
 
             # スクロールJS（ナビゲーションボタン押下後の rerun で実行）
+            # 反映ボタン直後は申告フォーマットの表まで自動で移動する。
+            # 明示的に指定されたスクロール先（各セクションへのジャンプ）が優先。
+            if _apply_done:
+                st.session_state.setdefault("_scroll_target", "sec-shinkok")
             _sh_scroll = st.session_state.pop("_scroll_target", None)
             if _sh_scroll:
                 _stc.html(
