@@ -130,28 +130,43 @@ def _apply_clear_on_jcd_change(row_idx: int, new_jcd: str) -> None:
 
 
 def _sync_shinkok_to_songs() -> None:
-    """申告フォーマット data_editor の編集内容を songs_df へ即時反映するコールバック。"""
-    edited: pd.DataFrame | None = st.session_state.get("shinkok_editor")
+    """申告フォーマット data_editor の編集内容を songs_df へ即時反映するコールバック。
+
+    data_editor の session_state 値は DataFrame ではなく編集差分の dict
+    （{"edited_rows": {行番号: {列名: 値}}, "added_rows": [...], "deleted_rows": [...]}）。
+    行番号は表示に使った DataFrame の位置なので、その DataFrame（_shinkok_src）と
+    突き合わせてイベント名を引き、songs_df の該当行を特定する。
+    """
+    state = st.session_state.get("shinkok_editor")
+    src: pd.DataFrame | None = st.session_state.get("_shinkok_src")
     songs: pd.DataFrame | None = st.session_state.get("songs_df")
-    if edited is None or songs is None or "イベント名" not in edited.columns:
+    if not isinstance(state, dict) or src is None or songs is None:
         return
-    for _, erow in edited.iterrows():
-        ev_name = str(erow.get("イベント名", "")).strip()
+    if "イベント名" not in src.columns or "イベント名" not in songs.columns:
+        return
+
+    _editable = set(_SHINKOK_RENAME_REV) | set(_SHINKOK_EXTRA_COLS)
+    for _pos, _changes in (state.get("edited_rows") or {}).items():
+        try:
+            _p = int(_pos)
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= _p < len(src)):
+            continue
+        ev_name = str(src.iloc[_p].get("イベント名", "")).strip()
         if not ev_name:
             continue
         mask = songs["イベント名"] == ev_name
         if not mask.any():
             continue
         song_idx = songs.index[mask][0]
-        for sh_col, s_col in _SHINKOK_RENAME_REV.items():
-            if sh_col not in erow.index or s_col not in songs.columns:
+        for sh_col, val in (_changes or {}).items():
+            if sh_col not in _editable:
                 continue
-            val = erow[sh_col]
-            songs.at[song_idx, s_col] = "" if pd.isna(val) else val
-        for col in _SHINKOK_EXTRA_COLS:
-            if col in erow.index and col in songs.columns:
-                val = erow[col]
-                songs.at[song_idx, col] = "" if pd.isna(val) else val
+            s_col = _SHINKOK_RENAME_REV.get(sh_col, sh_col)
+            if s_col not in songs.columns:
+                continue
+            songs.at[song_idx, s_col] = "" if val is None or pd.isna(val) else val
 
 
 def _show_cd_panel(
@@ -2179,8 +2194,12 @@ with tabs[0]:
             # 直接編集・CSV ダウンロード
             with st.expander("✏️ 直接編集 / CSV ダウンロード", expanded=False):
                 st.caption("ダブルクリックで直接編集できます。編集内容は楽曲まとめに自動保存されます。")
+                # コールバックは編集差分（行番号）しか受け取れないので、
+                # 行番号→イベント名 を引くために表示中の DataFrame を渡しておく
+                _shinkok_src = _shinkok_df[_preview_cols]
+                st.session_state["_shinkok_src"] = _shinkok_src
                 _edited_shinkok = st.data_editor(
-                    _shinkok_df[_preview_cols],
+                    _shinkok_src,
                     use_container_width=True,
                     hide_index=True,
                     height=400,
