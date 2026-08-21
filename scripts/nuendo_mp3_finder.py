@@ -24,9 +24,11 @@ import sys
 import unicodedata
 
 # Windows コンソールを UTF-8 に設定（文字化け防止）
-if sys.stdout.encoding and sys.stdout.encoding.lower() in ("cp932", "shift_jis", "mbcs"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+# GUI(--noconsole)の exe では sys.stdout/stderr が None になるため存在を確認する
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and getattr(_stream, "encoding", "") and \
+            _stream.encoding.lower() in ("cp932", "shift_jis", "mbcs"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
@@ -197,8 +199,13 @@ def _is_excluded(stem: str) -> bool:
     return any(pat.match(stem) for pat in _EXCLUDE_PATTERNS)
 
 
-def scan_mp3_files(folder: Path) -> list[Path]:
-    """フォルダ以下の MP3 ファイルを再帰的に収集する（除外フィルター・進捗表示付き）"""
+def scan_mp3_files(folder: Path, on_progress=None) -> list[Path]:
+    """
+    フォルダ以下の MP3 ファイルを再帰的に収集する（除外フィルター・進捗表示付き）。
+
+    on_progress: 50件ごとに found 件数を渡すコールバック。
+                 省略時はコンソールに上書き表示する（GUI からは差し替える）。
+    """
     found: set[Path] = set()
     skipped = 0
     for ext in ("*.mp3", "*.MP3"):
@@ -208,8 +215,14 @@ def scan_mp3_files(folder: Path) -> list[Path]:
                 continue
             found.add(f)
             if len(found) % 50 == 0:
-                print(f"\r   スキャン中... {len(found)} 件発見", end="", flush=True)
-    print(f"\r   MP3: {len(found)} 件  (除外: {skipped} 件)                    ")
+                if on_progress:
+                    on_progress(len(found))
+                else:
+                    print(f"\r   スキャン中... {len(found)} 件発見", end="", flush=True)
+    if on_progress:
+        on_progress(len(found))
+    else:
+        print(f"\r   MP3: {len(found)} 件  (除外: {skipped} 件)                    ")
     return sorted(found)
 
 
@@ -413,10 +426,10 @@ def print_detail(r: MatchResult) -> None:
 # CSV 出力
 # =====================================================================
 
-def export_csv(results: list[MatchResult], output_path: Path) -> None:
-    """照合結果を CSV ファイルに書き出す"""
+def export_csv(results: list[MatchResult], output_path: Path, log=print) -> None:
+    """照合結果を CSV ファイルに書き出す（log は GUI から差し替える）"""
     if not results:
-        print("出力するデータがありません（マッチ件数が 0 件）。")
+        log("出力するデータがありません（マッチ件数が 0 件）。")
         return
 
     # フォルダパスだけ渡された場合はファイル名を自動付与
@@ -426,7 +439,7 @@ def export_csv(results: list[MatchResult], output_path: Path) -> None:
     # 親フォルダが存在しない場合は作成
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nCSV 書き出し先: {output_path}")
+    log(f"\nCSV 書き出し先: {output_path}")
 
     fieldnames = [
         "イベント名", "マッチ種別", "ファイル名", "フルパス",
@@ -462,10 +475,10 @@ def export_csv(results: list[MatchResult], output_path: Path) -> None:
                     "トラック(ID3)":        r.tag_track,
                     "コメント(ID3)":        r.tag_comment,
                 })
-        print(f"[OK] CSV 出力完了: {output_path}  ({len(results)} 件)")
+        log(f"[OK] CSV 出力完了: {output_path}  ({len(results)} 件)")
     except Exception as e:
-        print(f"[ERROR] CSV 書き出し失敗: {e}")
-        print(f"        パスを確認してください: {output_path}")
+        log(f"[ERROR] CSV 書き出し失敗: {e}")
+        log(f"        パスを確認してください: {output_path}")
 
 
 # =====================================================================

@@ -1,7 +1,12 @@
 # 仮想環境
 .venv/
+.venv-build/
 venv/
 env/
+
+# PyInstaller のビルド成果物
+build/
+dist/
 
 # APIキー・秘密情報
 .env
