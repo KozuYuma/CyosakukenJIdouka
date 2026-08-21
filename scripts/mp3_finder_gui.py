@@ -79,17 +79,40 @@ def enable_dpi_awareness() -> None:
 # 処理本体（ワーカースレッドで実行。UI には触らず log() だけ呼ぶ）
 # =====================================================================
 
+#: 各段階が進捗バーのどこからどこまでを受け持つか（％）。
+#: 件数が分かる段階だけ実測で進める。合計が100になるようにしてある。
+_PHASE = {
+    "read":  (0, 5),     # CSV 読み込み
+    "scan":  (5, 15),    # MP3 スキャン（総数が分からないので流し表示）
+    "match": (15, 60),   # マッチング
+    "prop":  (60, 95),   # プロパティ取得
+    "write": (95, 100),  # CSV 書き出し
+}
+
+
 def run_finder(csv_path: Path, mp3_dir: Path, out_path: Path,
-               allow_partial: bool, log, should_stop=None) -> Path | None:
+               allow_partial: bool, log, should_stop=None,
+               on_progress=None) -> Path | None:
     """
     照合を実行して CSV に書き出す。戻り値は出力した CSV のパス。
 
     should_stop: 中止されたかを返す関数。要所で見て、真なら Cancelled を送出する。
                  スレッドを強制終了する手段は無いので、この方式で協調的に止める。
+    on_progress: 進捗率(0-100)を渡すコールバック。総数が分からない段階では
+                 None を渡す（受け手はバーを流し表示にする）。
     """
     def _check() -> None:
         if should_stop and should_stop():
             raise Cancelled
+
+    def _prog(phase: str, done: int = 1, total: int = 1) -> None:
+        """段階の中の進み具合を全体の％に直して渡す。"""
+        if not on_progress:
+            return
+        lo, hi = _PHASE[phase]
+        on_progress(lo + (hi - lo) * (done / total if total else 1))
+
+    _prog("read", 0)
 
     if not HAS_MUTAGEN:
         log("[警告] mutagen が無いため、再生時間とID3タグは取得されません。")
@@ -104,9 +127,13 @@ def run_finder(csv_path: Path, mp3_dir: Path, out_path: Path,
             "NUENDO の Cue CSV（「イベント名」「ファイル名」列があるもの）か確認してください。"
         )
     log(f"      イベント名 {len(event_names)} 件")
+    _prog("read")
 
     # ② MP3 スキャン
     log(f"[2/4] MP3 スキャン: {mp3_dir}")
+    # 総数が事前に分からない段階なので、％ではなく流し表示にしてもらう
+    if on_progress:
+        on_progress(None)
 
     def _on_scan(n: int) -> None:
         # 大量のフォルダを掘っている最中でも中止できるよう、進捗の度に見る
@@ -115,12 +142,14 @@ def run_finder(csv_path: Path, mp3_dir: Path, out_path: Path,
 
     mp3_files = scan_mp3_files(mp3_dir, on_progress=_on_scan)
     log(f"      MP3 {len(mp3_files)} 件", replace=True)
+    _prog("scan")
     _check()
 
     if not mp3_files:
         log("      MP3 が1件も見つかりません。全件「該当なし」として出力します。")
         results = [MatchResult(event_name=n, match_type="該当なし") for n in event_names]
         export_csv(results, out_path, log=log)
+        _prog("write")
         return out_path
 
     # ③ マッチング
@@ -138,6 +167,7 @@ def run_finder(csv_path: Path, mp3_dir: Path, out_path: Path,
             for mp3_path, mtype in fut.result():
                 raw.append((futures[fut], mp3_path, mtype))
             log(f"      {done}/{len(event_names)} 件", replace=True)
+            _prog("match", done, len(event_names))
 
     order = {n: i for i, n in enumerate(event_names)}
     raw.sort(key=lambda x: (order.get(x[0], 9999), x[1]))
@@ -158,6 +188,7 @@ def run_finder(csv_path: Path, mp3_dir: Path, out_path: Path,
                 raise Cancelled
             results.append(fut.result())
             log(f"      {done}/{len(futures2)} 件", replace=True)
+            _prog("prop", done, len(futures2))
 
     match_order = {(ev, str(mp3)): i for i, (ev, mp3, _) in enumerate(raw)}
     results.sort(key=lambda r: match_order.get(
@@ -179,6 +210,7 @@ def run_finder(csv_path: Path, mp3_dir: Path, out_path: Path,
 
     _check()   # 中止直後に中途半端な CSV を書かないよう、書き出す直前にも見る
     export_csv(results, out_path, log=log)
+    _prog("write")
     return out_path
 
 
@@ -413,8 +445,7 @@ class App(_BASE_TK):
         self.btn_run.configure(state="disabled", text="実行中...")
         self.btn_stop.configure(state="normal", text="中　止")
         self.btn_open.configure(state="disabled")
-        self.prog.configure(mode="indeterminate")
-        self.prog.start(12)
+        self._set_progress(0)
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
@@ -445,9 +476,20 @@ class App(_BASE_TK):
                 allow_partial: bool) -> None:
         def log(msg: str, replace: bool = False) -> None:
             self._q.put(("log", (str(msg), replace)))
+
+        last = [-1.0]
+
+        def progress(pct) -> None:
+            # 同じ値を送り続けても意味が無いので、1%以上動いた時だけ流す
+            if pct is not None and abs(pct - last[0]) < 1.0:
+                return
+            last[0] = -1.0 if pct is None else pct
+            self._q.put(("prog", pct))
+
         try:
             result = run_finder(csv_path, mp3_dir, out_path, allow_partial, log,
-                                should_stop=self._stop_flag.is_set)
+                                should_stop=self._stop_flag.is_set,
+                                on_progress=progress)
             self._q.put(("done", result))
         except Cancelled:
             self._q.put(("cancelled", None))
@@ -461,6 +503,8 @@ class App(_BASE_TK):
                 kind, payload = self._q.get_nowait()
                 if kind == "log":
                     self._append(*payload)
+                elif kind == "prog":
+                    self._set_progress(payload)
                 elif kind == "done":
                     self._finish(payload)
                 elif kind == "cancelled":
@@ -483,6 +527,23 @@ class App(_BASE_TK):
         self.log.configure(state="disabled")
         self.var_status.set(msg.strip().splitlines()[0][:90] if msg.strip() else "")
 
+    def _set_progress(self, pct) -> None:
+        """
+        進捗バーを進める。
+
+        pct が None の段階（MP3スキャン中）は総数が分からないので、
+        止まって見えないよう流し表示（indeterminate）に切り替える。
+        """
+        if pct is None:
+            if str(self.prog.cget("mode")) != "indeterminate":
+                self.prog.configure(mode="indeterminate")
+                self.prog.start(12)
+            return
+        if str(self.prog.cget("mode")) != "determinate":
+            self.prog.stop()
+            self.prog.configure(mode="determinate", maximum=100)
+        self.prog.configure(value=max(0.0, min(100.0, float(pct))))
+
     def _reset(self) -> None:
         self._running = False
         self.prog.stop()
@@ -500,6 +561,7 @@ class App(_BASE_TK):
         self._reset()
         self._last_out = out
         if out and out.exists():
+            self._set_progress(100)   # 終わったことが見て分かるよう満たしておく
             self.btn_open.configure(state="normal")
             self.var_status.set(f"完了: {out}")
             messagebox.showinfo(APP_TITLE, f"完了しました。\n\n出力先:\n{out}")
