@@ -51,6 +51,10 @@ APP_TITLE = "NUENDO MP3 Finder"
 WORKERS = 8
 
 
+class Cancelled(Exception):
+    """[中止]が押されたときに処理を抜けるための例外。エラー扱いにはしない。"""
+
+
 def enable_dpi_awareness() -> None:
     """
     高DPI環境で文字が滲む（太って見える）のを防ぐ。
@@ -76,14 +80,24 @@ def enable_dpi_awareness() -> None:
 # =====================================================================
 
 def run_finder(csv_path: Path, mp3_dir: Path, out_path: Path,
-               allow_partial: bool, log) -> Path | None:
-    """照合を実行して CSV に書き出す。戻り値は出力した CSV のパス。"""
+               allow_partial: bool, log, should_stop=None) -> Path | None:
+    """
+    照合を実行して CSV に書き出す。戻り値は出力した CSV のパス。
+
+    should_stop: 中止されたかを返す関数。要所で見て、真なら Cancelled を送出する。
+                 スレッドを強制終了する手段は無いので、この方式で協調的に止める。
+    """
+    def _check() -> None:
+        if should_stop and should_stop():
+            raise Cancelled
+
     if not HAS_MUTAGEN:
         log("[警告] mutagen が無いため、再生時間とID3タグは取得されません。")
 
     # ① イベント名
     log(f"[1/4] CSV 読み込み: {csv_path.name}")
     event_names = read_event_names(csv_path)
+    _check()
     if not event_names:
         raise ValueError(
             "CSV からイベント名を取得できませんでした。\n"
@@ -93,10 +107,15 @@ def run_finder(csv_path: Path, mp3_dir: Path, out_path: Path,
 
     # ② MP3 スキャン
     log(f"[2/4] MP3 スキャン: {mp3_dir}")
-    mp3_files = scan_mp3_files(
-        mp3_dir, on_progress=lambda n: log(f"      スキャン中... {n} 件", replace=True)
-    )
+
+    def _on_scan(n: int) -> None:
+        # 大量のフォルダを掘っている最中でも中止できるよう、進捗の度に見る
+        _check()
+        log(f"      スキャン中... {n} 件", replace=True)
+
+    mp3_files = scan_mp3_files(mp3_dir, on_progress=_on_scan)
     log(f"      MP3 {len(mp3_files)} 件", replace=True)
+    _check()
 
     if not mp3_files:
         log("      MP3 が1件も見つかりません。全件「該当なし」として出力します。")
@@ -111,6 +130,11 @@ def run_finder(csv_path: Path, mp3_dir: Path, out_path: Path,
         futures = {ex.submit(match_event, n, mp3_files, allow_partial): n
                    for n in event_names}
         for done, fut in enumerate(as_completed(futures), 1):
+            if should_stop and should_stop():
+                # 未着手の分だけ取り消す。動き出している分は短いので待つ
+                for f in futures:
+                    f.cancel()
+                raise Cancelled
             for mp3_path, mtype in fut.result():
                 raw.append((futures[fut], mp3_path, mtype))
             log(f"      {done}/{len(event_names)} 件", replace=True)
@@ -128,6 +152,10 @@ def run_finder(csv_path: Path, mp3_dir: Path, out_path: Path,
         futures2 = {ex.submit(read_properties, mp3, ev, mt): (ev, str(mp3))
                     for ev, mp3, mt in raw}
         for done, fut in enumerate(as_completed(futures2), 1):
+            if should_stop and should_stop():
+                for f in futures2:
+                    f.cancel()
+                raise Cancelled
             results.append(fut.result())
             log(f"      {done}/{len(futures2)} 件", replace=True)
 
@@ -149,6 +177,7 @@ def run_finder(csv_path: Path, mp3_dir: Path, out_path: Path,
         if len(unmatched) > 50:
             log(f"  ... 他 {len(unmatched) - 50} 件")
 
+    _check()   # 中止直後に中途半端な CSV を書かないよう、書き出す直前にも見る
     export_csv(results, out_path, log=log)
     return out_path
 
@@ -175,10 +204,13 @@ class App(_BASE_TK):
         self._running = False
         self._last_out: Path | None = None
         self._prog_idx: str | None = None   # 上書き対象の進捗行の開始位置
+        # [中止]の合図。ワーカースレッドが要所で見る（強制終了はできないため）
+        self._stop_flag = threading.Event()
 
         self._build()
         self._setup_dnd()
         self._prefill_from_argv(sys.argv[1:])
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._drain_queue)
 
     # ---- フォント -----------------------------------------------------
@@ -202,10 +234,10 @@ class App(_BASE_TK):
             except Exception:
                 pass
 
-        # ログ欄。等幅で、太らせない
-        self.font_log = tkfont.Font(family="Consolas", size=10, weight="normal")
-        if "Consolas" not in tkfont.families():
-            self.font_log.configure(family="MS Gothic")
+        # ログ欄も「Cue CSV」「MP3 フォルダ」などのラベルと同じ字にする。
+        # Text ウィジェットの既定は等幅の TkFixedFont で、日本語が痩せたり
+        # 太ったりして見えるため、画面の既定フォントをそのまま複製して使う。
+        self.font_log = tkfont.Font(font=tkfont.nametofont("TkDefaultFont"))
 
     # ---- ドラッグ＆ドロップ -------------------------------------------
     def _setup_dnd(self) -> None:
@@ -286,8 +318,17 @@ class App(_BASE_TK):
                         variable=self.var_partial).grid(
             row=4, column=1, columnspan=2, sticky="w", **pad)
 
-        self.btn_run = ttk.Button(frm, text="実　行", command=self._on_run)
-        self.btn_run.grid(row=5, column=1, sticky="ew", **pad)
+        # 実行と中止は並べて置く（実行中しか押せないボタンを別行にすると見失うため）
+        btns = ttk.Frame(frm)
+        btns.grid(row=5, column=1, sticky="ew", **pad)
+        btns.columnconfigure(0, weight=3)
+        btns.columnconfigure(1, weight=1)
+        self.btn_run = ttk.Button(btns, text="実　行", command=self._on_run)
+        self.btn_run.grid(row=0, column=0, sticky="ew")
+        self.btn_stop = ttk.Button(btns, text="中　止", command=self._on_stop,
+                                   state="disabled")
+        self.btn_stop.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
         self.btn_open = ttk.Button(frm, text="出力先を開く", command=self._open_out,
                                    state="disabled")
         self.btn_open.grid(row=5, column=2, sticky="ew", **pad)
@@ -303,7 +344,8 @@ class App(_BASE_TK):
         box.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=10, pady=(4, 10))
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
-        self.log = tk.Text(box, height=14, wrap="none", state="disabled",
+        # 等幅ではなくなったので、長いパスは折り返して見せる
+        self.log = tk.Text(box, height=14, wrap="word", state="disabled",
                            font=self.font_log)
         self.log.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(box, orient="vertical", command=self.log.yview)
@@ -367,7 +409,9 @@ class App(_BASE_TK):
 
         self._running = True
         self._last_out = None
+        self._stop_flag.clear()
         self.btn_run.configure(state="disabled", text="実行中...")
+        self.btn_stop.configure(state="normal", text="中　止")
         self.btn_open.configure(state="disabled")
         self.prog.configure(mode="indeterminate")
         self.prog.start(12)
@@ -381,13 +425,32 @@ class App(_BASE_TK):
             daemon=True,
         ).start()
 
+    def _on_stop(self) -> None:
+        """[中止]。処理は要所でしか止まれないので、押した直後に反応だけ返す。"""
+        if not self._running:
+            return
+        self._stop_flag.set()
+        self.btn_stop.configure(state="disabled", text="中止中...")
+        self.var_status.set("中止しています... 実行中の分が終わり次第止まります")
+
+    def _on_close(self) -> None:
+        """実行中に×で閉じられた場合。閉じる前に処理へ中止を伝える。"""
+        if self._running:
+            if not messagebox.askyesno(APP_TITLE, "実行中です。中止して終了しますか？"):
+                return
+            self._stop_flag.set()
+        self.destroy()
+
     def _worker(self, csv_path: Path, mp3_dir: Path, out_path: Path,
                 allow_partial: bool) -> None:
         def log(msg: str, replace: bool = False) -> None:
             self._q.put(("log", (str(msg), replace)))
         try:
-            result = run_finder(csv_path, mp3_dir, out_path, allow_partial, log)
+            result = run_finder(csv_path, mp3_dir, out_path, allow_partial, log,
+                                should_stop=self._stop_flag.is_set)
             self._q.put(("done", result))
+        except Cancelled:
+            self._q.put(("cancelled", None))
         except Exception as e:
             self._q.put(("error", (f"{type(e).__name__}: {e}", traceback.format_exc())))
 
@@ -400,6 +463,8 @@ class App(_BASE_TK):
                     self._append(*payload)
                 elif kind == "done":
                     self._finish(payload)
+                elif kind == "cancelled":
+                    self._cancelled()
                 elif kind == "error":
                     self._fail(*payload)
         except queue.Empty:
@@ -423,6 +488,13 @@ class App(_BASE_TK):
         self.prog.stop()
         self.prog.configure(mode="determinate", value=0)
         self.btn_run.configure(state="normal", text="実　行")
+        self.btn_stop.configure(state="disabled", text="中　止")
+
+    def _cancelled(self) -> None:
+        """中止された。エラーではないので警告ダイアログは出さない。"""
+        self._reset()
+        self._append("\n[中止] 処理を中止しました。CSV は出力していません。", False)
+        self.var_status.set("中止しました")
 
     def _finish(self, out: Path | None) -> None:
         self._reset()
@@ -461,7 +533,10 @@ def main() -> None:
             f"tk scaling    : {float(app.tk.call('tk', 'scaling')):.3f}",
             f"log font      : {app.font_log.actual('family')} "
             f"{app.font_log.actual('size')} {app.font_log.actual('weight')}",
-            f"default font  : {tkfont.nametofont('TkDefaultFont').actual('weight')}",
+            f"label font    : {tkfont.nametofont('TkDefaultFont').actual('family')} "
+            f"{tkfont.nametofont('TkDefaultFont').actual('size')} "
+            f"{tkfont.nametofont('TkDefaultFont').actual('weight')}",
+            f"stop button   : {app.btn_stop.cget('state')}",
         ]
         app.destroy()
         Path(argv[1] if len(argv) > 1 else "selftest.log").write_text(
