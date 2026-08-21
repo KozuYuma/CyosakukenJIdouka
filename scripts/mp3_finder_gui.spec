@@ -10,15 +10,21 @@ build:
 
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_all
+
 # spec 実行時は __file__ が無いので SPECPATH（PyInstaller が定義）を使う
 SCRIPTS = Path(SPECPATH)  # noqa: F821
+
+# ドラッグ＆ドロップ用の tkdnd は Tcl のパッケージ実体（.dll と .tcl）なので、
+# import 解析では拾われない。collect_all で丸ごと同梱する。
+dnd_datas, dnd_bins, dnd_hidden = collect_all("tkinterdnd2")  # noqa: F821
 
 a = Analysis(
     [str(SCRIPTS / "mp3_finder_gui.py")],
     pathex=[str(SCRIPTS)],          # nuendo_mp3_finder を import できるように
-    binaries=[],
-    datas=[],
-    hiddenimports=["nuendo_mp3_finder"],
+    binaries=dnd_bins,
+    datas=dnd_datas,
+    hiddenimports=["nuendo_mp3_finder"] + dnd_hidden,
     hookspath=[],
     runtime_hooks=[],
     # 配布サイズを抑えるため、このツールが使わない重い依存を明示的に外す

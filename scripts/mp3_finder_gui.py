@@ -22,7 +22,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
+
+# ドラッグ＆ドロップ（tkinterdnd2）。無くても参照ボタンで使えるので必須にはしない
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    _BASE_TK = TkinterDnD.Tk
+    HAS_DND = True
+except Exception:
+    DND_FILES = None
+    _BASE_TK = tk.Tk
+    HAS_DND = False
 
 # PyInstaller の onefile 展開先でも scripts/ を import できるようにする
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -39,6 +49,26 @@ from nuendo_mp3_finder import (  # noqa: E402
 
 APP_TITLE = "NUENDO MP3 Finder"
 WORKERS = 8
+
+
+def enable_dpi_awareness() -> None:
+    """
+    高DPI環境で文字が滲む（太って見える）のを防ぐ。
+
+    DPI非対応のまま起動すると Windows が 96dpi で描いた画面を
+    引き伸ばすため、全体がぼやけて太字のように見える。
+    Tk のウィンドウを作る前に呼ぶ必要がある。
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)   # System DPI aware
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()    # 旧Windows向け
+        except Exception:
+            pass
 
 
 # =====================================================================
@@ -127,11 +157,12 @@ def run_finder(csv_path: Path, mp3_dir: Path, out_path: Path,
 # GUI
 # =====================================================================
 
-class App(tk.Tk):
+class App(_BASE_TK):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_TITLE)
-        self.minsize(720, 460)
+        self.minsize(720, 480)
+        self._setup_fonts()
 
         self.var_csv     = tk.StringVar()
         self.var_dir     = tk.StringVar()
@@ -146,7 +177,94 @@ class App(tk.Tk):
         self._prog_idx: str | None = None   # 上書き対象の進捗行の開始位置
 
         self._build()
+        self._setup_dnd()
+        self._prefill_from_argv(sys.argv[1:])
         self.after(100, self._drain_queue)
+
+    # ---- フォント -----------------------------------------------------
+    def _setup_fonts(self) -> None:
+        """
+        画面の文字を実画面のDPIに合わせ、太字にならないよう明示する。
+
+        DPI対応にしただけでは Tk の論理DPIが 96 のままなので、
+        実画面のDPIに合わせて scaling を入れ直す（これをやらないと
+        高DPI環境で文字が小さくなる）。
+        """
+        try:
+            self.tk.call("tk", "scaling", self.winfo_fpixels("1i") / 72.0)
+        except Exception:
+            pass
+
+        # 既定フォントが太字設定になっている環境があるため normal を明示する
+        for name in ("TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont"):
+            try:
+                tkfont.nametofont(name).configure(weight="normal")
+            except Exception:
+                pass
+
+        # ログ欄。等幅で、太らせない
+        self.font_log = tkfont.Font(family="Consolas", size=10, weight="normal")
+        if "Consolas" not in tkfont.families():
+            self.font_log.configure(family="MS Gothic")
+
+    # ---- ドラッグ＆ドロップ -------------------------------------------
+    def _setup_dnd(self) -> None:
+        """ウィンドウにファイル／フォルダをドロップできるようにする。"""
+        if not HAS_DND:
+            return
+        for widget in (self, self.ent_csv, self.ent_dir, self.ent_out):
+            try:
+                widget.drop_target_register(DND_FILES)
+            except Exception:
+                continue
+        # 各入力欄に落とした場合はその欄へ、それ以外はファイル種別で振り分ける
+        self.ent_csv.dnd_bind("<<Drop>>", lambda e: self._on_drop(e, "csv"))
+        self.ent_dir.dnd_bind("<<Drop>>", lambda e: self._on_drop(e, "dir"))
+        self.ent_out.dnd_bind("<<Drop>>", lambda e: self._on_drop(e, "out"))
+        self.dnd_bind("<<Drop>>", lambda e: self._on_drop(e, None))
+
+    def _on_drop(self, event, target: str | None):
+        """
+        ドロップされたパスを該当欄に入れる。
+
+        event.data は Tcl のリスト形式（空白を含むパスは {} で括られる）なので
+        splitlist で分解する。
+        """
+        try:
+            paths = [Path(p) for p in self.tk.splitlist(event.data)]
+        except Exception:
+            paths = [Path(str(event.data).strip("{}"))]
+        self._apply_paths(paths, target)
+        return event.action
+
+    def _apply_paths(self, paths: list[Path], target: str | None = None) -> None:
+        """パスの種類を見て Cue CSV / MP3フォルダ / 出力先 に振り分ける。"""
+        for p in paths:
+            if target == "out":
+                self.var_out.set(str(p))
+            elif p.is_dir():
+                # フォルダはどの欄に落としても MP3 フォルダとして扱う
+                self.var_dir.set(str(p))
+            elif target == "dir":
+                # MP3フォルダ欄にファイルを落とされたら、その入れ物を採る
+                self.var_dir.set(str(p.parent))
+            elif p.suffix.lower() == ".csv" or target == "csv":
+                self._set_csv(p)
+            else:
+                # CSV 以外のファイル（MP3等）はその親フォルダを MP3 フォルダに
+                self.var_dir.set(str(p.parent))
+
+    def _prefill_from_argv(self, argv: list[str]) -> None:
+        """exe のアイコンにファイルをドロップして起動した場合の取り込み。"""
+        paths = [Path(a) for a in argv if not a.startswith("-")]
+        if paths:
+            self._apply_paths([p for p in paths if p.exists()])
+
+    def _set_csv(self, p: Path) -> None:
+        self.var_csv.set(str(p))
+        # 出力先が空なら CSV と同じ場所に自動で決めておく（利用者に考えさせない）
+        if not self.var_out.get():
+            self.var_out.set(str(p.with_name(f"{p.stem}_mp3情報.csv")))
 
     # ---- 画面構築 -----------------------------------------------------
     def _build(self) -> None:
@@ -155,43 +273,50 @@ class App(tk.Tk):
         frm.pack(fill="both", expand=True)
         frm.columnconfigure(1, weight=1)
 
-        self._row(frm, 0, "Cue CSV", self.var_csv, self._pick_csv)
-        self._row(frm, 1, "MP3 フォルダ", self.var_dir, self._pick_dir)
-        self._row(frm, 2, "出力先 CSV", self.var_out, self._pick_out)
+        self.ent_csv = self._row(frm, 0, "Cue CSV", self.var_csv, self._pick_csv)
+        self.ent_dir = self._row(frm, 1, "MP3 フォルダ", self.var_dir, self._pick_dir)
+        self.ent_out = self._row(frm, 2, "出力先 CSV", self.var_out, self._pick_out)
+
+        if HAS_DND:
+            ttk.Label(frm, text="※ Cue CSV や MP3 フォルダは、この画面に直接ドラッグ＆ドロップでも指定できます",
+                      foreground="#666").grid(
+                row=3, column=1, columnspan=2, sticky="w", padx=10)
 
         ttk.Checkbutton(frm, text="部分一致も含める（曲名の一部が一致するファイルも拾う）",
                         variable=self.var_partial).grid(
-            row=3, column=1, columnspan=2, sticky="w", **pad)
+            row=4, column=1, columnspan=2, sticky="w", **pad)
 
         self.btn_run = ttk.Button(frm, text="実　行", command=self._on_run)
-        self.btn_run.grid(row=4, column=1, sticky="ew", **pad)
+        self.btn_run.grid(row=5, column=1, sticky="ew", **pad)
         self.btn_open = ttk.Button(frm, text="出力先を開く", command=self._open_out,
                                    state="disabled")
-        self.btn_open.grid(row=4, column=2, sticky="ew", **pad)
+        self.btn_open.grid(row=5, column=2, sticky="ew", **pad)
 
         self.prog = ttk.Progressbar(frm, mode="determinate", maximum=100)
-        self.prog.grid(row=5, column=0, columnspan=3, sticky="ew", **pad)
+        self.prog.grid(row=6, column=0, columnspan=3, sticky="ew", **pad)
 
         ttk.Label(frm, textvariable=self.var_status, foreground="#555").grid(
-            row=6, column=0, columnspan=3, sticky="w", padx=10)
+            row=7, column=0, columnspan=3, sticky="w", padx=10)
 
-        frm.rowconfigure(7, weight=1)
+        frm.rowconfigure(8, weight=1)
         box = ttk.Frame(frm)
-        box.grid(row=7, column=0, columnspan=3, sticky="nsew", padx=10, pady=(4, 10))
+        box.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=10, pady=(4, 10))
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
         self.log = tk.Text(box, height=14, wrap="none", state="disabled",
-                           font=("Consolas", 9))
+                           font=self.font_log)
         self.log.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(box, orient="vertical", command=self.log.yview)
         sb.grid(row=0, column=1, sticky="ns")
         self.log.configure(yscrollcommand=sb.set)
 
-    def _row(self, parent, r: int, label: str, var: tk.StringVar, cmd) -> None:
+    def _row(self, parent, r: int, label: str, var: tk.StringVar, cmd) -> ttk.Entry:
         ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", padx=10, pady=6)
-        ttk.Entry(parent, textvariable=var).grid(row=r, column=1, sticky="ew", pady=6)
+        ent = ttk.Entry(parent, textvariable=var)
+        ent.grid(row=r, column=1, sticky="ew", pady=6)
         ttk.Button(parent, text="参照...", command=cmd).grid(
             row=r, column=2, sticky="ew", padx=10, pady=6)
+        return ent
 
     # ---- ファイル選択 -------------------------------------------------
     def _pick_csv(self) -> None:
@@ -199,13 +324,8 @@ class App(tk.Tk):
             title="NUENDO Cue CSV を選択",
             filetypes=[("CSV ファイル", "*.csv"), ("すべてのファイル", "*.*")],
         )
-        if not p:
-            return
-        self.var_csv.set(p)
-        # 出力先が空なら CSV と同じ場所に自動で決めておく（利用者に考えさせない）
-        if not self.var_out.get():
-            src = Path(p)
-            self.var_out.set(str(src.with_name(f"{src.stem}_mp3情報.csv")))
+        if p:
+            self._set_csv(Path(p))
 
     def _pick_dir(self) -> None:
         p = filedialog.askdirectory(title="MP3 が入っているフォルダを選択")
@@ -326,6 +446,27 @@ def main() -> None:
     # 引数なし（＝ダブルクリック）なら GUI。
     # --run は画面を出さずに実行する動作確認・バッチ用の隠しオプション。
     argv = sys.argv[1:]
+    if argv and argv[0] == "--selftest":
+        # exe に固めた状態で DPI設定・フォント・D&D が生きているか確認する。
+        # windowed exe には標準出力が無いのでファイルに書く。
+        enable_dpi_awareness()
+        app = App()
+        app.withdraw()
+        app.update()
+        lines = [
+            f"tkinterdnd2   : {HAS_DND}",
+            f"tkdnd         : {app.tk.call('package', 'require', 'tkdnd') if HAS_DND else '-'}",
+            f"mutagen       : {HAS_MUTAGEN}",
+            f"screen dpi    : {app.winfo_fpixels('1i'):.1f}",
+            f"tk scaling    : {float(app.tk.call('tk', 'scaling')):.3f}",
+            f"log font      : {app.font_log.actual('family')} "
+            f"{app.font_log.actual('size')} {app.font_log.actual('weight')}",
+            f"default font  : {tkfont.nametofont('TkDefaultFont').actual('weight')}",
+        ]
+        app.destroy()
+        Path(argv[1] if len(argv) > 1 else "selftest.log").write_text(
+            "\n".join(lines), encoding="utf-8")
+        return
     if argv and argv[0] == "--run":
         if len(argv) < 4:
             print("usage: --run <cue.csv> <mp3_folder> <out.csv> [--no-partial]")
@@ -344,6 +485,8 @@ def main() -> None:
             # console=False の exe では標準出力が無いため、ログはファイルに残す
             out.with_suffix(".log").write_text("\n".join(lines), encoding="utf-8")
         return
+
+    enable_dpi_awareness()   # Tk のウィンドウを作る前に呼ぶ
     App().mainloop()
 
 

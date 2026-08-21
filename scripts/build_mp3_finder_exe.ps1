@@ -30,9 +30,9 @@ if (-not (Test-Path $Py)) {
     Write-Host "[1/3] ビルド用の仮想環境を再利用: $BuildVenv"
 }
 
-Write-Host "[2/3] 依存をインストール (pyinstaller, mutagen)"
+Write-Host "[2/3] 依存をインストール (pyinstaller, mutagen, tkinterdnd2)"
 & $Py -m pip install --upgrade pip --quiet
-& $Py -m pip install --upgrade pyinstaller mutagen --quiet
+& $Py -m pip install --upgrade pyinstaller mutagen tkinterdnd2 --quiet
 
 Write-Host "[3/3] ビルド中..."
 # 前回ビルドした exe が起動したままだと上書きできない
