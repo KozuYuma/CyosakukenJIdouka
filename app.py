@@ -63,6 +63,7 @@ st.set_page_config(
 CONFIRM_STATUS_OPTIONS = [
     "未調査",
     "該当なし",
+    "作曲者一致",
     "候補あり",
     "複数候補あり",
     "確定",
@@ -745,6 +746,34 @@ def _mf_norm_name(s: str) -> str:
     if _is_blank(s):
         return ""
     return re.sub(r"[\s　]", "", unicodedata.normalize("NFKC", str(s))).lower()
+
+
+def _composer_matches(hint: str, candidate: str) -> bool:
+    """作曲者名が一致するか（表記ゆれを吸収した照合）。
+
+    MP3のID3タグは「中西圭三」、MINCは「中西　圭三」のように表記が揺れるため、
+    _mf_norm_name（NFKC＋空白除去＋小文字化）で正規化してから比べる。
+    複数名は "/" 等の区切りで分割し、1人でも共通すれば一致とみなす。
+
+    注意: ローマ字表記のタグ（"Keizo Nakanishi"）は一致しない。不一致は
+    「別人」ではなく「決め手が無い」という意味なので、不一致を理由に
+    候補を捨ててはいけない（呼び出し側は優先度付けにのみ使うこと）。
+    """
+    if _is_blank(hint) or _is_blank(candidate):
+        return False
+    _split = lambda s: {
+        _mf_norm_name(x) for x in re.split(r"[/／・、,]", str(s)) if _mf_norm_name(x)
+    }
+    _h, _c = _split(hint), _split(candidate)
+    if not _h or not _c:
+        return False
+    if _h & _c:
+        return True
+    # 姓のみ等の部分表記も拾う。短い名前での誤一致を避けるため3文字以上に限る。
+    return any(
+        (a in b or b in a) and len(a) >= 3 and len(b) >= 3
+        for a in _h for b in _c
+    )
 
 
 def _infer_iv(lyricist: str) -> str:
@@ -1876,7 +1905,8 @@ with tabs[0]:
                 progress_bar = st.progress(0)
                 status_ph = st.empty()
                 stats: dict[str, int] = {
-                    "自動入力": 0, "複数候補": 0, "ヒットなし": 0, "エラー": 0, "MINCエラー": 0
+                    "自動入力": 0, "作曲者一致": 0, "複数候補": 0,
+                    "ヒットなし": 0, "エラー": 0, "MINCエラー": 0
                 }
 
                 for i, idx in enumerate(target_indices):
@@ -1898,6 +1928,12 @@ with tabs[0]:
                         composer_hint = str(row.get("アーティスト", "")).strip()
                     if composer_hint.lower() == "nan":
                         composer_hint = ""
+
+                    # 候補の絞り込み用。MP3のID3タグ等で既に入っている作曲者名だけを使う
+                    # （アーティスト名で代用すると別人の同名曲を掴むため）
+                    _comp_known = str(row.get("作曲者", "")).strip()
+                    if _comp_known.lower() == "nan":
+                        _comp_known = ""
 
                     status_ph.caption(f"({i + 1}/{total}) 検索中: {search_term[:50]}")
                     progress_bar.progress((i + 1) / total)
@@ -1960,22 +1996,38 @@ with tabs[0]:
                     # MINC 検索（セッション有効時のみ）
                     _mf_ok_bulk, _ = st.session_state.get("mf_auth_state", (False, ""))
                     _mf_multi_match = False
+                    _mf_comp_matched = False   # 作曲者まで一致した候補を採用したか
                     if _mf_ok_bulk:
                         try:
                             _mf_c = _get_mf_client()
                             _mf_bulk = _mf_c.search(search_term, match=3)
                             _mf_bulk_items = _mf_bulk.get("results", []) or []
-                            # 1件のみ → 無条件採用 / 複数件 → 作品名が曲名と完全一致する候補を優先
+                            # 候補の絞り込み:
+                            #   ① 作品名が曲名と完全一致する候補に限定（1件だけなら無条件採用）
+                            #   ② その中で作曲者が一致する候補を優先
+                            # MINCの検索結果には「作詞／作曲」列が含まれるので、
+                            # ②の照合に追加の通信は発生しない。
                             _mfr = None
                             if len(_mf_bulk_items) == 1:
-                                _mfr = _mf_bulk_items[0]
-                            elif _mf_bulk_items:
+                                _mf_named = _mf_bulk_items
+                            else:
                                 _song_n = normalize_for_match(search_term)
-                                for _mi in _mf_bulk_items:
-                                    if normalize_for_match(_mi.get("作品名","")) == _song_n:
-                                        _mfr = _mi
-                                        _mf_multi_match = True  # 複数件の中から名前一致で選択
-                                        break
+                                _mf_named = [
+                                    _mi for _mi in _mf_bulk_items
+                                    if normalize_for_match(_mi.get("作品名", "")) == _song_n
+                                ]
+                            _mf_by_comp = [
+                                _mi for _mi in _mf_named
+                                if _composer_matches(_comp_known, _mi.get("作曲者", ""))
+                            ]
+                            if _mf_by_comp:
+                                # 作曲者まで一致 → 同名異曲ではないと確認できたので確信度が高い
+                                _mfr = _mf_by_comp[0]
+                                _mf_comp_matched = True
+                            elif _mf_named:
+                                _mfr = _mf_named[0]
+                                # 曲名一致だけで複数候補から選んだ場合は要確認
+                                _mf_multi_match = len(_mf_bulk_items) > 1
                             if _mfr:
                                 if _mfr.get("JASRAC作品コード") and not updates.get("JASRAC作品コード"):
                                     updates["JASRAC作品コード"] = _mfr["JASRAC作品コード"]
@@ -2068,7 +2120,12 @@ with tabs[0]:
                             updates["邦洋区分"] = "洋楽"
 
                     if updates:
-                        updates["確認ステータス"] = "複数候補あり" if _mf_multi_match else "候補あり"
+                        # 作曲者まで一致 > 曲名のみ一致 > 複数候補から曲名一致で選択
+                        if _mf_comp_matched:
+                            updates["確認ステータス"] = "作曲者一致"
+                            stats["作曲者一致"] += 1
+                        else:
+                            updates["確認ステータス"] = "複数候補あり" if _mf_multi_match else "候補あり"
                         for col, val in updates.items():
                             if col in st.session_state.songs_df.columns:
                                 st.session_state.songs_df.at[idx, col] = val
@@ -2084,8 +2141,10 @@ with tabs[0]:
                 status_ph.empty()
 
                 result_msg = (
-                    f"✅ 完了: 自動入力 {stats['自動入力']} 件 ／ "
-                    f"複数候補 {stats['複数候補']} 件 ／ "
+                    f"✅ 完了: 自動入力 {stats['自動入力']} 件"
+                    + (f"（うち作曲者まで一致 {stats['作曲者一致']} 件）"
+                       if stats["作曲者一致"] else "")
+                    + f" ／ 複数候補 {stats['複数候補']} 件 ／ "
                     f"ヒットなし {stats['ヒットなし']} 件"
                 )
                 if stats["エラー"]:
@@ -2301,11 +2360,11 @@ with tabs[0]:
             ["すべて", "未確定のみ"],
             horizontal=True,
             key="tab4_status_filter",
-            help="「未確定のみ」は未調査・該当なし・候補あり・複数候補あり・MP3補助確認のみ表示します。",
+            help="「未確定のみ」は未調査・該当なし・作曲者一致・候補あり・複数候補あり・MP3補助確認のみ表示します。",
         )
         if _tab4_status_filter == "未確定のみ":
             _tab4_df = songs_df[songs_df["確認ステータス"].isin(
-                ["未調査", "該当なし", "候補あり", "複数候補あり", "MP3補助確認", "J-WID要確認", "NexTone要確認", "要確認"]
+                ["未調査", "該当なし", "作曲者一致", "候補あり", "複数候補あり", "MP3補助確認", "J-WID要確認", "NexTone要確認", "要確認"]
             )]
         else:
             _tab4_df = songs_df
