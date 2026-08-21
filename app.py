@@ -64,6 +64,7 @@ CONFIRM_STATUS_OPTIONS = [
     "未調査",
     "該当なし",
     "作曲者一致",
+    "アーティスト一致",
     "候補あり",
     "複数候補あり",
     "確定",
@@ -774,6 +775,36 @@ def _composer_matches(hint: str, candidate: str) -> bool:
         (a in b or b in a) and len(a) >= 3 and len(b) >= 3
         for a in _h for b in _c
     )
+
+
+#: アーティスト欄に入る「特定の実演家を指していない」表記。照合に使ってはいけない。
+_ARTIST_GENERIC = {
+    "va", "v.a.", "(v.a.)", "variousartists", "various", "オムニバス",
+    "オリジナルサウンドトラック", "サウンドトラック", "unknownartist", "unknown",
+}
+
+
+def _artist_matches(hint: str, candidate: str) -> bool:
+    """アーティスト（実演家）名が一致するか。
+
+    ID3タグは「ZOO」「EXILE TRIBE feat. ...」のように付随表記が付くため、
+    feat./with 以降と末尾の括弧書きを落としてから _composer_matches の
+    照合ロジック（NFKC＋空白除去＋部分一致）に渡す。
+
+    注意: 作曲者と違い、アーティストは作品を一意に決めない。同じ作品の
+    カバー音源は作曲者が同じでアーティストだけが違う（実測: 心の旅
+    jcd=03175928 に「チューリップ」と「前田憲男」の2行）。よって
+    「どの作品か」ではなく「どのCD／音源か」の決め手として使うこと。
+    """
+    def _clean(s: str) -> str:
+        s = re.sub(r"(?i)\s*(feat\.?|featuring|with)\s.+$", "", str(s))
+        s = re.sub(r"[（(\[].*?[)）\]]\s*$", "", s).strip()
+        return s
+
+    _h, _c = _clean(hint), _clean(candidate)
+    if _mf_norm_name(_h) in _ARTIST_GENERIC or _mf_norm_name(_c) in _ARTIST_GENERIC:
+        return False
+    return _composer_matches(_h, _c)
 
 
 def _infer_iv(lyricist: str) -> str:
@@ -1905,7 +1936,8 @@ with tabs[0]:
                 progress_bar = st.progress(0)
                 status_ph = st.empty()
                 stats: dict[str, int] = {
-                    "自動入力": 0, "作曲者一致": 0, "複数候補": 0,
+                    "自動入力": 0, "作曲者一致": 0, "アーティスト一致": 0,
+                    "作曲者アーティスト一致": 0, "複数候補": 0,
                     "ヒットなし": 0, "エラー": 0, "MINCエラー": 0
                 }
 
@@ -1934,6 +1966,10 @@ with tabs[0]:
                     _comp_known = str(row.get("作曲者", "")).strip()
                     if _comp_known.lower() == "nan":
                         _comp_known = ""
+                    # 同上。MP3のID3タグは作曲者が空でもアーティストは入っていることが多い
+                    _art_known = str(row.get("アーティスト", "")).strip()
+                    if _art_known.lower() == "nan":
+                        _art_known = ""
 
                     status_ph.caption(f"({i + 1}/{total}) 検索中: {search_term[:50]}")
                     progress_bar.progress((i + 1) / total)
@@ -1997,6 +2033,7 @@ with tabs[0]:
                     _mf_ok_bulk, _ = st.session_state.get("mf_auth_state", (False, ""))
                     _mf_multi_match = False
                     _mf_comp_matched = False   # 作曲者まで一致した候補を採用したか
+                    _mf_art_matched  = False   # アーティストまで一致した候補を採用したか
                     if _mf_ok_bulk:
                         try:
                             _mf_c = _get_mf_client()
@@ -2004,9 +2041,12 @@ with tabs[0]:
                             _mf_bulk_items = _mf_bulk.get("results", []) or []
                             # 候補の絞り込み:
                             #   ① 作品名が曲名と完全一致する候補に限定（1件だけなら無条件採用）
-                            #   ② その中で作曲者が一致する候補を優先
-                            # MINCの検索結果には「作詞／作曲」列が含まれるので、
-                            # ②の照合に追加の通信は発生しない。
+                            #   ② その中で作曲者が一致する候補を優先（＝どの作品か）
+                            #   ③ さらにアーティストも一致する行を優先（＝どのCD／音源か）
+                            # MINCの検索結果には「作詞／作曲」列も「アーティスト」列も
+                            # 含まれるので、②③の照合に追加の通信は発生しない。
+                            # 作曲者は作品ごとに一意だが、アーティストは同じ作品でも
+                            # 音源（カバー等）ごとに変わるため、②より弱い決め手として扱う。
                             _mfr = None
                             if len(_mf_bulk_items) == 1:
                                 _mf_named = _mf_bulk_items
@@ -2020,10 +2060,26 @@ with tabs[0]:
                                 _mi for _mi in _mf_named
                                 if _composer_matches(_comp_known, _mi.get("作曲者", ""))
                             ]
+                            _mf_by_art = [
+                                _mi for _mi in _mf_named
+                                if _artist_matches(_art_known, _mi.get("アーティスト", ""))
+                            ]
+                            _mf_art_ids = {id(_mi) for _mi in _mf_by_art}
                             if _mf_by_comp:
-                                # 作曲者まで一致 → 同名異曲ではないと確認できたので確信度が高い
-                                _mfr = _mf_by_comp[0]
+                                # 作曲者まで一致 → 同名異曲ではないと確認できたので確信度が高い。
+                                # 同じ作品で複数行ある場合はアーティストも一致する行（＝その音源の
+                                # CD）を採る。品番・CD名・レコード会社名が正しい盤のものになる。
+                                _mfr = next(
+                                    (_mi for _mi in _mf_by_comp if id(_mi) in _mf_art_ids),
+                                    _mf_by_comp[0],
+                                )
                                 _mf_comp_matched = True
+                                _mf_art_matched = id(_mfr) in _mf_art_ids
+                            elif _mf_by_art:
+                                # 作曲者が空（ID3タグに無い等）でもアーティストで絞れた場合。
+                                # カバー音源を掴む可能性が残るので作曲者一致より一段弱い扱い。
+                                _mfr = _mf_by_art[0]
+                                _mf_art_matched = True
                             elif _mf_named:
                                 _mfr = _mf_named[0]
                                 # 曲名一致だけで複数候補から選んだ場合は要確認
@@ -2120,10 +2176,15 @@ with tabs[0]:
                             updates["邦洋区分"] = "洋楽"
 
                     if updates:
-                        # 作曲者まで一致 > 曲名のみ一致 > 複数候補から曲名一致で選択
+                        # 作曲者一致 > アーティスト一致 > 曲名のみ一致 > 複数候補から選択
                         if _mf_comp_matched:
                             updates["確認ステータス"] = "作曲者一致"
                             stats["作曲者一致"] += 1
+                            if _mf_art_matched:
+                                stats["作曲者アーティスト一致"] += 1
+                        elif _mf_art_matched:
+                            updates["確認ステータス"] = "アーティスト一致"
+                            stats["アーティスト一致"] += 1
                         else:
                             updates["確認ステータス"] = "複数候補あり" if _mf_multi_match else "候補あり"
                         for col, val in updates.items():
@@ -2142,8 +2203,13 @@ with tabs[0]:
 
                 result_msg = (
                     f"✅ 完了: 自動入力 {stats['自動入力']} 件"
-                    + (f"（うち作曲者まで一致 {stats['作曲者一致']} 件）"
+                    + (f"（うち作曲者まで一致 {stats['作曲者一致']} 件"
+                       + (f"／うちアーティストも一致 {stats['作曲者アーティスト一致']} 件"
+                          if stats["作曲者アーティスト一致"] else "")
+                       + "）"
                        if stats["作曲者一致"] else "")
+                    + (f"（うちアーティストのみ一致 {stats['アーティスト一致']} 件）"
+                       if stats["アーティスト一致"] else "")
                     + f" ／ 複数候補 {stats['複数候補']} 件 ／ "
                     f"ヒットなし {stats['ヒットなし']} 件"
                 )
@@ -2360,11 +2426,11 @@ with tabs[0]:
             ["すべて", "未確定のみ"],
             horizontal=True,
             key="tab4_status_filter",
-            help="「未確定のみ」は未調査・該当なし・作曲者一致・候補あり・複数候補あり・MP3補助確認のみ表示します。",
+            help="「未確定のみ」は未調査・該当なし・作曲者一致・アーティスト一致・候補あり・複数候補あり・MP3補助確認のみ表示します。",
         )
         if _tab4_status_filter == "未確定のみ":
             _tab4_df = songs_df[songs_df["確認ステータス"].isin(
-                ["未調査", "該当なし", "作曲者一致", "候補あり", "複数候補あり", "MP3補助確認", "J-WID要確認", "NexTone要確認", "要確認"]
+                ["未調査", "該当なし", "作曲者一致", "アーティスト一致", "候補あり", "複数候補あり", "MP3補助確認", "J-WID要確認", "NexTone要確認", "要確認"]
             )]
         else:
             _tab4_df = songs_df
