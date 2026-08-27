@@ -77,6 +77,13 @@ def inject_css() -> None:
       max-width: 1500px;
   }
 
+  /* 「◯◯へ移動」で飛ぶ先の目印。画面に貼り付いている見出し帯の下に
+     隠れてしまうので、その分だけ手前で止める */
+  a[id^="sec-"] {
+      display: block;
+      scroll-margin-top: 5rem;
+  }
+
   /* 管理番号・JASRAC作品コード・尺など、桁が縦に揃ってほしい値。
      等幅にしないと目視で照合できない */
   [data-testid="stDataFrame"], [data-testid="stDataEditor"] {

@@ -90,6 +90,63 @@ inject_css()
 # 出すのではなく、なぜ使えないかを画面に出すために使う。
 IS_LOCAL_WINDOWS = os.name == "nt"
 
+# セクションへ移動するときのスクロール。`__ID__` を移動先の id に置き換えて使う。
+#
+# scrollIntoView() は目印を画面のてっぺんに合わせるが、Streamlit の見出し帯は
+# 画面に貼り付いたまま上に重なるので、見たい行がその下に隠れて「少し行き過ぎた」
+# ように見える。そこで帯の高さの分だけ手前で止める。
+#
+# もう一つ、押した直後は表がまだ描き上がっておらず、あとから背が伸びて位置が
+# ずれる。一度きりでは合わないので、間を空けて数回だけ直す。ただし利用者が
+# 自分でスクロールを始めたら、そこで手を引く（勝手に動かされると鬱陶しいため）。
+_SCROLL_JS = """
+<script>
+(function () {
+  var doc = parent.document, win = parent;
+  var id = "__ID__", cancelled = false;
+  ["wheel", "touchstart", "keydown"].forEach(function (ev) {
+    win.addEventListener(ev, function () { cancelled = true; },
+                         { passive: true, once: true });
+  });
+  // 画面に貼り付いている見出し帯の高さ。隠れているときは 0
+  function headBottom() {
+    var h = doc.querySelector('header[data-testid="stHeader"]');
+    if (!h) return 0;
+    var st = win.getComputedStyle(h);
+    if (st.position !== "fixed" && st.position !== "sticky") return 0;
+    if (st.display === "none" || st.visibility === "hidden") return 0;
+    return h.getBoundingClientRect().bottom;
+  }
+  // 目印を実際に動かしている入れ物。窓そのもののこともある
+  function scroller(e) {
+    var n = e.parentElement;
+    while (n && n !== doc.body) {
+      var oy = win.getComputedStyle(n).overflowY;
+      if ((oy === "auto" || oy === "scroll") && n.scrollHeight > n.clientHeight + 4)
+        return n;
+      n = n.parentElement;
+    }
+    return null;
+  }
+  function go(smooth) {
+    if (cancelled) return;
+    var e = doc.getElementById(id);
+    if (!e) return;
+    var sc = scroller(e);
+    var scTop = sc ? sc.getBoundingClientRect().top : 0;
+    // 帯の下、または入れ物の上端。どちらか低い方の少し下に置く
+    var want = Math.max(scTop, headBottom()) + 12;
+    var delta = e.getBoundingClientRect().top - want;
+    if (Math.abs(delta) < 4) return;
+    (sc || win).scrollBy({ top: delta, behavior: smooth ? "smooth" : "auto" });
+  }
+  [450, 1000, 1700].forEach(function (ms, i) {
+    setTimeout(function () { go(i === 0); }, ms);
+  });
+})();
+</script>
+"""
+
 # 確認ステータスの選択肢（全画面共通）
 CONFIRM_STATUS_OPTIONS = [
     "未調査",
@@ -2564,11 +2621,7 @@ with tabs[0]:
                 st.session_state.setdefault("_scroll_target", "sec-shinkok")
             _sh_scroll = st.session_state.pop("_scroll_target", None)
             if _sh_scroll:
-                _stc.html(
-                    f"<script>setTimeout(function(){{var e=parent.document.getElementById('{_sh_scroll}');"
-                    "if(e)e.scrollIntoView({behavior:'smooth'});},450);</script>",
-                    height=0,
-                )
+                _stc.html(_SCROLL_JS.replace("__ID__", _sh_scroll), height=0)
 
             _SHINKOK_COL_CFG = {
                 "使用時間（分）": st.column_config.NumberColumn("分", width="small", format="%d"),
