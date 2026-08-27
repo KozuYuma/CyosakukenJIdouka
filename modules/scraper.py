@@ -8,6 +8,7 @@ J-WID / NexTone スクレイピングモジュール
 ・各サービスの利用規約を確認のうえ使用してください
 """
 
+import concurrent.futures
 import re
 import time
 import urllib.parse
@@ -725,8 +726,16 @@ def search_all(title: str, composer: str = "", artist: str = "") -> dict:
 
     # J-WID はタイトルだけで検索し、作曲者は後段のランキングで使う
     # （author を渡すと J-WID 側でも絞り込まれ、ヒント誤り時に全件ゼロになるリスクがある）
-    jwid_result    = search_jwid(title, artist=artist)
-    nextone_result = search_nextone(title)
+    #
+    # 2つは別のサイトなので、順番に待つ理由がない。同時に投げると
+    # 1曲あたりの待ち時間が「合計」ではなく「遅い方だけ」になる。
+    # 待ち時間の管理（_rate_limit）はサイトごとに別勘定なので、
+    # 相手の1台から見た間隔は順番に投げていたときと変わらない。
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _ex:
+        _f_jwid = _ex.submit(search_jwid, title, artist=artist)
+        _f_next = _ex.submit(search_nextone, title)
+        jwid_result    = _f_jwid.result()
+        nextone_result = _f_next.result()
 
     for result in [jwid_result, nextone_result]:
         items = result.get("results") or []

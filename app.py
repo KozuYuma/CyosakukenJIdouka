@@ -8,6 +8,7 @@ NUENDO Cue CSV × WAV 一覧照合 → 権利情報管理 → Excel 出力
 import json
 import os
 import re
+import threading
 import unicodedata
 import urllib.parse
 from pathlib import Path
@@ -2171,11 +2172,42 @@ with tabs[0]:
                     status_ph.caption(f"({i + 1}/{total}) 検索中: {search_term[:50]}")
                     progress_bar.progress((i + 1) / total)
 
+                    # ---- MINC は先に投げておく ----
+                    #
+                    # MINC は J-WID / NexTone とは別のサイトなので、順番に
+                    # 待つ理由がない。ここで投げておいて、J-WID を調べ終えた
+                    # 下の方で受け取る。1曲あたりの待ち時間が「合計」から
+                    # 「一番遅い1つ」に縮む。
+                    # 相手の1台から見た間隔は変わらない（待ち時間の管理は
+                    # サイトごとに別勘定のため）。
+                    # 別スレッドから st.session_state は触れないので、
+                    # client はここ（本体側）で取っておいて渡す。
+                    _mf_ok_bulk, _ = st.session_state.get("mf_auth_state", (False, ""))
+                    _mf_box: dict = {}
+                    _mf_th = None
+                    if _mf_ok_bulk:
+                        try:
+                            _mf_c = _get_mf_client()
+                        except Exception as _e:
+                            _mf_c = None
+                            _mf_box["e"] = _e
+                        if _mf_c is not None:
+                            def _mf_run(_c=_mf_c, _t=search_term, _box=_mf_box):
+                                try:
+                                    _box["r"] = _c.search(_t, match=3)
+                                except Exception as _e2:
+                                    _box["e"] = _e2
+                            _mf_th = threading.Thread(target=_mf_run, daemon=True)
+                            _mf_th.start()
+
                     try:
                         result = search_all(search_term, composer=composer_hint)
                     except Exception as _e:
                         stats["エラー"] += 1
                         stats.setdefault("_last_error", str(_e))
+                        # 投げっぱなしにすると次の曲の検索と重なるので待つ
+                        if _mf_th is not None:
+                            _mf_th.join()
                         continue
 
                     _jwid_err = result.get("jwid", {}).get("error")
@@ -2226,15 +2258,18 @@ with tabs[0]:
                         if r.get("アーティスト") and not updates.get("アーティスト"):
                             updates["アーティスト"] = r["アーティスト"]
 
-                    # MINC 検索（セッション有効時のみ）
-                    _mf_ok_bulk, _ = st.session_state.get("mf_auth_state", (False, ""))
+                    # MINC 検索（セッション有効時のみ）。上で先に投げてある
+                    # ので、ここでは結果を受け取るだけ
                     _mf_multi_match = False
                     _mf_comp_matched = False   # 作曲者まで一致した候補を採用したか
                     _mf_art_matched  = False   # アーティストまで一致した候補を採用したか
                     if _mf_ok_bulk:
                         try:
-                            _mf_c = _get_mf_client()
-                            _mf_bulk = _mf_c.search(search_term, match=3)
+                            if _mf_th is not None:
+                                _mf_th.join()
+                            if _mf_box.get("e") is not None:
+                                raise _mf_box["e"]
+                            _mf_bulk = _mf_box.get("r") or {}
                             _mf_bulk_items = _mf_bulk.get("results", []) or []
                             # 候補の絞り込み:
                             #   ① 作品名が曲名と完全一致する候補に限定（1件だけなら無条件採用）
