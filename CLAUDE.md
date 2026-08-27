@@ -34,7 +34,7 @@ CyosakukenJIdouka_app/
 │   ├── number_parser.py    # ライブラリ管理番号・Audiostock 番号分解
 │   ├── normalizer.py       # 照合用文字列正規化・タイトル検出
 │   ├── matcher.py          # Cue × WAV 照合ロジック（優先度6段階）
-│   ├── database.py         # SQLite 永続化（プロジェクト・楽曲・イベント）
+│   ├── database.py         # 永続化。DATABASE_URL 未設定=SQLite / 設定時=Supabase
 │   ├── excel_exporter.py   # Excel 出力（申告フォーマット+5シート）
 │   ├── search_helper.py    # J-WID/NexTone/Google 検索語生成、JWID_BASE 定数
 │   ├── pipeline.py         # 全自動調査パイプライン（run_pipeline 関数）
@@ -226,9 +226,41 @@ SPOTIFY_CLIENT_SECRET=xxxxx
 
 ## 最新の作業状態
 
-### 最終更新: 2026-07-26（session 3）
+### 最終更新: 2026-08-27（session 5）
 
 **やったこと（今セッション）**
+
+- **NUENDO MP3 Finder（GUI exe）の仕上げ** — ブランチ `feat/mp3-finder-gui-exe`
+  - 中止ボタンを追加。スレッドは外から止められないので `threading.Event` を
+    要所で見る協調方式（`Cancelled` 例外）。CSV 書き出し直前にも見て、
+    中止時に中途半端な CSV が残らないようにしてある
+  - 進捗バーを実測に変更。`_PHASE` で各段階に％の帯を割り当てる。
+    総数が分からない MP3 スキャン中だけ流し表示（indeterminate）
+  - ログ欄のフォントを `TkDefaultFont` の複製に。`tk.Text` の既定は等幅の
+    `TkFixedFont` で、日本語が痩せて見えていた
+  - exe: `dist\NUENDO_MP3_Finder.exe`
+- **Chrome 拡張 MINC Session Sync の画面切り替えを解消** — ブランチ `feat/minc-sync-silent`
+  - `chrome.tabs.create({active:false})` で裏タブを開き、同期後に自動で閉じる
+  - 既存タブを使い回さないのは、リロードすると Streamlit の
+    `st.session_state`（読み込み済み楽曲データ）が消えるため
+  - アプリ未起動時に「同期した」と誤表示する問題も修正（事前に fetch で疎通確認）
+  - **要確認**: `chrome://extensions` で拡張を再読み込みして実機テスト
+- **Supabase 対応（DB を外に出す準備）** — ブランチ `feat/supabase-db`（詳細は下）
+
+**DB まわりの変更点（重要）**
+
+- 接続先は環境変数 `DATABASE_URL` で切り替え。未設定なら従来どおり
+  `data/cyosakuken.db`（SQLite）。設定すれば Supabase（PostgreSQL）
+- `app.py` は無改修。`modules/database.py` の 8 関数のシグネチャを変えていない
+- スキーマ変更: 旧 `songs` / `nuendo_events`（列がそのままテーブル列で
+  `ALTER TABLE ADD COLUMN` していた）→ 新 `song_rows` / `event_rows`
+  （1行 = 1 JSON）。**旧テーブルは残してある**ので戻せる
+- ローカルの実データは移行済み（楽曲 136 行 / 4 プロジェクト）。
+  移行前のバックアップ: `data/cyosakuken.db.bak_before_migrate`
+- `scripts/check_db.py` … 接続確認、`scripts/migrate_db.py` … 移行（`--dry-run` あり）
+- 手順書: `docs/Supabase設定手順.md`、雛形: `.env.example`
+
+**前セッション（session 3）やったこと（記録）**
 
 - **一括検索 詳細フィールド補完**:
   - J-WID 自動適用時に `fetch_jwid_detail(r["_detail_url"])` を呼んで作曲者・作詞者・編曲者・訳詞者を取得
@@ -262,8 +294,22 @@ SPOTIFY_CLIENT_SECRET=xxxxx
 
 **次にやること**
 
-- Git ブランチを切ってコミット → GitHub push
-- 実機で一括検索（作曲者/作詞者/編曲者/訳詞者/I/V区分/委任者）を動作確認
+1. **Supabase の続き（ユーザー作業待ち）**
+   - `docs/Supabase設定手順.md` の 1〜3 に従ってプロジェクト作成 →
+     **Session pooler** の接続文字列を `.env` の `DATABASE_URL` に貼る
+     （接続文字列はパスワードそのもの。チャット等に貼らせないこと）
+   - `scripts/check_db.py` で疎通 → `migrate_db.py --from-sqlite` で移行
+2. **Render デプロイ**（Supabase が動いてから）
+   - 既知の制約: WAV/MP3 のフォルダ走査は不可（CSV アップロード経路を使う）、
+     Playwright の MINC ログインも不可（Chrome 拡張の Cookie 同期に寄せ、
+     `popup.js` の `APP_URL` を公開URLに書き換える）、無料枠は15分でスリープ
+3. **① TSP CD データ取り込み**（管理番号 → 楽曲データ）
+   - サンプル CSV の列名と、キーが `6ST-653-09` 形式かの確認待ち
+   - 案: `tsp_cd` テーブル＋WEB結果キャッシュで「ローカル → キャッシュ → WEB」の3段
+4. **② UI の刷新**（管理アプリ風）
+   - Step1 テーマ+上部ステータスバー+ダッシュボード / Step2 `st.navigation` で
+     ページ分割 / Step3 マスター詳細（`st.dataframe` の行選択）
+5. 実機で一括検索（作曲者/作詞者/編曲者/訳詞者/I/V区分/委任者）を動作確認
 
 **未解決の問題・懸念点**
 
