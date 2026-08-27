@@ -16,6 +16,7 @@ MusicForest (www.minc.or.jp) 検索クライアント。
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -1012,21 +1013,25 @@ def _split_title_cell(cell) -> tuple[str, str]:
     span.sub_title に包まれている。まとめて読むと
     「オオサキプラザホテル 純と愛より（ＮＨＫ連続テレビ小説）」の
     ように繋がり、曲名で照合できなくなる。
+
+    副題の span が作品名と同じ字を繰り返していることがある
+    （「花みずきの詩」＋副題「ＣＭ／花みずき工房」「花みずきの詩」）。
+    文字列の引き算で作品名を出すと、その繰り返しに巻き込まれて作品名が
+    消えてしまうので、木を写して span を外す形で取る。
     """
     if cell is None:
         return "", ""
-    subs = cell.select("span.sub_title")
-    subtitle = " ".join(
-        s.get_text(" ", strip=True) for s in subs
-        if s.get_text(strip=True)
-    ).strip()
-    # 元の木を壊さないように、副題を抜いた文字列は差分で作る
-    whole = cell.get_text(" ", strip=True)
-    for s in subs:
+    subtitles: list[str] = []
+    body = copy.copy(cell)
+    for s in body.select("span.sub_title"):
         part = s.get_text(" ", strip=True)
         if part:
-            whole = whole.replace(part, " ")
-    return " ".join(whole.split()), subtitle
+            subtitles.append(part)
+        s.decompose()
+    title = " ".join(body.get_text(" ", strip=True).split())
+    # 作品名をそのまま繰り返しているだけの副題は落とす
+    subtitle = " ".join(s for s in subtitles if s != title).strip()
+    return title, subtitle
 
 
 #: 検索結果テーブルの役割表記 → 申告フォーマットの項目名
