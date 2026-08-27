@@ -2624,7 +2624,9 @@ with tabs[0]:
                                 st.session_state.songs_df.at[idx, col] = val
                         stats["自動入力"] += 1
                     elif jwid_r or nt_r:
-                        st.session_state.songs_df.at[idx, "確認ステータス"] = "候補あり"
+                        # 当たりはあったが自動では入れなかった＝どれか選ぶ
+                        # 必要がある行。人が見に行く先なので、そう書く
+                        st.session_state.songs_df.at[idx, "確認ステータス"] = "複数候補あり"
                         stats["複数候補"] += 1
                     else:
                         st.session_state.songs_df.at[idx, "確認ステータス"] = "該当なし"
@@ -2919,9 +2921,9 @@ with tabs[0]:
                 "選択": st.column_config.CheckboxColumn("選択", width="small"),
                 "状態": st.column_config.TextColumn(
                     "状態", width="small",
-                    help="手を入れる必要がある行だけ印が付く。\n\n"
+                    help="どれか選ぶ必要がある行だけ印が付く。\n\n"
                          + STATUS_MARK_LEGEND.replace("　", "\n\n")
-                         + "\n\n（確定・一致は印なし）",
+                         + "\n\n（確定・一致・候補あり〔1件だけ当たった〕は印なし）",
                 ),
             }
             _edited_shinkok = st.data_editor(
@@ -2934,7 +2936,10 @@ with tabs[0]:
                 disabled=["状態"],
                 on_change=_sync_shinkok_to_songs,
             )
-            st.caption(f"状態の印: {STATUS_MARK_LEGEND}　（確定・一致は印なし）")
+            st.caption(
+                f"状態の印: {STATUS_MARK_LEGEND}"
+                "　（確定・一致・1件だけ当たった「候補あり」は印なし）"
+            )
 
             # チェックされた行のナビゲーションボタンを即表示
             _sel_pos = st.session_state.get("_shinkok_sel")
