@@ -2128,12 +2128,15 @@ with tabs[0]:
                     "自動入力": 0, "作曲者一致": 0, "アーティスト一致": 0,
                     "作曲者アーティスト一致": 0, "複数候補": 0,
                     "ヒットなし": 0, "エラー": 0, "MINCエラー": 0,
-                    "台帳CD": 0,
+                    "台帳CD": 0, "MINC引き直しCD": 0,
                 }
                 # 自社CD台帳の引き当て結果。同じ作品コードが何度も出て
                 # くるので、1回の実行の中では覚えておいて DB への往復を
                 # 減らす（Supabase は1往復 0.2秒ほどかかる）
                 _cd_ledger_cache: dict[str, list[dict]] = {}
+                # 台帳で埋まらず MINC に聞き直した分。同じ作品コードを
+                # 二度引かないために覚えておく（1回が最大12秒かかる）
+                _cd_minc_cache: dict[str, list[dict]] = {}
 
                 for i, idx in enumerate(target_indices):
                     row = st.session_state.songs_df.loc[idx]
@@ -2403,6 +2406,57 @@ with tabs[0]:
                             if updates.get("CD番号"):
                                 stats["台帳CD"] += 1
 
+                    # ---- それでも埋まらなかった分だけ MINC に聞く ----
+                    #
+                    # 台帳は JASRAC作品コードでしか引けないので、NexTone
+                    # だけで管理されている曲は当たらない。検索結果の行に
+                    # 品番が載っていないこともある。そういう残りだけ、作品
+                    # コードから CD商品リストを引き直す。
+                    #
+                    # ここは1曲につき通信が1回増える（実測 0.6〜12秒）。
+                    # 埋め残しだけが対象なので、実測では33曲中4曲だった。
+                    _cd_filled2 = not _is_blank(
+                        updates.get("CD番号") or row.get("CD番号", ""))
+                    _cd_ncd = (updates.get("NexTone管理番号")
+                               or str(row.get("NexTone管理番号", ""))).strip()
+                    if _is_blank(_cd_ncd):
+                        _cd_ncd = ""
+                    if _mf_ok_bulk and not _cd_filled2 and (_cd_code or _cd_ncd):
+                        _mk = f"{_cd_code}|{_cd_ncd}"
+                        if _mk not in _cd_minc_cache:
+                            try:
+                                _cd_minc_cache[_mk] = (
+                                    _get_mf_client().search_cds_by_jasrac(
+                                        _cd_code,
+                                        title=search_term,
+                                        ncd=_cd_ncd,
+                                    ).get("cds") or []
+                                )
+                            except Exception as _ce:
+                                _cd_minc_cache[_mk] = []
+                                stats["MINCエラー"] += 1
+                                stats.setdefault(
+                                    "_minc_last_error",
+                                    f"{type(_ce).__name__}: {_ce}")
+                        _mc = _cd_minc_cache.get(_mk) or []
+                        # 台帳と同じ選び方。手元にアーティスト名があれば
+                        # それに合う盤、無ければ先頭
+                        _mc_hit = next(
+                            (_c for _c in _mc
+                             if _artist_matches(_art_known,
+                                                _c.get("アーティスト", ""))),
+                            _mc[0] if _mc else None,
+                        )
+                        if _mc_hit:
+                            for _col, _key in (("CD番号", "品番"),
+                                               ("CD名", "CD商品タイトル"),
+                                               ("レコード会社名", "レコード会社名")):
+                                if _mc_hit.get(_key) and not updates.get(_col) \
+                                        and _is_blank(row.get(_col, "")):
+                                    updates[_col] = _mc_hit[_key]
+                            if updates.get("CD番号"):
+                                stats["MINC引き直しCD"] += 1
+
                     # I/V区分 自動判定
                     #   ① MINC の CD情報に I/V 表記があればそれを使う
                     #   ② 無ければ作詞者の有無で判定（作詞者あり→ヴォーカル／なし→インスト）
@@ -2477,6 +2531,8 @@ with tabs[0]:
                        if stats["アーティスト一致"] else "")
                     + (f"（うち CD を台帳から {stats['台帳CD']} 件）"
                        if stats["台帳CD"] else "")
+                    + (f"（うち CD を MINC から {stats['MINC引き直しCD']} 件）"
+                       if stats["MINC引き直しCD"] else "")
                     + f" ／ 複数候補 {stats['複数候補']} 件 ／ "
                     f"ヒットなし {stats['ヒットなし']} 件"
                 )
