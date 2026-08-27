@@ -1148,6 +1148,10 @@ def _minc_state() -> tuple[str, str]:
     """
     try:
         _p = get_state_path()
+        # DB に新しい Cookie があれば取り寄せる。ここは毎回の再実行で
+        # 通るので、間隔を空けて聞く方（force なし）を使う
+        from modules.musicforest import sync_state_from_db
+        sync_state_from_db(_p)
         if not _p.is_file():
             return ("未接続", "off")
         _has_sess = '"_sess"' in _p.read_text(encoding="utf-8")

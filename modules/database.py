@@ -180,6 +180,14 @@ def _ddl() -> list[str]:
                    label     TEXT NOT NULL DEFAULT '',
                    jasrac    TEXT NOT NULL DEFAULT ''
                )""",
+            # MINC の Cookie。サーバーでは書いたファイルが再起動で消える
+            # ため、DB を置き場所にする。updated_at はファイルの更新時刻
+            # （epoch 秒）。どちらが新しいかを比べるのに使う
+            """CREATE TABLE IF NOT EXISTS minc_state (
+                   name       TEXT PRIMARY KEY,
+                   state      TEXT NOT NULL,
+                   updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
+               )""",
         ]
     return [
         """CREATE TABLE IF NOT EXISTS projects (
@@ -226,6 +234,11 @@ def _ddl() -> list[str]:
                cd_no     TEXT NOT NULL DEFAULT '',
                label     TEXT NOT NULL DEFAULT '',
                jasrac    TEXT NOT NULL DEFAULT ''
+           )""",
+        """CREATE TABLE IF NOT EXISTS minc_state (
+               name       TEXT PRIMARY KEY,
+               state      TEXT NOT NULL,
+               updated_at REAL NOT NULL DEFAULT 0
            )""",
     ]
 
@@ -666,3 +679,46 @@ def cd_fetch(mgmt_keys: set[str]) -> list[dict]:
                     conn.execute(sql, {"mgmt": tuple(mgmt)}).mappings().all()]
     except Exception:
         return []
+
+
+# ─── MINC の Cookie（minc_state） ──────────────────────────
+#
+# MINC は reCAPTCHA があるので自動ログインできない。人がブラウザで
+# ログインして取れた Cookie を持ち回るしかない。サーバーではファイルが
+# 再起動で消えるので、DB を置き場所にする。
+#
+# name は Cookie ファイルの名前。手元は利用者ごとに別ファイル、サーバー
+# は全員で1つ、という今の使い分けがそのまま行の分かれ方になる。
+
+def minc_state_get(name: str) -> tuple[str, float] | None:
+    """保存してある Cookie を (中身, 更新時刻) で返す。無ければ None。"""
+    if not name:
+        return None
+    try:
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                text("SELECT state, updated_at FROM minc_state WHERE name = :n"),
+                {"n": name},
+            ).first()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return str(row[0]), float(row[1] or 0)
+
+
+def minc_state_put(name: str, state: str, updated_at: float) -> None:
+    """Cookie を保存する。同じ名前が既にあれば上書きする。
+
+    Cookie はログインの鍵そのものなので、失敗しても中身は例外に載せない。
+    """
+    if not name or not state:
+        return
+    with get_engine().begin() as conn:
+        conn.execute(
+            text("INSERT INTO minc_state (name, state, updated_at) "
+                 "VALUES (:n, :s, :u) "
+                 "ON CONFLICT (name) DO UPDATE SET "
+                 "state = EXCLUDED.state, updated_at = EXCLUDED.updated_at"),
+            {"n": name, "s": state, "u": float(updated_at)},
+        )

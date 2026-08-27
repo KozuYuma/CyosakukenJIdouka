@@ -1354,7 +1354,10 @@ def get_state_path() -> Path:
 def load_client() -> MusicForestClient:
     """保存済み Cookie からクライアントを作成して返す。失敗時は MusicForestError。"""
     client = MusicForestClient()
-    client.load_state(get_state_path())
+    path = get_state_path()
+    # 実際に MINC へ繋ぎに行く直前。ここは間隔を空けずに確かめる
+    sync_state_from_db(path, force=True)
+    client.load_state(path)
     return client
 
 
@@ -1466,6 +1469,77 @@ def _read_chrome_minc_cookies_win32(domain_filter: str = "minc.or.jp") -> list[d
     return result
 
 
+def _push_state_to_db(state_path: Path) -> bool:
+    """書いたばかりの Cookie ファイルを DB にも入れる。
+
+    サーバーではファイルが再起動で消える。DB に置いておけば残るうえ、
+    1人が貼れば全員が使える。
+
+    database の import はここでする。この module は Streamlit や DB が
+    無くても（search_music から直接）使えるようにしてあるため。
+
+    失敗しても例外にしない。ファイルには書けているので、今つないでいる
+    人はそのまま使える。共有できなかったことは、次に開いたときの
+    「未接続」表示で分かる。
+    """
+    try:
+        from modules.database import minc_state_put
+        minc_state_put(
+            state_path.name,
+            state_path.read_text(encoding="utf-8"),
+            state_path.stat().st_mtime,
+        )
+        return True
+    except Exception:
+        return False
+
+
+# DB に聞きに行く間隔（秒）。Streamlit は操作のたびに画面を作り直すので、
+# 毎回問い合わせると Supabase との往復が積み上がる。60秒あれば、誰かが
+# 貼り直した Cookie は充分すぐ回ってくる
+_PULL_MIN_INTERVAL = 60.0
+_last_pull: dict[str, float] = {}
+
+
+def sync_state_from_db(state_path: Path, force: bool = False) -> bool:
+    """DB の Cookie の方が新しければファイルに書き戻す。書いたら True。
+
+    これで2つのことが繋がる。サーバーが再起動してファイルが消えても
+    ログインが生き残ること、そして誰かが貼った Cookie を他の人も使える
+    ことである。
+
+    force は「今すぐ確かめたい」ときだけ。普段は間隔を空けて聞く。
+    """
+    name = state_path.name
+    now = time.time()
+    if not force and now - _last_pull.get(name, 0.0) < _PULL_MIN_INTERVAL:
+        return False
+    _last_pull[name] = now
+
+    try:
+        from modules.database import minc_state_get
+        got = minc_state_get(name)
+    except Exception:
+        return False
+    if not got:
+        return False
+    state, updated_at = got
+
+    try:
+        # 手元の方が新しければ触らない。貼った直後の値を、DB に入って
+        # いる古い値で上書きしてしまわないため
+        if state_path.exists() and state_path.stat().st_mtime >= updated_at - 0.001:
+            return False
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(state, encoding="utf-8")
+        # 更新時刻も合わせる。画面の「45分前」はファイルの時刻から
+        # 出しているので、書き戻した時刻にすると新しく見えてしまう
+        os.utime(state_path, (updated_at, updated_at))
+        return True
+    except Exception:
+        return False
+
+
 def _save_cookies_to_state(cookies: list[dict], state_path: Path) -> tuple[int, bool]:
     """cookies リストを state.json に保存する。既存の非 minc Cookie は保持。"""
     existing: dict = {"cookies": [], "origins": []}
@@ -1489,6 +1563,7 @@ def _save_cookies_to_state(cookies: list[dict], state_path: Path) -> tuple[int, 
     existing["cookies"] = kept
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    _push_state_to_db(state_path)
     sess_found = any(c["name"] == "_sess" for c in cookies)
     return len(cookies), sess_found
 
@@ -1576,6 +1651,7 @@ def update_sess_cookie(sess_value: str, xsrf_value: str = "") -> None:
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+    _push_state_to_db(state_path)
 
 
 def check_session(client: Optional["MusicForestClient"] = None) -> tuple[bool, str]:
@@ -1585,6 +1661,8 @@ def check_session(client: Optional["MusicForestClient"] = None) -> tuple[bool, s
     Returns: (ok: bool, message: str)
     """
     state_path = get_state_path()
+    # 状態を確かめるのが仕事なので、ここも間隔を空けずに聞く
+    sync_state_from_db(state_path, force=True)
     if not state_path.exists():
         return False, f"Cookie ファイルが見つかりません:\n{state_path}"
     age = _session_age_str(state_path)
