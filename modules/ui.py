@@ -64,6 +64,23 @@ def status_tone(value) -> str:
     return _STATUS_TONE.get(str(value).strip(), _IDLE)
 
 
+# 段階を表す1文字。編集できる表（st.data_editor）には色を敷けないので、
+# 色の代わりにこの印を隣の列に置く
+_STATUS_MARK: dict[str, str] = {
+    _OK:    "🟢",
+    _HIT:   "🔵",
+    _MAYBE: "🟡",
+    _TODO:  "🟠",
+    _NONE:  "🔴",
+    _IDLE:  "・",
+}
+
+
+def status_mark(value) -> str:
+    """確認ステータスを1文字の印に直す。色を敷けない表で色の代わりに使う。"""
+    return _STATUS_MARK.get(status_tone(value), "・")
+
+
 def inject_css() -> None:
     """全画面共通のCSS。st.set_page_config の直後に一度だけ呼ぶ。"""
     st.markdown(

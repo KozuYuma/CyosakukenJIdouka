@@ -70,7 +70,7 @@ from modules.pipeline import run_pipeline
 from modules.scraper import search_all
 from modules.search_helper import JWID_BASE, generate_search_terms
 from modules.spotify import is_available as spotify_available, spotify_search_url
-from modules.ui import count_done, inject_css, status_bar, style_status
+from modules.ui import count_done, inject_css, status_bar, status_mark
 
 # =====================================================================
 # アプリ設定
@@ -221,6 +221,34 @@ def _apply_clear_on_jcd_change(row_idx: int, new_jcd: str) -> None:
                 songs.at[row_idx, col] = ""
 
 
+def _pick_shinkok_row(state: dict) -> None:
+    """申告フォーマットの「選択」欄を1行だけに保つ。
+
+    st.data_editor には st.dataframe のような行選択が無いので、チェック欄を
+    自前で1列持っている。ただの列なので何行でもチェックできてしまう。
+    そこで新しくチェックされた行だけを残し、他の印は消す。
+
+    消すのは表示用の DataFrame ではなく data_editor が覚えている編集差分の
+    方。ここを直さないと、次に描き直しても前の印が復活してしまう。
+    """
+    edited = state.get("edited_rows") or {}
+    checked = [int(p) for p, ch in edited.items()
+               if isinstance(ch, dict) and ch.get("選択") is True]
+    if not checked and not any(
+            isinstance(ch, dict) and "選択" in ch for ch in edited.values()):
+        return  # チェック欄は触られていない
+
+    prev = st.session_state.get("_shinkok_sel")
+    # 前回と違う行が新しく押された方。無ければ最後に見つかったもの
+    _new = [p for p in checked if p != prev]
+    keep = _new[-1] if _new else (checked[-1] if checked else None)
+
+    for p, ch in edited.items():
+        if isinstance(ch, dict) and "選択" in ch and int(p) != keep:
+            ch["選択"] = False
+    st.session_state["_shinkok_sel"] = keep
+
+
 def _sync_shinkok_to_songs() -> None:
     """申告フォーマット data_editor の編集内容を songs_df へ即時反映するコールバック。
 
@@ -234,6 +262,8 @@ def _sync_shinkok_to_songs() -> None:
     songs: pd.DataFrame | None = st.session_state.get("songs_df")
     if not isinstance(state, dict) or src is None or songs is None:
         return
+
+    _pick_shinkok_row(state)
     if "イベント名" not in src.columns or "イベント名" not in songs.columns:
         return
 
@@ -2808,24 +2838,51 @@ with tabs[0]:
 
             st.caption(
                 f"申告フォーマット：{len(_shinkok_df)} 行 ／ {_shinkok_songs['イベント名'].nunique()} 曲"
-                "　行をクリックして選択 → 下のボタンで補完検索に移動できます。"
-            )
-            _shinkok_view = st.dataframe(
-                # 確認ステータスに色を敷く。色を付けられるのはこの
-                # 閲覧用の表だけで、下の st.data_editor は Styler を
-                # 受け取れない
-                style_status(_shinkok_df[_preview_cols]),
-                use_container_width=True,
-                hide_index=True,
-                height=420,
-                on_select="rerun",
-                selection_mode="single-row",
-                key="shinkok_view",
-                column_config=_SHINKOK_COL_CFG,
+                "　ダブルクリックで直接編集できます（楽曲まとめに自動保存）。"
+                "　左端にチェックを入れると、下に補完検索へ移動するボタンが出ます。"
             )
 
-            # 行選択時：選択曲のナビゲーションボタンを即表示
-            _sel_rows = _shinkok_view.selection.rows if hasattr(_shinkok_view, "selection") else []
+            # 見る・選ぶ・直すを1つの表でまかなう。
+            #
+            # st.data_editor には st.dataframe のような行選択が無いので、
+            # 左端に「選択」というチェック欄を自前で足している。1行だけに
+            # 保つ番は _pick_shinkok_row が持つ。
+            #
+            # 同じ理由で、この表には確認ステータスの色を敷けない
+            # （data_editor は Styler を受け取れない）。色の代わりに、
+            # 隣に段階を表す1文字の「状」列を置く。こちらは編集できない。
+            _shinkok_src = _shinkok_df[_preview_cols].copy()
+            _shinkok_src.insert(0, "状", [
+                status_mark(v) for v in _shinkok_src.get(
+                    "確認ステータス", pd.Series([""] * len(_shinkok_src)))
+            ])
+            _shinkok_src.insert(0, "選択", False)
+            # 表示に使った DataFrame の位置で編集差分が返ってくるので、
+            # 行番号→イベント名 を引けるように控えておく
+            st.session_state["_shinkok_src"] = _shinkok_src
+
+            _SHINKOK_COL_CFG = {
+                **_SHINKOK_COL_CFG,
+                "選択": st.column_config.CheckboxColumn("選択", width="small"),
+                "状":   st.column_config.TextColumn("状", width="small",
+                                                    help="確認ステータスの段階"),
+            }
+            _edited_shinkok = st.data_editor(
+                _shinkok_src,
+                use_container_width=True,
+                hide_index=True,
+                height=460,
+                key="shinkok_editor",
+                column_config=_SHINKOK_COL_CFG,
+                disabled=["状"],
+                on_change=_sync_shinkok_to_songs,
+            )
+
+            # チェックされた行のナビゲーションボタンを即表示
+            _sel_pos = st.session_state.get("_shinkok_sel")
+            _sel_rows = ([_sel_pos]
+                         if isinstance(_sel_pos, int) and 0 <= _sel_pos < len(_shinkok_df)
+                         else [])
             if _sel_rows:
                 _sel_ev = str(_shinkok_df.iloc[_sel_rows[0]].get("イベント名", "")).strip()
                 _smatch2 = (
@@ -2857,36 +2914,25 @@ with tabs[0]:
                     with _gbc4:
                         st.caption(f"📍 **{_name2}** [{_status2}]")
 
-            # 直接編集・CSV ダウンロード
-            with st.expander("✏️ 直接編集 / CSV ダウンロード", expanded=False):
-                st.caption("ダブルクリックで直接編集できます。編集内容は楽曲まとめに自動保存されます。")
-                # コールバックは編集差分（行番号）しか受け取れないので、
-                # 行番号→イベント名 を引くために表示中の DataFrame を渡しておく
-                _shinkok_src = _shinkok_df[_preview_cols]
-                st.session_state["_shinkok_src"] = _shinkok_src
-                _edited_shinkok = st.data_editor(
-                    _shinkok_src,
+            # CSV ダウンロード。「選択」「状」は画面を操作するためだけの
+            # 列なので、書き出す表からは外す
+            _sh_dl_col, _sh_gap = st.columns([2, 3])
+            with _sh_dl_col:
+                _shinkok_out = _edited_shinkok.drop(
+                    columns=[c for c in ("選択", "状")
+                             if c in _edited_shinkok.columns])
+                _shinkok_csv = _shinkok_out.to_csv(index=False, encoding="utf-8-sig")
+                st.download_button(
+                    label="⬇️ 申告フォーマット CSV（編集済み）",
+                    data=_shinkok_csv.encode("utf-8-sig"),
+                    file_name="申告フォーマット.csv",
+                    mime="text/csv",
                     use_container_width=True,
-                    hide_index=True,
-                    height=400,
-                    key="shinkok_editor",
-                    column_config=_SHINKOK_COL_CFG,
-                    on_change=_sync_shinkok_to_songs,
+                    # 書き出した内容とDBの中身がずれないよう、
+                    # ダウンロードと同時に保存する
+                    on_click=_autosave_to_db,
+                    args=("（CSV書き出し時）",),
                 )
-                _sh_dl_col, _sh_gap = st.columns([2, 3])
-                with _sh_dl_col:
-                    _shinkok_csv = _edited_shinkok.to_csv(index=False, encoding="utf-8-sig")
-                    st.download_button(
-                        label="⬇️ 申告フォーマット CSV（編集済み）",
-                        data=_shinkok_csv.encode("utf-8-sig"),
-                        file_name="申告フォーマット.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                        # 書き出した内容とDBの中身がずれないよう、
-                        # ダウンロードと同時に保存する
-                        on_click=_autosave_to_db,
-                        args=("（CSV書き出し時）",),
-                    )
 
 
 # =====================================================================
