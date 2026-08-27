@@ -3671,22 +3671,69 @@ with tabs[0]:
                                 #            CD商品リスト（全件）を取得する
                                 _cds_sr = _cds_client.search(_cds_term)
                                 _cds_hits = _cds_sr.get("results") or [{}]
-                                # アーティスト指定があれば、それに一致する作品を優先する
                                 _cds_ai = _cds_artist_input.strip().lower()
-                                if _cds_ai:
-                                    _cds_hits = [
-                                        h for h in _cds_hits
-                                        if _cds_ai in str(h.get("アーティスト", "")).lower()
-                                    ] or _cds_hits
-                                _cds_first = _cds_hits[0]
-                                _cds_fjcd = str(_cds_first.get("JASRAC作品コード", "")).strip()
-                                if _cds_fjcd:
-                                    _cds_raw = _cds_client.search_cds_by_jasrac(
+
+                                # 候補を「絞る」のではなく「並べ替える」。
+                                #
+                                # 同じ曲が複数の作品コードで登録されていること
+                                # があり、CD を持っているのは収録曲の行、配信
+                                # だけの行は別のコードを持つ、という形になる。
+                                # 収録曲の行はアーティスト欄が空のことが多い
+                                # ので、アーティストで絞ると CD を持つ方が真っ
+                                # 先に消えてしまう（「ゾートロープの光の小人」）。
+                                #
+                                # 欲しいのは CD なので、まず行の種類で並べ、
+                                # 同じ種類の中でアーティストの一致を見る。
+                                # 空欄は「不一致」ではなく「不明」として真ん中。
+                                _CDS_SRC_ORDER = {"収録曲": 0, "作品": 1, "配信曲": 2}
+
+                                def _cds_rank(_h: dict) -> tuple[int, int]:
+                                    _src = _CDS_SRC_ORDER.get(
+                                        str(_h.get("_source_table", "")), 1)
+                                    _a = str(_h.get("アーティスト", "")).strip().lower()
+                                    if not _cds_ai:
+                                        _art = 1
+                                    elif _cds_ai in _a:
+                                        _art = 0
+                                    elif not _a:
+                                        _art = 1
+                                    else:
+                                        _art = 2
+                                    return (_src, _art)
+
+                                _cds_hits = sorted(_cds_hits, key=_cds_rank)
+
+                                # 上から順に引き、CD が見つかった時点で止める。
+                                # 1件目に CD が無くても、別のコードに付いて
+                                # いることがあるため。MINC への負担を考えて
+                                # 3件まで。同じコードは二度引かない
+                                _cds_raw = None
+                                _cds_tried: list[str] = []
+                                for _cds_h in _cds_hits:
+                                    _cds_fjcd = str(_cds_h.get("JASRAC作品コード", "")).strip()
+                                    _cds_fncd = str(_cds_h.get("NexTone管理番号", "")).strip()
+                                    if not _cds_fjcd and not _cds_fncd:
+                                        continue
+                                    _cds_ckey = f"{_cds_fjcd}|{_cds_fncd}"
+                                    if _cds_ckey in _cds_tried:
+                                        continue
+                                    _cds_tried.append(_cds_ckey)
+                                    _cds_try = _cds_client.search_cds_by_jasrac(
                                         _cds_fjcd,
-                                        title=_cds_first.get("作品名", "") or _cds_term,
-                                        ncd=str(_cds_first.get("NexTone管理番号", "")).strip(),
+                                        title=_cds_h.get("作品名", "") or _cds_term,
+                                        ncd=_cds_fncd,
                                     )
-                                else:
+                                    # 最初に引いた結果は、CD が無くても残す。
+                                    # 配信しかない曲は、その配信を出したいため
+                                    if _cds_raw is None:
+                                        _cds_raw = _cds_try
+                                    if _cds_try.get("cds"):
+                                        _cds_raw = _cds_try
+                                        break
+                                    if len(_cds_tried) >= 3:
+                                        break
+
+                                if _cds_raw is None:
                                     _cds_raw = {
                                         "cds": [],
                                         "error": (
