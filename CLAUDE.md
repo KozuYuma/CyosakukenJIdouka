@@ -200,10 +200,19 @@ SPOTIFY_CLIENT_SECRET=xxxxx
 
 ### 優先度: 高
 
+- [ ] **ステップ6: UI構造**（`st.navigation` / `st.Page`）← 次にやること
+- [ ] **本番 Supabase に TSP 台帳を投入**: `python scripts/import_tsp.py <フォルダ>`。
+      10〜30分・約130MB増。入れるまでサーバー側では台帳補完が効かない
+- [ ] **`?sync_minc=` に合言葉**: 受け取り口がログインの前にあり、URL を知って
+      いれば誰でも Cookie を送り込める（共有の Cookie を壊せる）
+- [ ] **migration 管理の方針決め**: 今は `init_db()` の冪等 DDL だけ。版番号も
+      戻す手段もドリフト検知も無い。`schema_version` 表か Alembic か
 - [ ] **MINC ログインセッション UI**: メール入力欄が空のとき `.env` の値を使うことの確認・ドキュメント化
-- [ ] **Git ブランチ & GitHub push**: 今セッションの変更をコミット・プッシュ
 
 ### 優先度: 中
+
+- [ ] **`song_master.make_keys` の `endswith` 判定**: `cd_master.keys_of` で直した
+      のと同じ穴が残っている。直すと既存のキーが変わるので要判断
 
 - [ ] **既存 Excel 再読み込み**: 手入力済みの作曲者・JASRAC コード等を引き継ぐ機能（MVP 外だが要望あり）
 - [ ] **NexTone スクレイパー安定性**: Next.js 製のため内部 API パスが変わると失敗する可能性
@@ -232,8 +241,10 @@ SPOTIFY_CLIENT_SECRET=xxxxx
 
 進め方: 「土台を先、構造を後」。この順で1つずつ進めている。
 **0. UI土台 ✅ / 1. ログイン＋所有者分け ✅ / 2. 共有楽曲データ song_master ✅ /
-3. その管理タブ ← 次 / 4. TSP CD 取り込み / 5. Render デプロイ /
-6. UI構造（st.navigation）**
+3. その管理タブ ✅ / 4. TSP CD 取り込み ✅（本番への投入はまだ） /
+5. Render デプロイ ✅ / 6. UI構造（st.navigation）← 次**
+
+**公開先: <https://cyosakuken-app.onrender.com>（`master` に push すると自動で配られる）**
 
 - **ステップ0: UI土台**（`3cc2c77`）
   - `.streamlit/config.toml` … 明暗テーマ一式。アクセントは藍 `#2F4B8F`。
@@ -324,6 +335,82 @@ SPOTIFY_CLIENT_SECRET=xxxxx
   - イベント名に `1khz` が入る基準信号の行は落とす
   - 手元の Cue 4本で確認。`Cue2_楽曲情報付き.csv` は 47件→42件（見出し5件が
     消えた）、他の3本は結果が変わらないこと
+
+- **ステップ3: 共有楽曲データの管理タブ**（`7d9f07b`）
+  - 🗃️ タブで中身を見る・直す・消す。出典と更新時刻も出す
+  - 検証は3段構え（SQLite の単体・本番 Supabase への往復・AppTest で
+    空のときと入っているときの2画面）
+  - **AppTest の落とし穴**: ログインが通ると `auth.py` が `login_password` を
+    捨てて再実行するが、AppTest の部品表にはログイン欄が残ったままなので、
+    次の `.run()` が `KeyError: login_id` で落ちる。試験では
+    `APP_USERS=""` にしてログイン画面を出さないこと
+  - `describe_backend()` が `sqlite:///` を渡しても既定のパスを出していたのを
+    修正。試験で別の DB を指したのに気づけず、手元の DB を汚したかと
+    誤解する元になる
+
+- **ステップ4: 自社CD台帳（TSP 36万曲）**（`eaa3980`）
+  - `cd_master` テーブル（読み取り専用）＋ `modules/tsp_import.py` ＋
+    `scripts/import_tsp.py` ＋ `modules/cd_master.py`
+  - **`song_master` に混ぜない**。人が育てる表と、丸ごと入れ替える資料は
+    役割が違う。JSON にせず普通の列にしてある（手元の SQLite で 97MB）
+  - **当てるのは管理番号だけ。曲名では当てない**。「トラック番号＋曲名」は
+    台帳の中で1万3千種類も重なっており、別の盤の曲を掴む
+  - 盤番号だけの古い形にはトラック番号を足した候補も投げる。
+    **「末尾が一致するか」で判断してはいけない**（`1AN-001` ＋ トラック
+    `01` が漏れる）。候補を全部投げて、台帳にあった方を採る
+  - **`song_master.make_keys` には同じ穴が残っている**（`endswith` 判定）。
+    直すと既に貯めたキーが変わるので、意図的に触っていない
+  - 埋まり方: アーティスト・CD名 100% / 曲名・CD番号・レコード会社 99% /
+    作曲者 98% / **JASRAC作品コード 64%**（残りはメドレー等でコードが無い）
+  - 照合の順は 共有楽曲データ → 台帳。人が直した値を先に入れさせる
+  - **本番 Supabase への投入はまだ**（`python scripts/import_tsp.py <フォルダ>`。
+    10〜30分・約130MB増）
+
+- **ステップ5: Render デプロイ**（`db7344f`, `e0922ec`）
+  - 手順は `docs/Renderデプロイ手順.md`。`render.yaml` は使わない
+    （画面から GitHub リポジトリを繋ぐ方式）
+  - `.python-version` に `3.14`
+  - Start Command は `$PORT` と `0.0.0.0` と `--server.headless true` が要る。
+    Health Check Path は `/_stcore/health`
+  - 秘密（`DATABASE_URL` / `APP_USERS`）は Render の画面にだけ入れる。
+    **`APP_USERS` を入れ忘れると誰でも入れる状態で公開される**
+  - `IS_LOCAL_WINDOWS = os.name == "nt"` で手元専用の機能を止める。
+    MINC ログイン・Chrome 同期のボタンは無効化して理由を出し、
+    フォルダスキャンは先に案内を出す。**落とすのではなく理由を出す**
+  - 無料プラン: 15分で寝る（次の1回は起きるのに30〜60秒）・メモリ512MB・
+    **サーバーに書いたファイルは再起動で消える**
+
+- **MINC の Cookie を DB に置いた**（`25252e3`）
+  - MINC は **reCAPTCHA があるので自動ログインできない**。サーバーで
+    Playwright を動かしても解決しない。人が取った Cookie を運ぶしかない
+  - `minc_state` テーブル（`name` / `state` / `updated_at`）。`name` は
+    Cookie ファイルの名前。手元は利用者ごと、サーバーは全員で1つ、という
+    使い分けがそのまま行の分かれ方になる。
+    **裏を返すと、サーバーに同期しても手元のアプリには反映されない**
+  - Render には `MINC_STATE_PATH=/tmp/minc_state.json` を入れてある
+    （既定は `H:\PROGRAM\search_music\auth\state.json` 決め打ちのため）
+  - 保存する2箇所で DB にも入れ、読むときに DB の方が新しければ書き戻す。
+    書き戻したら **mtime を DB の時刻に合わせる**（画面の「45分前」が狂う）
+  - DB が使えなくても例外にしない。ファイルには書けているので今つないで
+    いる人はそのまま使える
+  - 画面の状態表示は再実行のたびに通るので、DB に聞く間隔を60秒空ける。
+    実際に MINC へ繋ぐ直前（`load_client` / `check_session`）だけ `force=True`
+  - **3時間で切れるのは MINC 側の仕様**。貼り直しは無くならない
+  - 再起動しても「接続済み」のままになることを実機で確認済み
+
+- **Chrome 拡張を Render 対応に**（`738e668`）
+  - 同期先を入力欄にした（既定は Render の URL、手元なら `localhost:8501`）。
+    `chrome.storage.local` に覚える
+  - 送る前に `/_stcore/health` を叩いて**最大90秒起こす**。今までは起きる前に
+    タブを閉じて「同期しました」と嘘をついていた
+  - 時間切れのときは成功と出さず「届いたか分からない」と出す
+  - 受け取り口（`?sync_minc=`）は `_save_cookies_to_state` を呼ぶので、
+    **拡張から届いた Cookie も自動で DB に入る**
+  - **受け取り口はログインの前にある**（裏タブがログインを通れないため）。
+    結果として URL を知っている人なら誰でも Cookie を送り込める。
+    合言葉で塞ぐのは今後の課題
+  - 拡張は GitHub からは更新されない。`chrome://extensions` で再読み込みが要る
+  - 実機で同期成功を確認済み（2026-08-27）
 
 **やったこと（session 5）**
 
