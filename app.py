@@ -2253,23 +2253,57 @@ with tabs[0]:
                                 if _artist_matches(_art_known, _mi.get("アーティスト", ""))
                             ]
                             _mf_art_ids = {id(_mi) for _mi in _mf_by_art}
+
+                            # 同じ作品で複数行あるとき、どの行を採るか。
+                            #
+                            # 欲しいのは CD の情報なので、まず「品番のある行
+                            # ＝CD の行」を見る。MINC では CD を持つ収録曲の行
+                            # はアーティスト欄が空のことが多く、アーティスト
+                            # 一致だけで選ぶと、CD を持たない配信曲の行が勝っ
+                            # てしまう（「ゾートロープの光の小人」）。空欄は
+                            # 「不一致」ではなく「不明」として扱う。
+                            #
+                            # ただしアーティストが食い違う行の CD は別の盤な
+                            # ので、それよりは「CD は無いがアーティストが合う
+                            # 行」を採る。間違った盤を書くより空の方がまし。
+                            def _mf_pick_rank(_mi: dict) -> int:
+                                _has_cd = not _is_blank(_mi.get("品番", ""))
+                                _art_ok = id(_mi) in _mf_art_ids
+                                _art_blank = _is_blank(_mi.get("アーティスト", ""))
+                                if _has_cd and _art_ok:
+                                    return 0
+                                if _has_cd and _art_blank:
+                                    return 1
+                                if _art_ok:
+                                    return 2
+                                if _has_cd:
+                                    return 3
+                                return 4
+
+                            def _mf_pick(_cands: list) -> dict | None:
+                                # min は同点なら先に出てきた方を残す（＝元の順）
+                                return min(_cands, key=_mf_pick_rank) if _cands else None
+
                             if _mf_by_comp:
                                 # 作曲者まで一致 → 同名異曲ではないと確認できたので確信度が高い。
-                                # 同じ作品で複数行ある場合はアーティストも一致する行（＝その音源の
-                                # CD）を採る。品番・CD名・レコード会社名が正しい盤のものになる。
-                                _mfr = next(
-                                    (_mi for _mi in _mf_by_comp if id(_mi) in _mf_art_ids),
-                                    _mf_by_comp[0],
-                                )
+                                _mfr = _mf_pick(_mf_by_comp)
                                 _mf_comp_matched = True
                                 _mf_art_matched = id(_mfr) in _mf_art_ids
                             elif _mf_by_art:
                                 # 作曲者が空（ID3タグに無い等）でもアーティストで絞れた場合。
                                 # カバー音源を掴む可能性が残るので作曲者一致より一段弱い扱い。
-                                _mfr = _mf_by_art[0]
-                                _mf_art_matched = True
+                                #
+                                # 選ぶ相手はアーティストが当たった行だけでなく、曲名が
+                                # 一致する行すべてにする。アーティスト欄が空の行は「別人」
+                                # ではなく「不明」で、CD が付いているのはたいていその行
+                                # だからで、当たった行だけを見ると CD を拾えない
+                                _mfr = _mf_pick(_mf_named)
+                                _mf_art_matched = id(_mfr) in _mf_art_ids
+                                if not _mf_art_matched:
+                                    # アーティストで当てた行ではない＝決め手は曲名だけ
+                                    _mf_multi_match = len(_mf_bulk_items) > 1
                             elif _mf_named:
-                                _mfr = _mf_named[0]
+                                _mfr = _mf_pick(_mf_named)
                                 # 曲名一致だけで複数候補から選んだ場合は要確認
                                 _mf_multi_match = len(_mf_bulk_items) > 1
                             if _mfr:
