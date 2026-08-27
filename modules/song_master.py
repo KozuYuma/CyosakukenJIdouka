@@ -25,6 +25,9 @@ from modules.database import (
     master_upsert,
 )
 
+# 人が管理タブで直したときの出典。PROTECTED_RANK なので機械に負けない
+HAND_SRC = "手入力"
+
 # 貯める列。使用形態・確認ステータス・メモは案件ごとに変わるので入れない
 MASTER_FIELDS: tuple[str, ...] = (
     "作曲者",
@@ -271,3 +274,91 @@ def fill(songs_df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
             hit_rows += 1
 
     return df, hit_rows, filled
+
+
+# ─── 管理タブから直す・見る ────────────────────────────
+
+def cell_of(record: dict, col: str) -> dict:
+    """1件の中の1列を {v, src, by} の形で取り出す。無ければ空。"""
+    cell = (record.get("data") or {}).get(col)
+    if isinstance(cell, dict):
+        return {"v": _cell(cell.get("v")),
+                "src": _cell(cell.get("src")),
+                "by": _cell(cell.get("by"))}
+    # 昔の形（値だけ）が入っていても読めるようにしておく
+    return {"v": _cell(cell), "src": "", "by": ""}
+
+
+def edit(record: dict, values: dict, user: str = "") -> int:
+    """管理タブでの手直しを保存する。書いた件数を返す。
+
+    人が直した値は出典を「手入力」にする。これで、あとから機械が
+    調べ直しても上書きされない（merge_data が PROTECTED_RANK で止める）。
+    空にした列はその場から消す。「値が無い」と「空文字が入っている」を
+    分けても得が無いため。
+    """
+    if not record:
+        return 0
+
+    data = dict(record.get("data") or {})
+    changed = False
+    for col in MASTER_FIELDS:
+        if col not in values:
+            continue
+        new = _cell(values.get(col))
+        old = cell_of(record, col)
+        if new == old["v"]:
+            continue
+        if new:
+            data[col] = {"v": new, "src": HAND_SRC, "by": user}
+        else:
+            data.pop(col, None)
+        changed = True
+
+    title = _cell(values.get("曲名")) or _cell(record.get("title"))
+    if title != _cell(record.get("title")):
+        changed = True
+
+    if not changed:
+        return 0
+
+    return master_upsert([{
+        "id": record.get("id"),
+        "mgmt_key": record.get("mgmt_key") or "",
+        "track_key": record.get("track_key") or "",
+        "title": title,
+        "data": data,
+    }])
+
+
+def to_frame(records: list[dict]) -> pd.DataFrame:
+    """一覧に出す表を作る。中身の列は値だけ並べる（出典は編集画面で見る）。"""
+    rows = []
+    for rec in records or []:
+        row = {
+            "id": rec.get("id"),
+            "曲名": _cell(rec.get("title")),
+            "管理番号キー": _cell(rec.get("mgmt_key")),
+            "トラックキー": _cell(rec.get("track_key")),
+            "更新": _cell(rec.get("updated_at")),
+        }
+        for col in MASTER_FIELDS:
+            row[col] = cell_of(rec, col)["v"]
+        rows.append(row)
+
+    cols = ["id", "曲名", "管理番号キー", "トラックキー", "更新",
+            *MASTER_FIELDS]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def sources_of(record: dict) -> str:
+    """「誰が・どの出典で」を1行にまとめる。一覧の説明に使う。"""
+    seen: list[str] = []
+    for col in MASTER_FIELDS:
+        c = cell_of(record, col)
+        if not c["v"] or not c["src"]:
+            continue
+        label = f"{c['src']}（{c['by']}）" if c["by"] else c["src"]
+        if label not in seen:
+            seen.append(label)
+    return " / ".join(seen)

@@ -22,6 +22,7 @@ scripts/migrate_db.py で行う。
 import json
 import os
 import threading
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
@@ -498,6 +499,59 @@ def master_all() -> list[dict]:
         return [_master_row(r) for r in rows]
     except Exception:
         return []
+
+
+def master_search(keyword: str = "", limit: int = 300) -> list[dict]:
+    """曲名・管理番号・中身の文字で探す。空なら新しい順に limit 件。
+
+    件数が増えても全件を読まないよう、DB 側で絞って件数も切る。
+    """
+    limit = max(1, min(int(limit or 300), 2000))
+    kw = str(keyword or "").strip()
+
+    # JSONB はそのままだと LIKE が使えないので文字列にしてから見る
+    data_as_text = "CAST(data AS TEXT)" if is_postgres() else "data"
+    where = ""
+    params: dict = {"lim": limit}
+    if kw:
+        where = (
+            " WHERE title LIKE :kw OR mgmt_key LIKE :kw_id "
+            f"OR track_key LIKE :kw OR {data_as_text} LIKE :kw"
+        )
+        params["kw"] = f"%{kw}%"
+        # 管理番号は記号を抜いた形で入っているので、探す方も揃える
+        params["kw_id"] = f"%{_norm_key(kw)}%"
+
+    try:
+        with get_engine().connect() as conn:
+            rows = conn.execute(text(
+                "SELECT id, mgmt_key, track_key, title, data, updated_at "
+                "FROM song_master" + where +
+                " ORDER BY updated_at DESC LIMIT :lim"
+            ), params).mappings().all()
+        return [_master_row(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _norm_key(value: str) -> str:
+    """管理番号の検索語を、保存してある形（英数字だけ・大文字）に揃える。"""
+    s = unicodedata.normalize("NFKC", str(value or "")).upper()
+    return "".join(ch for ch in s if ch.isalnum())
+
+
+def master_delete(ids) -> int:
+    """共有楽曲データを消す。消した件数を返す。"""
+    wanted = [int(i) for i in (ids or []) if str(i).strip()]
+    if not wanted:
+        return 0
+    sql = text("DELETE FROM song_master WHERE id IN :ids").bindparams(
+        bindparam("ids", expanding=True))
+    try:
+        with get_engine().begin() as conn:
+            return int(conn.execute(sql, {"ids": tuple(wanted)}).rowcount or 0)
+    except Exception:
+        return 0
 
 
 def master_count() -> int:

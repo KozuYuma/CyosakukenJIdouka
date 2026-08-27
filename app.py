@@ -33,13 +33,23 @@ from modules.database import (
     load_events,
     load_songs,
     master_count,
+    master_delete,
+    master_search,
     save_events,
     save_songs,
     set_project_owner,
 )
 from modules.excel_exporter import export_to_excel, build_shinkok_df, _SHINKOK_RENAME
 from modules.matcher import build_song_list
-from modules.song_master import fill as master_fill, save as master_learn
+from modules.song_master import (
+    MASTER_FIELDS,
+    cell_of as master_cell,
+    edit as master_edit,
+    fill as master_fill,
+    save as master_learn,
+    sources_of as master_sources,
+    to_frame as master_frame,
+)
 from modules.musicbrainz import _hms_to_sec, mb_search_url, search_recording
 from modules.musicforest import (
     MusicForestClient,
@@ -1179,6 +1189,7 @@ tabs = st.tabs(
     [
         "📋 申告フォーム作成",
         "📊 イベント一覧",
+        "🗃️ 共有楽曲データ",
     ]
 )
 
@@ -2650,6 +2661,138 @@ with tabs[1]:
                 "アウト時間":   st.column_config.TextColumn("アウト時間", width="small"),
             },
         )
+
+
+# =====================================================================
+# 🗃️ 共有楽曲データ（ステップ3）
+# =====================================================================
+with tabs[2]:
+    st.header("🗃️ 共有楽曲データ")
+    st.caption(
+        "案件をまたいで貯めている楽曲データです。ここで直した値は"
+        "「手入力」として残るので、あとから機械が調べ直しても"
+        "上書きされません。"
+    )
+
+    _total = master_count()
+    if not _total:
+        st.info(
+            "まだ何も貯まっていません。照合して「確定」「作曲者一致」"
+            "「アーティスト一致」になった曲が、保存のときに貯まります。"
+        )
+    else:
+        _c_kw, _c_n = st.columns([4, 1])
+        with _c_kw:
+            _kw = st.text_input(
+                "検索",
+                key="master_kw",
+                placeholder="曲名 / 管理番号 / 作曲者 / アーティスト …",
+                label_visibility="collapsed",
+            )
+        with _c_n:
+            st.markdown(f"全 **{_total}** 曲")
+
+        _LIMIT = 300
+        _recs = master_search(_kw, limit=_LIMIT)
+
+        if not _recs:
+            st.warning("見つかりませんでした。別の言葉で探してください。")
+        else:
+            _view = master_frame(_recs)
+            if len(_recs) >= _LIMIT:
+                # 黙って切らない。全部出ていると思われると困るため
+                st.caption(
+                    f"多いので新しい順に {_LIMIT} 件まで出しています。"
+                    "検索で絞ってください。"
+                )
+
+            _sel = st.dataframe(
+                _view.drop(columns=["id"]),
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="multi-row",
+                key="master_table",
+                column_config={
+                    "曲名":         st.column_config.TextColumn("曲名", width="medium"),
+                    "管理番号キー":  st.column_config.TextColumn("管理番号キー", width="small"),
+                    "トラックキー":  st.column_config.TextColumn("トラックキー", width="small"),
+                    "更新":         st.column_config.TextColumn("更新", width="small"),
+                },
+            )
+
+            _rows = list(_sel.selection.rows) if _sel and _sel.selection else []
+            _ids = [int(_view.iloc[i]["id"]) for i in _rows]
+
+            if not _ids:
+                st.caption("左端をクリックして選ぶと、直したり消したりできます。")
+            else:
+                _by_id = {int(r["id"]): r for r in _recs}
+
+                # ── 直す（1件だけ選んだとき）──────────────────
+                if len(_ids) == 1:
+                    _rec = _by_id[_ids[0]]
+                    _src_line = master_sources(_rec)
+                    with st.expander(
+                        f"✏️ 「{_rec.get('title') or '（曲名なし）'}」を直す",
+                        expanded=True,
+                    ):
+                        st.caption(
+                            f"最終更新: {_rec.get('updated_at') or '—'}"
+                            + (f" ／ 出典: {_src_line}" if _src_line else "")
+                        )
+                        with st.form(f"master_edit_{_ids[0]}"):
+                            _vals = {
+                                "曲名": st.text_input(
+                                    "曲名", value=_rec.get("title") or "",
+                                    key=f"me_title_{_ids[0]}",
+                                )
+                            }
+                            _cols = st.columns(2)
+                            for _i, _f in enumerate(MASTER_FIELDS):
+                                _c = master_cell(_rec, _f)
+                                _help = "まだ何も入っていません"
+                                if _c["v"]:
+                                    _help = f"出典: {_c['src'] or '不明'}"
+                                    if _c["by"]:
+                                        _help += f" ／ 入れた人: {_c['by']}"
+                                with _cols[_i % 2]:
+                                    _vals[_f] = st.text_input(
+                                        _f, value=_c["v"], help=_help,
+                                        key=f"me_{_f}_{_ids[0]}",
+                                    )
+                            _save = st.form_submit_button(
+                                "💾 この曲を保存", type="primary",
+                                use_container_width=True,
+                            )
+                        if _save:
+                            _n = master_edit(_rec, _vals, CURRENT_USER)
+                            if _n:
+                                st.success("✅ 保存しました。")
+                                st.rerun()
+                            else:
+                                st.info("変わったところがありません。")
+
+                # ── 消す ────────────────────────────────────
+                st.divider()
+                st.markdown(f"🗑️ **{len(_ids)} 曲**を選んでいます")
+                _ok = st.checkbox(
+                    "消すと元に戻せません。全員の共有データから消えます。",
+                    key="master_del_ok",
+                )
+                if st.button("🗑️ 選んだ曲を消す", disabled=not _ok,
+                             key="master_del_btn"):
+                    _n = master_delete(_ids)
+                    if _n:
+                        st.success(f"🗑️ {_n} 曲を消しました。")
+                        # 選択が残っていると消えた行を指したままになる。
+                        # 代入ではなく削除にすること。ウィジェットを作った
+                        # あとで代入すると Streamlit が例外を出す
+                        st.session_state.pop("master_table", None)
+                        st.session_state.pop("master_del_ok", None)
+                        st.rerun()
+                    else:
+                        st.error("❌ 消せませんでした。")
 
 
 # =====================================================================
