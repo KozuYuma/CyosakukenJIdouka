@@ -1,15 +1,15 @@
 """
-ログイン。合言葉を人ごとに配る方式。
+ログイン。ID と PASSWORD を人ごとに配る方式。
 
-環境変数 APP_USERS に「名前:合言葉」をカンマ区切りで並べる:
+環境変数 APP_USERS に「ID:PASSWORD」をカンマ区切りで並べる:
 
-    APP_USERS=ゆま:hoge1234,たろう:fuga5678
+    APP_USERS=yuma:hoge1234,taro:fuga5678
 
   * 未設定なら認証しない。手元で動かすときは今までどおり素通りする。
   * 誰がログインしているか分かるので、案件を人ごとに分けられる。
   * 人の入れ替えは環境変数を書き換えるだけ。ユーザー表も登録画面も要らない。
 
-合言葉を .env に書くこと。ソースには絶対に書かない（.env は
+PASSWORD は .env に書くこと。ソースには絶対に書かない（.env は
 .gitignore に入っている）。
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ _STATE_KEY = "_auth_user"
 
 
 def get_users() -> dict[str, str]:
-    """{名前: 合言葉}。APP_USERS が未設定なら空。"""
+    """{ID: PASSWORD}。APP_USERS が未設定なら空。"""
     load_local_env()
     raw = os.environ.get("APP_USERS", "").strip()
     if not raw:
@@ -37,10 +37,10 @@ def get_users() -> dict[str, str]:
     for pair in raw.split(","):
         if ":" not in pair:
             continue
-        name, pw = pair.split(":", 1)
-        name, pw = name.strip(), pw.strip()
-        if name and pw:
-            users[name] = pw
+        user_id, pw = pair.split(":", 1)
+        user_id, pw = user_id.strip(), pw.strip()
+        if user_id and pw:
+            users[user_id] = pw
     return users
 
 
@@ -49,20 +49,21 @@ def is_enabled() -> bool:
     return bool(get_users())
 
 
-def _verify(name: str, password: str) -> bool:
-    """合言葉を確かめる。
+def _verify(user_id: str, password: str) -> bool:
+    """ID と PASSWORD を確かめる。
 
     == ではなく compare_digest を使う。== は先頭から順に比べて違った
-    時点で止まるので、返答の速さの差から合言葉を1文字ずつ言い当てられる。
+    時点で止まるので、返答の速さの差から PASSWORD を1文字ずつ
+    言い当てられる。
     """
-    expected = get_users().get(name)
+    expected = get_users().get(user_id)
     if expected is None:
         return False
     return hmac.compare_digest(expected, password)
 
 
 def current_user() -> str:
-    """ログイン中の名前。認証を使っていなければ LOCAL_USER。"""
+    """ログイン中の ID。認証を使っていなければ LOCAL_USER。"""
     if not is_enabled():
         return LOCAL_USER
     return st.session_state.get(_STATE_KEY) or ""
@@ -70,28 +71,33 @@ def current_user() -> str:
 
 def _login_form() -> None:
     st.title("🎵 著作権調査支援ツール")
-    st.caption("合言葉を入れてください。分からない場合は管理者に聞いてください。")
+    st.caption("ID と PASSWORD を入れてください。"
+               "分からない場合は管理者に聞いてください。")
 
-    names = sorted(get_users())
+    # ID もプルダウンではなく手入力にする。一覧から選ばせると、
+    # ログインしていない人にも全員の ID が見えてしまうため。
     with st.form("login_form"):
-        name = st.selectbox("名前", options=names, key="login_name")
-        pw = st.text_input("合言葉", type="password", key="login_password")
+        user_id = st.text_input("ID", key="login_id",
+                                autocomplete="username")
+        pw = st.text_input("PASSWORD", type="password", key="login_password",
+                           autocomplete="current-password")
         ok = st.form_submit_button("ログイン", type="primary",
                                    use_container_width=True)
     if ok:
-        if _verify(name, pw):
-            st.session_state[_STATE_KEY] = name
-            # 合言葉を session_state に残さない
+        if _verify(user_id.strip(), pw):
+            st.session_state[_STATE_KEY] = user_id.strip()
+            # PASSWORD を session_state に残さない
             st.session_state.pop("login_password", None)
             st.rerun()
         else:
-            st.error("名前か合言葉が違います。")
+            # どちらが違うかは言わない。ID だけ当てられるのを避けるため
+            st.error("ID または PASSWORD が違います。")
 
 
 def require_login() -> str:
     """ログインしていなければログイン画面を出してそこで止める。
 
-    返り値はログイン中の名前。案件の所有者として使う。
+    返り値はログイン中の ID。案件の所有者として使う。
     """
     if not is_enabled():
         return LOCAL_USER

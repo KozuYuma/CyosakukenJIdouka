@@ -1147,7 +1147,7 @@ if "_autosave_msg" in st.session_state:
 # ログアウトは滅多に押さないので、本文を狭めないようサイドバーへ
 if auth_enabled():
     with st.sidebar:
-        st.markdown(f"**{CURRENT_USER}** さんでログイン中")
+        st.markdown(f"ログイン中: **{CURRENT_USER}**")
         logout_button()
 
 tabs = st.tabs(
