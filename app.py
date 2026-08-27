@@ -2167,6 +2167,9 @@ with tabs[0]:
                     )
                 # 直後に rerun するとこの場で出したメッセージは消えるため持ち越す
                 st.session_state["_apply_msg"] = result_msg
+                # 何分もかけて取った結果を取り直さずに済むよう、ここで保存する。
+                # 結果は songs_df に書き込んだだけで、DBにはまだ入っていない
+                _autosave_to_db("（一括検索の完了時）")
                 # 検索が終わったら詳細設定は畳んでよい
                 st.session_state.pop("bulk_search_open", None)
                 st.rerun()
@@ -2337,6 +2340,11 @@ with tabs[0]:
                     f"エラー: {_mb_stats['エラー']}件"
                 )
                 st.info("「楽曲まとめ」タブで結果を確認・修正してください。")
+                # 一括検索と同じ理由でここでも保存する。この後に rerun しない
+                # ので、伝言は持ち越さずその場で出す
+                if _autosave_to_db("（一括補完の完了時）"):
+                    st.info(st.session_state.pop("_autosave_msg"))
+
         # ---- 申告フォーマット プレビュー（提出用・イベント行単位）----
         # 反映ボタン後の成功メッセージ（反映結果の表が見えるようここへ自動スクロール）
         st.markdown('<a id="sec-shinkok"></a>', unsafe_allow_html=True)
