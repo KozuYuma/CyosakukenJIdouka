@@ -12,6 +12,12 @@
       border-radius: 6px; font-size: 13px; cursor: pointer;
     }
     button:hover { background: #1565c0; }
+    label { display: block; font-size: 11px; color: #777; margin-bottom: 4px; }
+    input {
+      display: block; width: 100%; padding: 6px 7px; margin-bottom: 10px;
+      border: 1px solid #ccc; border-radius: 5px;
+      font-size: 12px; box-sizing: border-box;
+    }
     #status { font-size: 12px; margin-top: 10px; min-height: 18px; }
     .ok  { color: #2e7d32; }
     .err { color: #c62828; }
@@ -24,6 +30,10 @@
     著作権自動化アプリに同期します。<br>
     <span style="color:#777">※ 画面は切り替わりません。開いているアプリのタブはそのままです。</span>
   </p>
+  <label for="appUrl">同期先（変えたときだけ書き換える）</label>
+  <input id="appUrl" type="text" spellcheck="false"
+         placeholder="https://cyosakuken-app.onrender.com">
+
   <button id="syncBtn">著作権アプリに同期する</button>
   <div id="status"></div>
 

@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "MINC Session Sync",
-  "version": "1.1",
+  "version": "1.2",
   "description": "minc.or.jp のセッション Cookie を著作権自動化アプリに同期します。",
-  "permissions": ["cookies", "tabs"],
+  "permissions": ["cookies", "tabs", "storage"],
   "host_permissions": [
     "*://*.minc.or.jp/*",
-    "http://localhost/*"
+    "http://localhost/*",
+    "https://*.onrender.com/*"
   ],
   "action": {
     "default_popup": "popup.html",
