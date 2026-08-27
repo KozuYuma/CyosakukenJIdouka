@@ -9,6 +9,7 @@ import json
 import os
 import re
 import threading
+import time
 import unicodedata
 import urllib.parse
 from pathlib import Path
@@ -70,7 +71,13 @@ from modules.pipeline import run_pipeline
 from modules.scraper import search_all
 from modules.search_helper import JWID_BASE, generate_search_terms
 from modules.spotify import is_available as spotify_available, spotify_search_url
-from modules.ui import count_done, inject_css, status_bar, status_mark
+from modules.ui import (
+    STATUS_MARK_LEGEND,
+    count_done,
+    inject_css,
+    status_bar,
+    status_mark,
+)
 
 # =====================================================================
 # アプリ設定
@@ -1207,6 +1214,41 @@ def _autosave_to_db(note: str = "") -> bool:
         return False
 
 
+# 件数を数えるだけの問い合わせを、しばらく使い回す間隔（秒）
+_COUNT_TTL = 60.0
+# 自社CDの台帳は取り込みスクリプトでしか変わらないので、長めでよい
+_CD_COUNT_TTL = 600.0
+
+
+def _cached_count(key: str, fn, ttl: float = _COUNT_TTL) -> int:
+    """件数を数えるだけの問い合わせを、しばらく使い回す。
+
+    この画面はボタンを押すたびに丸ごと動き直す作りなので、素直に数えると
+    1クリックごとにクラウドDBへ往復する（実測 175ミリ秒。しかも上の
+    ステータスバーと管理タブで2回）。件数は目安として出しているだけで、
+    数秒古くても困らない。中身を書き換えたときは _forget_count で捨てる。
+
+    失敗したときは、前に数えた値があればそれを返す（0 に化けて「まだ何も
+    無い」と表示されるのを避けるため）。
+    """
+    box = st.session_state.setdefault("_count_cache", {})
+    hit = box.get(key)
+    now = time.monotonic()
+    if hit and (now - hit[1]) < ttl:
+        return hit[0]
+    try:
+        n = int(fn())
+    except Exception:
+        n = hit[0] if hit else 0
+    box[key] = (n, now)
+    return n
+
+
+def _forget_count(key: str) -> None:
+    """数え直しが要るときに、覚えている件数を捨てる。"""
+    (st.session_state.get("_count_cache") or {}).pop(key, None)
+
+
 def _master_learn() -> int:
     """調べ終わった曲を共有楽曲データに貯める。貯めた曲数を返す。
 
@@ -1218,7 +1260,10 @@ def _master_learn() -> int:
     if _df is None or _df.empty:
         return 0
     try:
-        return master_learn(_df, CURRENT_USER)
+        _n = master_learn(_df, CURRENT_USER)
+        if _n:
+            _forget_count("master")   # 増えた分をすぐ出す
+        return _n
     except Exception as _e:
         st.warning(f"⚠️ 共有楽曲データへの保存に失敗しました: {_e}")
         return 0
@@ -1259,8 +1304,9 @@ _minc_txt, _minc_tone = _minc_state()
 # どちらに繋がっているかだけ出す（接続文字列は秘密なので元から出ない）
 _db_txt = ("クラウド（Supabase）" if describe_backend().startswith("PostgreSQL")
            else "ローカル")
-# 件数を数えるだけの軽いクエリ。失敗しても 0 を返すのでバーは壊れない
-_master_n = master_count()
+# 件数を数えるだけのクエリ。軽そうに見えてクラウドDBへの往復なので、
+# 数えた値をしばらく使い回す
+_master_n = _cached_count("master", master_count)
 
 status_bar(
     "🎵 著作権調査支援ツール",
@@ -2088,7 +2134,9 @@ with tabs[0]:
             )
             target_count = int(target_mask.sum())
             _mf_ok_info, _ = st.session_state.get("mf_auth_state", (False, ""))
-            _sec_per_song = 8 if _mf_ok_info else 5  # MINC使用時は委任者取得も含む
+            # 1曲あたりの目安。3つのサイトを同時に調べるようにした後の実測
+            # （MINCあり 6.0秒／3曲平均）。MINC を使わない分は少し速い
+            _sec_per_song = 6 if _mf_ok_info else 4
             est_min = max(1, round(target_count * _sec_per_song / 60))
 
             _has_composer_info = (
@@ -2850,9 +2898,14 @@ with tabs[0]:
             #
             # 同じ理由で、この表には確認ステータスの色を敷けない
             # （data_editor は Styler を受け取れない）。色の代わりに、
-            # 隣に段階を表す1文字の「状」列を置く。こちらは編集できない。
+            # 隣に段階を表す1文字の「状態」列を置く。こちらは編集できない。
+            #
+            # 印の意味は見出しに添える。表のセル1つ1つに説明を出す仕組みは
+            # Streamlit の表には無い（中身が canvas で描かれていて、セルが
+            # HTML の要素になっていないため）。正確な言葉が要るときは、
+            # 同じ表の「確認ステータス」列にそのまま出ている。
             _shinkok_src = _shinkok_df[_preview_cols].copy()
-            _shinkok_src.insert(0, "状", [
+            _shinkok_src.insert(0, "状態", [
                 status_mark(v) for v in _shinkok_src.get(
                     "確認ステータス", pd.Series([""] * len(_shinkok_src)))
             ])
@@ -2864,8 +2917,12 @@ with tabs[0]:
             _SHINKOK_COL_CFG = {
                 **_SHINKOK_COL_CFG,
                 "選択": st.column_config.CheckboxColumn("選択", width="small"),
-                "状":   st.column_config.TextColumn("状", width="small",
-                                                    help="確認ステータスの段階"),
+                "状態": st.column_config.TextColumn(
+                    "状態", width="small",
+                    help="手を入れる必要がある行だけ印が付く。\n\n"
+                         + STATUS_MARK_LEGEND.replace("　", "\n\n")
+                         + "\n\n（確定・一致は印なし）",
+                ),
             }
             _edited_shinkok = st.data_editor(
                 _shinkok_src,
@@ -2874,9 +2931,10 @@ with tabs[0]:
                 height=460,
                 key="shinkok_editor",
                 column_config=_SHINKOK_COL_CFG,
-                disabled=["状"],
+                disabled=["状態"],
                 on_change=_sync_shinkok_to_songs,
             )
+            st.caption(f"状態の印: {STATUS_MARK_LEGEND}　（確定・一致は印なし）")
 
             # チェックされた行のナビゲーションボタンを即表示
             _sel_pos = st.session_state.get("_shinkok_sel")
@@ -2914,12 +2972,12 @@ with tabs[0]:
                     with _gbc4:
                         st.caption(f"📍 **{_name2}** [{_status2}]")
 
-            # CSV ダウンロード。「選択」「状」は画面を操作するためだけの
+            # CSV ダウンロード。「選択」「状態」は画面を操作するためだけの
             # 列なので、書き出す表からは外す
             _sh_dl_col, _sh_gap = st.columns([2, 3])
             with _sh_dl_col:
                 _shinkok_out = _edited_shinkok.drop(
-                    columns=[c for c in ("選択", "状")
+                    columns=[c for c in ("選択", "状態")
                              if c in _edited_shinkok.columns])
                 _shinkok_csv = _shinkok_out.to_csv(index=False, encoding="utf-8-sig")
                 st.download_button(
@@ -3012,14 +3070,14 @@ with tabs[2]:
 
     # 自社CDの台帳（TSP）はここでは直せない読み取り専用の資料。
     # 入っているかどうかだけ分かるようにしておく
-    _cd_total = cd_count()
+    _cd_total = _cached_count("cd", cd_count, _CD_COUNT_TTL)
     if _cd_total:
         st.caption(
             f"💿 自社CDの台帳: {_cd_total:,} 曲（読み取り専用）。"
             "照合のとき、管理番号が一致した曲の空欄をここから埋めます。"
         )
 
-    _total = master_count()
+    _total = _cached_count("master", master_count)
     if not _total:
         st.info(
             "まだ何も貯まっていません。照合して「確定」「作曲者一致」"
@@ -3129,6 +3187,7 @@ with tabs[2]:
                              key="master_del_btn"):
                     _n = master_delete(_ids)
                     if _n:
+                        _forget_count("master")   # 減った分をすぐ出す
                         st.success(f"🗑️ {_n} 曲を消しました。")
                         # 選択が残っていると消えた行を指したままになる。
                         # 代入ではなく削除にすること。ウィジェットを作った
