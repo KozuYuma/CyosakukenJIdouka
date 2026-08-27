@@ -1111,7 +1111,7 @@ with tabs[0]:
 
     # ── プロジェクト管理 ──────────────────────────────────
     with st.expander(
-        "🗄️ プロジェクト管理（DB保存・読み込み）",
+        "🗄️ プロジェクト管理（DB保存・読み込み・マスターDB）",
         expanded=st.session_state.project_id is None,
     ):
         _projects = list_projects()
@@ -1210,6 +1210,51 @@ with tabs[0]:
         else:
             st.info("プロジェクトを作成または読み込むと、DBへの保存が有効になります。")
 
+        st.divider()
+
+        # マスターDB CSV。プロジェクトの読み書きと同じ「既にある情報を
+        # 持ってくる」操作なので、ファイル読み込みではなくここに置く。
+        st.markdown("**📚 マスターDB CSV（任意）**")
+        st.caption(
+            "Access DB などからエクスポートした曲情報 CSV を読み込みます。"
+            "曲名で照合し、JASRAC作品コード・NexTone管理番号・作曲者などを空フィールドに補完します。"
+        )
+        st.caption("列名の例: `曲名`, `JASRAC作品コード`, `NexTone管理番号`, `作曲者`, `作詞者`, `アーティスト`, `CD番号`")
+        master_file = st.file_uploader(
+            "マスターDB CSV を選択（任意）", type=["csv"], key="upload_master_db"
+        )
+        if master_file:
+            try:
+                df, enc = read_csv_auto(master_file)
+                st.session_state.master_db_df = df
+                _detected_title = next((c for c in ["曲名", "タイトル", "作品名"] if c in df.columns), None)
+                if _detected_title:
+                    st.success(f"✅ 読み込み完了（{enc}）: {len(df)} 件  曲名列: 「{_detected_title}」")
+                else:
+                    st.warning(f"⚠️ 読み込みましたが「曲名」「タイトル」「作品名」列が見つかりません。")
+                with st.expander("プレビュー（先頭 5 行）"):
+                    st.dataframe(df.head(5), use_container_width=True)
+            except Exception as e:
+                st.error(f"❌ 読み込みエラー: {e}")
+
+        if st.session_state.master_db_df is not None:
+            _mdb = st.session_state.master_db_df
+            st.info(f"マスターDB: {len(_mdb)} 件読み込み済み")
+            if st.session_state.songs_df is not None:
+                if st.button(
+                    "📚 マスターDBから楽曲まとめに補完",
+                    key="import_master_db_btn",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    _new_songs, _n_upd = _import_master_db(
+                        _mdb, st.session_state.songs_df.copy()
+                    )
+                    st.session_state.songs_df = _new_songs
+                    st.success(f"✅ {_n_upd} 件を補完しました。「楽曲まとめ」タブで確認してください。")
+            else:
+                st.info("「照合実行」後に補完ボタンが表示されます。")
+
     st.divider()
 
     col_left, col_right = st.columns(2)
@@ -1239,237 +1284,9 @@ with tabs[0]:
             except Exception as e:
                 st.error(f"❌ 読み込みエラー: {e}")
 
-    # ---- WAV（フォルダスキャン または CSV アップロード） ----
+    # ---- ② MP3（フォルダスキャン または CSV アップロード） ----
     with col_right:
-        st.subheader("② WAV ファイル一覧（任意）")
-
-        wav_tab_scan, wav_tab_csv = st.tabs(["📂 フォルダをスキャン", "📄 CSV をアップロード"])
-
-        with wav_tab_scan:
-            st.caption("Audio フォルダのパスを貼り付けてスキャンします。PowerShell 不要です。")
-            wav_folder = st.text_input(
-                "WAV フォルダパス",
-                placeholder=r"例: H:\プロジェクト名\Audio",
-                key="wav_folder_path",
-            )
-            wav_recursive = st.checkbox("サブフォルダも含める", value=True, key="wav_recursive")
-            if st.button("🔍 WAV をスキャン", key="scan_wav", use_container_width=True):
-                if not wav_folder:
-                    st.warning("フォルダパスを入力してください。")
-                else:
-                    with st.spinner("スキャン中..."):
-                        try:
-                            from modules.folder_scanner import scan_wav_folder
-                            df = scan_wav_folder(wav_folder, wav_recursive)
-                            if len(df) == 0:
-                                st.warning("WAV ファイルが見つかりませんでした。パスを確認してください。")
-                            else:
-                                st.session_state.wav_df = df
-                                st.success(f"✅ {len(df)} 件の WAV ファイルを検出しました")
-                                with st.expander("プレビュー（先頭 5 行）"):
-                                    st.dataframe(df.head(5), use_container_width=True)
-                        except Exception as e:
-                            st.error(f"❌ エラー: {e}")
-
-        with wav_tab_csv:
-            st.caption("Get-WavList.ps1 で作成した CSV をアップロードします。")
-            wav_file = st.file_uploader(
-                "WAV 一覧 CSV を選択", type=["csv"], key="upload_wav"
-            )
-            if wav_file:
-                try:
-                    df, enc = read_csv_auto(wav_file)
-                    missing = validate_wav_csv(df)
-                    if missing:
-                        st.error(
-                            f"❌ 必須列が不足しています: {missing}\n\n"
-                            f"検出された列: {list(df.columns)}"
-                        )
-                    else:
-                        st.session_state.wav_df = df
-                        st.success(f"✅ 読み込み完了（{enc}）: {len(df)} 件")
-                        with st.expander("プレビュー（先頭 5 行）"):
-                            st.dataframe(df.head(5), use_container_width=True)
-                except Exception as e:
-                    st.error(f"❌ 読み込みエラー: {e}")
-
-        if st.session_state.wav_df is not None:
-            st.info(f"現在の WAV 一覧: {len(st.session_state.wav_df)} 件読み込み済み")
-
-    st.divider()
-
-    # ---- ③ MusicBrainz 自動調査 ----
-    st.subheader("③ MusicBrainz 自動調査（照合実行後に有効）")
-    st.caption(
-        "照合実行後、**曲名** × WAV尺で MusicBrainz を検索し ISRC・アーティストを取得。"
-        " ④ MP3 の作曲者情報が入力済みの場合、J-WID / NexTone の結果を作曲者で絞り込みます。"
-    )
-
-    if st.session_state.songs_df is None:
-        st.info("先に ① Cue CSV を読み込み、照合実行してください。")
-    else:
-        _mb_songs = st.session_state.songs_df
-        _mb_total = len(_mb_songs)
-        _mb_unresolved = _mb_songs[
-            _mb_songs["確認ステータス"].isin(["未調査", "MP3補助確認"])
-        ] if "確認ステータス" in _mb_songs.columns else _mb_songs
-
-        mb_bulk_col1, mb_bulk_col2, mb_bulk_col3 = st.columns(3)
-        with mb_bulk_col1:
-            mb_bulk_target = st.radio(
-                "検索対象",
-                ["未調査のみ", "全曲"],
-                key="mb_bulk_target",
-                horizontal=True,
-            )
-        with mb_bulk_col2:
-            mb_bulk_tol = st.slider("尺の許容誤差(秒)", 5, 60, 15, 5, key="mb_bulk_tol")
-        with mb_bulk_col3:
-            mb_bulk_thresh = st.number_input("MBスコア閾値", 0, 100, 80, 5, key="mb_bulk_thresh")
-
-        mb_bulk_opt1, mb_bulk_opt2 = st.columns(2)
-        with mb_bulk_opt1:
-            _claude_avail = False
-            try:
-                from modules.claude_lookup import is_available as _claude_check
-                _claude_avail = _claude_check()
-            except Exception:
-                pass
-            mb_bulk_use_claude = st.checkbox(
-                "Claude API も使う",
-                value=False,
-                key="mb_bulk_use_claude",
-                disabled=not _claude_avail,
-                help="ANTHROPIC_API_KEY が設定済みのとき有効。CD名・作曲者情報をClaudeに問い合わせます。" if _claude_avail else "ANTHROPIC_API_KEY が未設定です（.env ファイルに設定してください）",
-            )
-        with mb_bulk_opt2:
-            _sp_avail = spotify_available()
-            mb_bulk_use_spotify = st.checkbox(
-                "Spotify API も使う",
-                value=False,
-                key="mb_bulk_use_spotify",
-                disabled=not _sp_avail,
-                help="Spotifyでアーティスト・アルバム・ISRCを取得します。" if _sp_avail else "SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET が未設定です（.env ファイルに設定してください）",
-            )
-
-        _mb_targets = _mb_unresolved if mb_bulk_target == "未調査のみ" else _mb_songs
-        _mb_target_count = len(_mb_targets)
-
-        if st.button(
-            f"🔄 MusicBrainz → J-WID / NexTone 一括実行（{_mb_target_count} 件）",
-            key="mb_bulk_run",
-            type="primary",
-            use_container_width=True,
-            disabled=_mb_target_count == 0,
-        ):
-            _mb_bar = st.progress(0)
-            _mb_status = st.empty()
-            _mb_stats = {"MB命中": 0, "JWID命中": 0, "NexTone命中": 0, "エラー": 0}
-
-            for _mb_i, (_mb_idx, _mb_row) in enumerate(_mb_targets.iterrows()):
-                _mb_name = str(_mb_row.get("イベント名", ""))
-                _mb_status.text(f"[{_mb_i+1}/{_mb_target_count}] {_mb_name[:40]}")
-                _mb_bar.progress((_mb_i + 1) / _mb_target_count)
-                try:
-                    _mb_composer = str(_mb_row.get("作曲者", "")).strip()
-                    if not _mb_composer or _mb_composer.lower() == "nan":
-                        _mb_composer = str(_mb_row.get("アーティスト", "")).strip()
-                    if _mb_composer.lower() == "nan":
-                        _mb_composer = ""
-                    _pip = run_pipeline(
-                        event_name=_mb_name,
-                        wav_full_duration=str(_mb_row.get("WAVフル尺", "")),
-                        wav_detected_title=str(_mb_row.get("WAV検出タイトル", "")),
-                        song_title=str(_mb_row.get("曲名", "")),
-                        composer=_mb_composer,
-                        tolerance_sec=float(mb_bulk_tol),
-                        mb_score_threshold=int(mb_bulk_thresh),
-                        use_claude=bool(mb_bulk_use_claude),
-                        use_spotify=bool(mb_bulk_use_spotify),
-                    )
-                    _mb_best = _pip.get("mb_best")
-                    if _mb_best and _mb_best.get("score", 0) >= int(mb_bulk_thresh):
-                        _mb_stats["MB命中"] += 1
-
-                    # Spotify 結果で補完（MusicBrainz 未取得 or 低スコアのとき）
-                    _sp_best = _pip.get("sp_best")
-                    if _sp_best and not _sp_best.get("error"):
-                        if not st.session_state.songs_df.at[_mb_idx, "アーティスト"] and _sp_best.get("artist"):
-                            st.session_state.songs_df.at[_mb_idx, "アーティスト"] = _sp_best["artist"]
-                        if _sp_best.get("album") and "CD名" in st.session_state.songs_df.columns:
-                            if not st.session_state.songs_df.at[_mb_idx, "CD名"]:
-                                st.session_state.songs_df.at[_mb_idx, "CD名"] = _sp_best["album"]
-
-                    # Claude API 結果で補完（J-WID / MB / Spotify より後に上書きしない）
-                    _cl = _pip.get("claude_result") or {}
-                    if not _cl.get("error") and _cl.get("confidence") in ("high", "medium"):
-                        if _cl.get("artist") and not st.session_state.songs_df.at[_mb_idx, "アーティスト"]:
-                            st.session_state.songs_df.at[_mb_idx, "アーティスト"] = _cl["artist"]
-                        if _cl.get("composer") and not st.session_state.songs_df.at[_mb_idx, "作曲者"]:
-                            st.session_state.songs_df.at[_mb_idx, "作曲者"] = _cl["composer"]
-                        if _cl.get("cd_name") and "CD名" in st.session_state.songs_df.columns:
-                            if not st.session_state.songs_df.at[_mb_idx, "CD名"]:
-                                st.session_state.songs_df.at[_mb_idx, "CD名"] = _cl["cd_name"]
-
-                    _jw = _pip["jwid_results"]
-                    _jw_r = _jw.get("results") or []
-                    _jw_comp_n = _jw.get("composer_matched_count", 0)
-                    # 1件 OR 作曲者一致が1件のみ → 自動適用（results は一致順にソート済み）
-                    if _jw_r and (len(_jw_r) == 1 or _jw_comp_n == 1):
-                        _mb_stats["JWID命中"] += 1
-                        _r = _jw_r[0]
-                        if _r.get("作曲者"):
-                            st.session_state.songs_df.at[_mb_idx, "作曲者"] = _r["作曲者"]
-                        if _r.get("作詞者"):
-                            st.session_state.songs_df.at[_mb_idx, "作詞者"] = _r["作詞者"]
-                        if _r.get("訳詞者"):
-                            st.session_state.songs_df.at[_mb_idx, "訳詞者"] = _r["訳詞者"]
-                        if _r.get("作品コード"):
-                            _pip_jcd = _r["作品コード"]
-                            st.session_state.songs_df.at[_mb_idx, "JASRAC作品コード"] = _pip_jcd
-                            _hy = _infer_houyo(_pip_jcd)
-                            if _hy and not str(st.session_state.songs_df.at[_mb_idx, "邦洋区分"] if "邦洋区分" in st.session_state.songs_df.columns else "").strip():
-                                if "邦洋区分" in st.session_state.songs_df.columns:
-                                    st.session_state.songs_df.at[_mb_idx, "邦洋区分"] = _hy
-                        st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
-                    elif _jw_r:  # 複数候補（絞り込めない）
-                        st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
-
-                    _nt = _pip["nextone_results"]
-                    _nt_r = _nt.get("results") or []
-                    _nt_comp_n = _nt.get("composer_matched_count", 0)
-                    if _nt_r and (len(_nt_r) == 1 or _nt_comp_n == 1):
-                        _mb_stats["NexTone命中"] += 1
-                        _rn = _nt_r[0]
-                        if not st.session_state.songs_df.at[_mb_idx, "作曲者"] and _rn.get("作曲者"):
-                            st.session_state.songs_df.at[_mb_idx, "作曲者"] = _rn["作曲者"]
-                        if _rn.get("管理番号"):
-                            st.session_state.songs_df.at[_mb_idx, "NexTone管理番号"] = _rn["管理番号"]
-                        if st.session_state.songs_df.at[_mb_idx, "確認ステータス"] in ("未調査", "MP3補助確認"):
-                            st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
-                    elif _nt_r:
-                        if st.session_state.songs_df.at[_mb_idx, "確認ステータス"] in ("未調査", "MP3補助確認"):
-                            st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
-                except Exception:
-                    _mb_stats["エラー"] += 1
-
-            _mb_status.empty()
-            _mb_bar.empty()
-            st.success(
-                f"完了！　MB命中: {_mb_stats['MB命中']}件　"
-                f"J-WID: {_mb_stats['JWID命中']}件　"
-                f"NexTone: {_mb_stats['NexTone命中']}件　"
-                f"エラー: {_mb_stats['エラー']}件"
-            )
-            st.info("「楽曲まとめ」タブで結果を確認・修正してください。")
-
-    st.divider()
-
-    col_left2, col_right2 = st.columns(2)
-
-    # ---- MP3（フォルダスキャン または CSV アップロード） ----
-    with col_left2:
-        st.subheader("④ MP3 ファイル一覧")
+        st.subheader("② MP3 ファイル一覧")
         st.caption("WAV の補助、または WAV なしで作曲者・フル尺などを補完できます。")
 
         mp3_tab_scan, mp3_tab_csv = st.tabs(["📂 フォルダをスキャン", "📄 CSV をアップロード"])
@@ -1556,48 +1373,63 @@ with tabs[0]:
                 else:
                     st.info("「照合実行」後に取り込みボタンが表示されます。")
 
-    # ---- マスターDB CSV ----
-    with col_right2:
-        st.subheader("⑤ マスターDB CSV（任意）")
-        st.caption(
-            "Access DB などからエクスポートした曲情報 CSV を読み込みます。"
-            "曲名で照合し、JASRAC作品コード・NexTone管理番号・作曲者などを空フィールドに補完します。"
+    st.divider()
+
+    # ---- ③ WAV（フォルダスキャン または CSV アップロード） ----
+    st.subheader("③ WAV ファイル一覧（任意）")
+
+    wav_tab_scan, wav_tab_csv = st.tabs(["📂 フォルダをスキャン", "📄 CSV をアップロード"])
+
+    with wav_tab_scan:
+        st.caption("Audio フォルダのパスを貼り付けてスキャンします。PowerShell 不要です。")
+        wav_folder = st.text_input(
+            "WAV フォルダパス",
+            placeholder=r"例: H:\プロジェクト名\Audio",
+            key="wav_folder_path",
         )
-        st.caption("列名の例: `曲名`, `JASRAC作品コード`, `NexTone管理番号`, `作曲者`, `作詞者`, `アーティスト`, `CD番号`")
-        master_file = st.file_uploader(
-            "マスターDB CSV を選択（任意）", type=["csv"], key="upload_master_db"
+        wav_recursive = st.checkbox("サブフォルダも含める", value=True, key="wav_recursive")
+        if st.button("🔍 WAV をスキャン", key="scan_wav", use_container_width=True):
+            if not wav_folder:
+                st.warning("フォルダパスを入力してください。")
+            else:
+                with st.spinner("スキャン中..."):
+                    try:
+                        from modules.folder_scanner import scan_wav_folder
+                        df = scan_wav_folder(wav_folder, wav_recursive)
+                        if len(df) == 0:
+                            st.warning("WAV ファイルが見つかりませんでした。パスを確認してください。")
+                        else:
+                            st.session_state.wav_df = df
+                            st.success(f"✅ {len(df)} 件の WAV ファイルを検出しました")
+                            with st.expander("プレビュー（先頭 5 行）"):
+                                st.dataframe(df.head(5), use_container_width=True)
+                    except Exception as e:
+                        st.error(f"❌ エラー: {e}")
+
+    with wav_tab_csv:
+        st.caption("Get-WavList.ps1 で作成した CSV をアップロードします。")
+        wav_file = st.file_uploader(
+            "WAV 一覧 CSV を選択", type=["csv"], key="upload_wav"
         )
-        if master_file:
+        if wav_file:
             try:
-                df, enc = read_csv_auto(master_file)
-                st.session_state.master_db_df = df
-                _detected_title = next((c for c in ["曲名", "タイトル", "作品名"] if c in df.columns), None)
-                if _detected_title:
-                    st.success(f"✅ 読み込み完了（{enc}）: {len(df)} 件  曲名列: 「{_detected_title}」")
+                df, enc = read_csv_auto(wav_file)
+                missing = validate_wav_csv(df)
+                if missing:
+                    st.error(
+                        f"❌ 必須列が不足しています: {missing}\n\n"
+                        f"検出された列: {list(df.columns)}"
+                    )
                 else:
-                    st.warning(f"⚠️ 読み込みましたが「曲名」「タイトル」「作品名」列が見つかりません。")
-                with st.expander("プレビュー（先頭 5 行）"):
-                    st.dataframe(df.head(5), use_container_width=True)
+                    st.session_state.wav_df = df
+                    st.success(f"✅ 読み込み完了（{enc}）: {len(df)} 件")
+                    with st.expander("プレビュー（先頭 5 行）"):
+                        st.dataframe(df.head(5), use_container_width=True)
             except Exception as e:
                 st.error(f"❌ 読み込みエラー: {e}")
 
-        if st.session_state.master_db_df is not None:
-            _mdb = st.session_state.master_db_df
-            st.info(f"マスターDB: {len(_mdb)} 件読み込み済み")
-            if st.session_state.songs_df is not None:
-                if st.button(
-                    "📚 マスターDBから楽曲まとめに補完",
-                    key="import_master_db_btn",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    _new_songs, _n_upd = _import_master_db(
-                        _mdb, st.session_state.songs_df.copy()
-                    )
-                    st.session_state.songs_df = _new_songs
-                    st.success(f"✅ {_n_upd} 件を補完しました。「楽曲まとめ」タブで確認してください。")
-            else:
-                st.info("「照合実行」後に補完ボタンが表示されます。")
+    if st.session_state.wav_df is not None:
+        st.info(f"現在の WAV 一覧: {len(st.session_state.wav_df)} 件読み込み済み")
 
     st.divider()
 
@@ -2267,6 +2099,172 @@ with tabs[0]:
                 st.session_state.pop("bulk_search_open", None)
                 st.rerun()
 
+        # ---- MusicBrainz / Spotify / Claude 一括補完 ----
+        # 元は「⚙️ ファイル読み込み・設定」にあったが、照合実行後でないと
+        # 動かない機能なので、同じく照合後に使う一括検索の隣へ移した。
+        with st.expander(
+            "🎵 MusicBrainz / Spotify / Claude で一括補完",
+            expanded=False,
+        ):
+            st.caption(
+                "**曲名** × WAV尺で MusicBrainz を検索し ISRC・アーティストを取得します。"
+                " MP3 の作曲者情報が入力済みなら、J-WID / NexTone の結果を作曲者で絞り込みます。"
+            )
+
+            _mb_songs = st.session_state.songs_df
+            _mb_total = len(_mb_songs)
+            _mb_unresolved = _mb_songs[
+                _mb_songs["確認ステータス"].isin(["未調査", "MP3補助確認"])
+            ] if "確認ステータス" in _mb_songs.columns else _mb_songs
+
+            mb_bulk_col1, mb_bulk_col2, mb_bulk_col3 = st.columns(3)
+            with mb_bulk_col1:
+                mb_bulk_target = st.radio(
+                    "検索対象",
+                    ["未調査のみ", "全曲"],
+                    key="mb_bulk_target",
+                    horizontal=True,
+                )
+            with mb_bulk_col2:
+                mb_bulk_tol = st.slider("尺の許容誤差(秒)", 5, 60, 15, 5, key="mb_bulk_tol")
+            with mb_bulk_col3:
+                mb_bulk_thresh = st.number_input("MBスコア閾値", 0, 100, 80, 5, key="mb_bulk_thresh")
+
+            mb_bulk_opt1, mb_bulk_opt2 = st.columns(2)
+            with mb_bulk_opt1:
+                _claude_avail = False
+                try:
+                    from modules.claude_lookup import is_available as _claude_check
+                    _claude_avail = _claude_check()
+                except Exception:
+                    pass
+                mb_bulk_use_claude = st.checkbox(
+                    "Claude API も使う",
+                    value=False,
+                    key="mb_bulk_use_claude",
+                    disabled=not _claude_avail,
+                    help="ANTHROPIC_API_KEY が設定済みのとき有効。CD名・作曲者情報をClaudeに問い合わせます。" if _claude_avail else "ANTHROPIC_API_KEY が未設定です（.env ファイルに設定してください）",
+                )
+            with mb_bulk_opt2:
+                _sp_avail = spotify_available()
+                mb_bulk_use_spotify = st.checkbox(
+                    "Spotify API も使う",
+                    value=False,
+                    key="mb_bulk_use_spotify",
+                    disabled=not _sp_avail,
+                    help="Spotifyでアーティスト・アルバム・ISRCを取得します。" if _sp_avail else "SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET が未設定です（.env ファイルに設定してください）",
+                )
+
+            _mb_targets = _mb_unresolved if mb_bulk_target == "未調査のみ" else _mb_songs
+            _mb_target_count = len(_mb_targets)
+
+            if st.button(
+                f"🔄 MusicBrainz → J-WID / NexTone 一括実行（{_mb_target_count} 件）",
+                key="mb_bulk_run",
+                type="primary",
+                use_container_width=True,
+                disabled=_mb_target_count == 0,
+            ):
+                _mb_bar = st.progress(0)
+                _mb_status = st.empty()
+                _mb_stats = {"MB命中": 0, "JWID命中": 0, "NexTone命中": 0, "エラー": 0}
+
+                for _mb_i, (_mb_idx, _mb_row) in enumerate(_mb_targets.iterrows()):
+                    _mb_name = str(_mb_row.get("イベント名", ""))
+                    _mb_status.text(f"[{_mb_i+1}/{_mb_target_count}] {_mb_name[:40]}")
+                    _mb_bar.progress((_mb_i + 1) / _mb_target_count)
+                    try:
+                        _mb_composer = str(_mb_row.get("作曲者", "")).strip()
+                        if not _mb_composer or _mb_composer.lower() == "nan":
+                            _mb_composer = str(_mb_row.get("アーティスト", "")).strip()
+                        if _mb_composer.lower() == "nan":
+                            _mb_composer = ""
+                        _pip = run_pipeline(
+                            event_name=_mb_name,
+                            wav_full_duration=str(_mb_row.get("WAVフル尺", "")),
+                            wav_detected_title=str(_mb_row.get("WAV検出タイトル", "")),
+                            song_title=str(_mb_row.get("曲名", "")),
+                            composer=_mb_composer,
+                            tolerance_sec=float(mb_bulk_tol),
+                            mb_score_threshold=int(mb_bulk_thresh),
+                            use_claude=bool(mb_bulk_use_claude),
+                            use_spotify=bool(mb_bulk_use_spotify),
+                        )
+                        _mb_best = _pip.get("mb_best")
+                        if _mb_best and _mb_best.get("score", 0) >= int(mb_bulk_thresh):
+                            _mb_stats["MB命中"] += 1
+
+                        # Spotify 結果で補完（MusicBrainz 未取得 or 低スコアのとき）
+                        _sp_best = _pip.get("sp_best")
+                        if _sp_best and not _sp_best.get("error"):
+                            if not st.session_state.songs_df.at[_mb_idx, "アーティスト"] and _sp_best.get("artist"):
+                                st.session_state.songs_df.at[_mb_idx, "アーティスト"] = _sp_best["artist"]
+                            if _sp_best.get("album") and "CD名" in st.session_state.songs_df.columns:
+                                if not st.session_state.songs_df.at[_mb_idx, "CD名"]:
+                                    st.session_state.songs_df.at[_mb_idx, "CD名"] = _sp_best["album"]
+
+                        # Claude API 結果で補完（J-WID / MB / Spotify より後に上書きしない）
+                        _cl = _pip.get("claude_result") or {}
+                        if not _cl.get("error") and _cl.get("confidence") in ("high", "medium"):
+                            if _cl.get("artist") and not st.session_state.songs_df.at[_mb_idx, "アーティスト"]:
+                                st.session_state.songs_df.at[_mb_idx, "アーティスト"] = _cl["artist"]
+                            if _cl.get("composer") and not st.session_state.songs_df.at[_mb_idx, "作曲者"]:
+                                st.session_state.songs_df.at[_mb_idx, "作曲者"] = _cl["composer"]
+                            if _cl.get("cd_name") and "CD名" in st.session_state.songs_df.columns:
+                                if not st.session_state.songs_df.at[_mb_idx, "CD名"]:
+                                    st.session_state.songs_df.at[_mb_idx, "CD名"] = _cl["cd_name"]
+
+                        _jw = _pip["jwid_results"]
+                        _jw_r = _jw.get("results") or []
+                        _jw_comp_n = _jw.get("composer_matched_count", 0)
+                        # 1件 OR 作曲者一致が1件のみ → 自動適用（results は一致順にソート済み）
+                        if _jw_r and (len(_jw_r) == 1 or _jw_comp_n == 1):
+                            _mb_stats["JWID命中"] += 1
+                            _r = _jw_r[0]
+                            if _r.get("作曲者"):
+                                st.session_state.songs_df.at[_mb_idx, "作曲者"] = _r["作曲者"]
+                            if _r.get("作詞者"):
+                                st.session_state.songs_df.at[_mb_idx, "作詞者"] = _r["作詞者"]
+                            if _r.get("訳詞者"):
+                                st.session_state.songs_df.at[_mb_idx, "訳詞者"] = _r["訳詞者"]
+                            if _r.get("作品コード"):
+                                _pip_jcd = _r["作品コード"]
+                                st.session_state.songs_df.at[_mb_idx, "JASRAC作品コード"] = _pip_jcd
+                                _hy = _infer_houyo(_pip_jcd)
+                                if _hy and not str(st.session_state.songs_df.at[_mb_idx, "邦洋区分"] if "邦洋区分" in st.session_state.songs_df.columns else "").strip():
+                                    if "邦洋区分" in st.session_state.songs_df.columns:
+                                        st.session_state.songs_df.at[_mb_idx, "邦洋区分"] = _hy
+                            st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
+                        elif _jw_r:  # 複数候補（絞り込めない）
+                            st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
+
+                        _nt = _pip["nextone_results"]
+                        _nt_r = _nt.get("results") or []
+                        _nt_comp_n = _nt.get("composer_matched_count", 0)
+                        if _nt_r and (len(_nt_r) == 1 or _nt_comp_n == 1):
+                            _mb_stats["NexTone命中"] += 1
+                            _rn = _nt_r[0]
+                            if not st.session_state.songs_df.at[_mb_idx, "作曲者"] and _rn.get("作曲者"):
+                                st.session_state.songs_df.at[_mb_idx, "作曲者"] = _rn["作曲者"]
+                            if _rn.get("管理番号"):
+                                st.session_state.songs_df.at[_mb_idx, "NexTone管理番号"] = _rn["管理番号"]
+                            if st.session_state.songs_df.at[_mb_idx, "確認ステータス"] in ("未調査", "MP3補助確認"):
+                                st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
+                        elif _nt_r:
+                            if st.session_state.songs_df.at[_mb_idx, "確認ステータス"] in ("未調査", "MP3補助確認"):
+                                st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
+                    except Exception:
+                        _mb_stats["エラー"] += 1
+
+                _mb_status.empty()
+                _mb_bar.empty()
+                st.success(
+                    f"完了！　MB命中: {_mb_stats['MB命中']}件　"
+                    f"J-WID: {_mb_stats['JWID命中']}件　"
+                    f"NexTone: {_mb_stats['NexTone命中']}件　"
+                    f"エラー: {_mb_stats['エラー']}件"
+                )
+                st.info("「楽曲まとめ」タブで結果を確認・修正してください。")
         # ---- 申告フォーマット プレビュー（提出用・イベント行単位）----
         # 反映ボタン後の成功メッセージ（反映結果の表が見えるようここへ自動スクロール）
         st.markdown('<a id="sec-shinkok"></a>', unsafe_allow_html=True)
