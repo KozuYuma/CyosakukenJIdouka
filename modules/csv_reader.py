@@ -16,8 +16,66 @@ NUENDOのCue CSVは独自のマルチセクション形式のため専用パー�
       データ行...
 """
 import io
+import unicodedata
+
 import chardet
 import pandas as pd
+
+# ─── 楽曲として拾わないもの ──────────────────────────────
+# NUENDO の書き出しには音楽以外のトラックも入る。トラック名で外す。
+# 部分一致で見るので「マーカートラックリスト」でも「マーカー」でも当たる。
+NON_MUSIC_TRACKS: tuple[str, ...] = (
+    "構成",
+    "ノートパッド",
+    "マーカー",
+    "ビデオ",
+)
+
+# イベント名にこれが入っていたら楽曲ではない。1KHZ-20DB-04 のような
+# 基準信号が各トラックの先頭に入っているため
+NON_MUSIC_EVENTS: tuple[str, ...] = (
+    "1khz",
+)
+
+
+def _norm(value) -> str:
+    """全角半角・大文字小文字・空白の揺れを均した比較用の文字列。"""
+    s = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return "".join(s.split())
+
+
+def is_music_track(name) -> bool:
+    """楽曲を並べるトラックかどうか。M1-1 などは True。"""
+    n = _norm(name)
+    if not n:
+        return True     # トラック名が無い形式は今までどおり全部使う
+    return not any(word in n for word in map(_norm, NON_MUSIC_TRACKS))
+
+
+def is_music_event(name) -> bool:
+    """楽曲のイベントかどうか。基準信号などは False。"""
+    n = _norm(name)
+    return not any(word in n for word in NON_MUSIC_EVENTS)
+
+
+def drop_non_music_events(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """基準信号などのイベント行を落とす。(残った df, 落とした件数)。"""
+    if df is None or df.empty or "イベント名" not in df.columns:
+        return df, 0
+    keep = df["イベント名"].map(is_music_event)
+    dropped = int((~keep).sum())
+    if not dropped:
+        return df, 0
+    return df[keep].reset_index(drop=True), dropped
+
+
+def music_tracks(df: pd.DataFrame) -> tuple[list[str], list[str]]:
+    """Cue の中のトラックを (楽曲用, それ以外) に分ける。"""
+    if df is None or df.empty or "トラック名" not in df.columns:
+        return [], []
+    names = [str(t) for t in df["トラック名"].dropna().unique() if str(t).strip()]
+    return ([t for t in names if is_music_track(t)],
+            [t for t in names if not is_music_track(t)])
 
 
 def detect_encoding(file_bytes: bytes) -> str:
@@ -46,6 +104,16 @@ def _is_cue_header(line: str) -> bool:
     return "イベント名" in line and "ファイル名" in line
 
 
+def _is_spaced_title(value: str) -> bool:
+    """"マ ー カ ー ト ラ ッ ク リ ス ト" のような一文字ずつ空けた見出しか。
+
+    NUENDO はセクションの見出しをこの書き方で出す。全部の塊が一文字
+    なら見出しとみなす。「ノートパッド」のような普通の語は当たらない。
+    """
+    parts = value.split()
+    return len(parts) >= 2 and all(len(p) == 1 for p in parts)
+
+
 def _parse_nuendo_multitrack(text: str, sep: str) -> pd.DataFrame | None:
     """
     NUENDOのマルチトラックCue CSV専用パーサー。
@@ -61,17 +129,41 @@ def _parse_nuendo_multitrack(text: str, sep: str) -> pd.DataFrame | None:
     for line in lines:
         stripped = line.strip()
 
-        # --- トラック名行の検出 ---
-        # 例: "トラック - M1-1"（カンマなし・" - " あり）
-        if " - " in stripped and "," not in stripped:
-            parts = stripped.split(" - ", 1)
-            if len(parts) == 2:
-                candidate = parts[1].strip()
+        # 書き出しによっては全部の行に列数ぶんのカンマが付く。
+        # 例: "トラック - M2-1,,,,,,,,,,"
+        # 末尾の空欄を落としてから見ないと、見出し行をデータ行と
+        # 間違えて「トラック - M2-1」が曲として並んでしまう
+        fields_all = [f.strip() for f in stripped.split(sep)]
+        while fields_all and fields_all[-1] == "":
+            fields_all.pop()
+
+        if not fields_all:
+            continue
+
+        # --- 中身が1つだけの行＝見出し。データ行ではない ---
+        if len(fields_all) == 1:
+            only = fields_all[0]
+
+            # トラック名行。例: "トラック - M1-1"
+            if " - " in only:
+                candidate = only.split(" - ", 1)[1].strip()
                 # スペース区切りのセクションタイトル（文字間にスペース）は除外
                 # 例: "ト ラ ッ ク  リ ス ト" は除外、"M1-1" は採用
-                if len(candidate) > 0 and " " not in candidate.replace("-", ""):
+                if candidate and " " not in candidate.replace("-", ""):
                     current_track = candidate
                     current_headers = None
+                    continue
+
+            # セクション見出し。例: "マ ー カ ー ト ラ ッ ク リ ス ト"
+            # 一文字ずつ空けて書かれるので、そこで見分ける。
+            # 空白を詰めた名前をトラック名にしておけば、あとで
+            # 「マーカー」「ビデオ」として外せる
+            if _is_spaced_title(only):
+                current_track = "".join(only.split())
+                current_headers = None
+                continue
+
+            # 「ノートパッド」のようなトラックの付随情報。曲ではない
             continue
 
         # --- Cueヘッダー行の検出 ---
@@ -81,6 +173,7 @@ def _parse_nuendo_multitrack(text: str, sep: str) -> pd.DataFrame | None:
             continue
 
         # --- データ行の処理 ---
+        # ヘッダーが出る前の行（"構成,2" など）はここに来ない
         if current_headers and stripped and "," in stripped:
             # n_expected 列に合わせて分割（最後の列にカンマが含まれても壊れないよう maxsplit 指定）
             fields = [f.strip() for f in stripped.split(sep, n_expected - 1)]

@@ -25,7 +25,7 @@ import threading
 from pathlib import Path
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Engine
 
 DB_PATH = Path(__file__).parent.parent / "data" / "cyosakuken.db"
@@ -145,6 +145,20 @@ def _ddl() -> list[str]:
                    data       JSONB   NOT NULL,
                    PRIMARY KEY (project_id, row_no)
                )""",
+            # 共有楽曲データ。案件に属さず、全員で使い回す
+            """CREATE TABLE IF NOT EXISTS song_master (
+                   id         SERIAL PRIMARY KEY,
+                   mgmt_key   TEXT NOT NULL DEFAULT '',
+                   track_key  TEXT NOT NULL DEFAULT '',
+                   title      TEXT NOT NULL DEFAULT '',
+                   data       JSONB NOT NULL,
+                   updated_at TIMESTAMPTZ DEFAULT now()
+               )""",
+            # 空文字のキーは一致に使わないので、索引から外して軽くする
+            "CREATE INDEX IF NOT EXISTS ix_song_master_mgmt "
+            "ON song_master (mgmt_key) WHERE mgmt_key <> ''",
+            "CREATE INDEX IF NOT EXISTS ix_song_master_track "
+            "ON song_master (track_key) WHERE track_key <> ''",
         ]
     return [
         """CREATE TABLE IF NOT EXISTS projects (
@@ -167,6 +181,18 @@ def _ddl() -> list[str]:
                data       TEXT    NOT NULL,
                PRIMARY KEY (project_id, row_no)
            )""",
+        """CREATE TABLE IF NOT EXISTS song_master (
+               id         INTEGER PRIMARY KEY AUTOINCREMENT,
+               mgmt_key   TEXT NOT NULL DEFAULT '',
+               track_key  TEXT NOT NULL DEFAULT '',
+               title      TEXT NOT NULL DEFAULT '',
+               data       TEXT NOT NULL,
+               updated_at TEXT DEFAULT (datetime('now','localtime'))
+           )""",
+        "CREATE INDEX IF NOT EXISTS ix_song_master_mgmt "
+        "ON song_master (mgmt_key)",
+        "CREATE INDEX IF NOT EXISTS ix_song_master_track "
+        "ON song_master (track_key)",
     ]
 
 
@@ -383,3 +409,102 @@ def save_events(project_id: int, events_df: pd.DataFrame) -> None:
 def load_events(project_id: int) -> pd.DataFrame | None:
     """DBから events_df を復元する。"""
     return _load_rows("event_rows", project_id)
+
+
+# ─── 共有楽曲データ ──────────────────────────────────────
+# 案件に属さない。全員で貯めて全員で使う。中身の決め方は
+# modules/song_master.py 側にある。ここは出し入れだけ。
+
+def _master_row(r) -> dict:
+    """SELECT の1行を dict にする。data は PostgreSQL なら dict で返る。"""
+    d = dict(r)
+    raw = d.get("data")
+    d["data"] = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+    d["updated_at"] = _as_text(d.get("updated_at"))
+    return d
+
+
+def master_fetch(mgmt_keys: set[str], track_keys: set[str]) -> list[dict]:
+    """どちらかのキーに当たる行を返す。キーが空なら何も返さない。"""
+    mgmt = [k for k in (mgmt_keys or set()) if k]
+    track = [k for k in (track_keys or set()) if k]
+    if not mgmt and not track:
+        return []
+
+    # IN 句は自前で組み立てず、SQLAlchemy の展開に任せる
+    where, params = [], {}
+    if mgmt:
+        where.append("mgmt_key IN :mgmt")
+        params["mgmt"] = tuple(mgmt)
+    if track:
+        where.append("track_key IN :track")
+        params["track"] = tuple(track)
+
+    sql = text(
+        "SELECT id, mgmt_key, track_key, title, data, updated_at "
+        "FROM song_master WHERE " + " OR ".join(where)
+    ).bindparams(*[
+        # tuple をそのまま渡すと1個の値と見なされるので展開を指示する
+        bindparam(k, expanding=True) for k in params
+    ])
+    try:
+        with get_engine().connect() as conn:
+            rows = conn.execute(sql, params).mappings().all()
+        return [_master_row(r) for r in rows]
+    except Exception:
+        return []
+
+
+def master_upsert(records: list[dict]) -> int:
+    """id があれば更新、なければ追加。書いた件数を返す。"""
+    if not records:
+        return 0
+    cast = "CAST(:data AS JSONB)" if is_postgres() else ":data"
+    ins = text(
+        f"INSERT INTO song_master (mgmt_key, track_key, title, data) "
+        f"VALUES (:mgmt_key, :track_key, :title, {cast})"
+    )
+    upd = text(
+        f"UPDATE song_master SET mgmt_key = :mgmt_key, track_key = :track_key, "
+        f"title = :title, data = {cast}, updated_at = {_now_sql()} "
+        f"WHERE id = :id"
+    )
+    n = 0
+    with get_engine().begin() as conn:
+        for rec in records:
+            p = {
+                "mgmt_key": rec.get("mgmt_key") or "",
+                "track_key": rec.get("track_key") or "",
+                "title": rec.get("title") or "",
+                "data": json.dumps(rec.get("data") or {}, ensure_ascii=False,
+                                   default=str, allow_nan=False),
+            }
+            if rec.get("id"):
+                conn.execute(upd, {**p, "id": rec["id"]})
+            else:
+                conn.execute(ins, p)
+            n += 1
+    return n
+
+
+def master_all() -> list[dict]:
+    """全件。管理タブ（ステップ3）で使う。"""
+    try:
+        with get_engine().connect() as conn:
+            rows = conn.execute(text(
+                "SELECT id, mgmt_key, track_key, title, data, updated_at "
+                "FROM song_master ORDER BY updated_at DESC"
+            )).mappings().all()
+        return [_master_row(r) for r in rows]
+    except Exception:
+        return []
+
+
+def master_count() -> int:
+    """貯まっている曲数。"""
+    try:
+        with get_engine().connect() as conn:
+            return int(conn.execute(
+                text("SELECT COUNT(*) FROM song_master")).scalar_one())
+    except Exception:
+        return 0

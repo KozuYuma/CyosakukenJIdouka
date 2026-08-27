@@ -17,6 +17,8 @@ import streamlit.components.v1 as _stc
 
 from modules.auth import current_user, is_enabled as auth_enabled, logout_button, require_login
 from modules.csv_reader import (
+    drop_non_music_events,
+    music_tracks,
     normalize_cue_columns,
     read_csv_auto,
     validate_cue_csv,
@@ -30,12 +32,14 @@ from modules.database import (
     list_projects,
     load_events,
     load_songs,
+    master_count,
     save_events,
     save_songs,
     set_project_owner,
 )
 from modules.excel_exporter import export_to_excel, build_shinkok_df, _SHINKOK_RENAME
 from modules.matcher import build_song_list
+from modules.song_master import fill as master_fill, save as master_learn
 from modules.musicbrainz import _hms_to_sec, mb_search_url, search_recording
 from modules.musicforest import (
     MusicForestClient,
@@ -1094,6 +1098,23 @@ def _autosave_to_db(note: str = "") -> bool:
         return False
 
 
+def _master_learn() -> int:
+    """調べ終わった曲を共有楽曲データに貯める。貯めた曲数を返す。
+
+    貯めるのは「確定」「作曲者一致」「アーティスト一致」の行だけ。
+    要確認や未調査まで貯めると、間違いが全案件に広がってしまう。
+    失敗しても本来の作業は止めない（貯めるのはおまけなので）。
+    """
+    _df = st.session_state.get("songs_df")
+    if _df is None or _df.empty:
+        return 0
+    try:
+        return master_learn(_df, CURRENT_USER)
+    except Exception as _e:
+        st.warning(f"⚠️ 共有楽曲データへの保存に失敗しました: {_e}")
+        return 0
+
+
 # =====================================================================
 # ヘッダー
 # =====================================================================
@@ -1125,6 +1146,8 @@ _minc_txt, _minc_tone = _minc_state()
 # どちらに繋がっているかだけ出す（接続文字列は秘密なので元から出ない）
 _db_txt = ("クラウド（Supabase）" if describe_backend().startswith("PostgreSQL")
            else "ローカル")
+# 件数を数えるだけの軽いクエリ。失敗しても 0 を返すのでバーは壊れない
+_master_n = master_count()
 
 status_bar(
     "🎵 著作権調査支援ツール",
@@ -1136,6 +1159,8 @@ status_bar(
          "" if st.session_state.get("project_id") else "warn"),
         ("保存先", _db_txt, ""),
         ("MINC", _minc_txt, _minc_tone),
+        # 貯まっている共有楽曲データの件数。増えていくのが見えるように出す
+        ("共有楽曲", f"{_master_n} 曲" if _master_n else "", ""),
     ],
     progress=count_done(_bar_songs),
 )
@@ -1273,6 +1298,13 @@ with tabs[0]:
                         save_events(st.session_state.project_id, st.session_state.events_df)
                     n = len(st.session_state.songs_df)
                     st.success(f"✅ {n} 件を保存しました。")
+                    # 手で直して「確定」にしたものが一番強い出典なので、
+                    # ここで貯めるのが共有データにとって一番価値が高い
+                    _learned = _master_learn()
+                    if _learned:
+                        st.info(
+                            f"🗃️ 共有楽曲データに {_learned} 曲を貯めました。"
+                        )
         else:
             st.info("プロジェクトを作成または読み込むと、DBへの保存が有効になります。")
 
@@ -1354,10 +1386,47 @@ with tabs[0]:
                         f"検出された列: {list(df.columns)}"
                     )
                 else:
-                    st.session_state.cue_df = df
                     # 案件を自動で作るときの名前に使う
                     st.session_state.cue_file_name = cue_file.name
+
+                    # 基準信号（1KHZ-20DB-04 など）は楽曲ではないので落とす
+                    df, _dropped_ev = drop_non_music_events(df)
+
+                    # NUENDO の書き出しには「構成」「ノートパッド」のような
+                    # 音楽以外のトラックが混ざる。既定で外しておくが、
+                    # 選択欄には残して戻せるようにする（黙って消さない）。
+                    _music, _other = music_tracks(df)
+                    _tracks = _music + _other
+                    if len(_tracks) > 1:
+                        _use = st.multiselect(
+                            "使うトラック",
+                            options=_tracks,
+                            default=_music,
+                            key="cue_tracks",
+                            help="構成・ノートパッド・マーカー・ビデオの各"
+                                 "トラックは楽曲ではないので既定で外しています。"
+                                 "必要なら選び直せます。",
+                        )
+                        if _use:
+                            df = df[df["トラック名"].isin(_use)].reset_index(
+                                drop=True)
+
+                    st.session_state.cue_df = df
                     st.success(f"✅ 読み込み完了（{enc}）: {len(df)} 件")
+                    if _tracks:
+                        st.caption("使用中のトラック: " + " / ".join(
+                            f"{t}（{int((df['トラック名'] == t).sum())}件）"
+                            for t in _tracks
+                            if (df["トラック名"] == t).any()
+                        ))
+                    _skipped = []
+                    if _other:
+                        _skipped.append("音楽以外のトラック "
+                                        + "・".join(_other))
+                    if _dropped_ev:
+                        _skipped.append(f"基準信号など {_dropped_ev} 件")
+                    if _skipped:
+                        st.caption("除外: " + " ／ ".join(_skipped))
                     with st.expander("プレビュー（先頭 5 行）"):
                         st.dataframe(df.head(5), use_container_width=True)
             except Exception as e:
@@ -1596,12 +1665,6 @@ with tabs[0]:
                     "「🗄️ プロジェクト管理」から手動で作成してください。"
                 )
 
-        # プロジェクトが選択済みなら照合結果を自動保存
-        if st.session_state.project_id:
-            save_songs(st.session_state.project_id, st.session_state.songs_df)
-            save_events(st.session_state.project_id, st.session_state.events_df)
-            st.info(f"💾 プロジェクト「{st.session_state.project_name}」に自動保存しました。")
-
         if st.session_state.get("mp3_is_finder") and st.session_state.mp3_df is not None:
             _auto_songs, _auto_upd = _import_mp3finder_id3(
                 st.session_state.mp3_df,
@@ -1613,6 +1676,27 @@ with tabs[0]:
                     f"💿 MP3 ID3タグ情報（アーティスト・作曲者・アルバム）を"
                     f" {_auto_upd} 件自動補完しました。"
                 )
+
+        # 共有楽曲データで空欄を埋める。誰かが前に調べた曲なら、ここで
+        # もう入る。ID3 の補完より後に置くこと（先に置くと ID3 の値で
+        # 埋まる欄まで共有データを見に行くことになり、無駄が出る）
+        try:
+            _m_df, _m_hits, _m_filled = master_fill(st.session_state.songs_df)
+            if _m_filled:
+                st.session_state.songs_df = _m_df
+                st.success(
+                    f"🗃️ 共有楽曲データから {_m_hits} 曲・{_m_filled} 欄を"
+                    f"自動補完しました。"
+                )
+        except Exception as _e:
+            st.warning(f"⚠️ 共有楽曲データの参照に失敗しました: {_e}")
+
+        # 保存はここまで全部終えてから。以前は照合直後に保存していたので、
+        # ID3 の補完結果が保存されずに消えていた
+        if st.session_state.project_id:
+            save_songs(st.session_state.project_id, st.session_state.songs_df)
+            save_events(st.session_state.project_id, st.session_state.events_df)
+            st.info(f"💾 プロジェクト「{st.session_state.project_name}」に自動保存しました。")
 
 
 # =====================================================================
@@ -2196,6 +2280,13 @@ with tabs[0]:
                 # 何分もかけて取った結果を取り直さずに済むよう、ここで保存する。
                 # 結果は songs_df に書き込んだだけで、DBにはまだ入っていない
                 _autosave_to_db("（一括検索の完了時）")
+                # 調べがついた曲を共有データに貯める。次に同じ曲が来たら
+                # 照合実行の時点で自動的に入る
+                _learned = _master_learn()
+                if _learned:
+                    st.session_state["_apply_msg"] += (
+                        f"  \n🗃️ 共有楽曲データに {_learned} 曲を貯めました。"
+                    )
                 # 検索が終わったら詳細設定は畳んでよい
                 st.session_state.pop("bulk_search_open", None)
                 st.rerun()
@@ -2370,6 +2461,9 @@ with tabs[0]:
                 # ので、伝言は持ち越さずその場で出す
                 if _autosave_to_db("（一括補完の完了時）"):
                     st.info(st.session_state.pop("_autosave_msg"))
+                _learned = _master_learn()
+                if _learned:
+                    st.info(f"🗃️ 共有楽曲データに {_learned} 曲を貯めました。")
 
         # ---- 申告フォーマット プレビュー（提出用・イベント行単位）----
         # 反映ボタン後の成功メッセージ（反映結果の表が見えるようここへ自動スクロール）
