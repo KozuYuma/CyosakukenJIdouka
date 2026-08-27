@@ -10,6 +10,7 @@ import os
 import re
 import unicodedata
 import urllib.parse
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -81,6 +82,13 @@ st.set_page_config(
 
 # 配色・書体は .streamlit/config.toml。ここでは余白と共通部品だけ入れる
 inject_css()
+
+# 手元の Windows で動いているか。サーバー（Render）では False。
+#
+# ブラウザを開く・利用者のフォルダを読む・Chrome の Cookie を読む、と
+# いった機能は手元でしか動かない。サーバーで押されたときに黙って例外を
+# 出すのではなく、なぜ使えないかを画面に出すために使う。
+IS_LOCAL_WINDOWS = os.name == "nt"
 
 # 確認ステータスの選択肢（全画面共通）
 CONFIRM_STATUS_OPTIONS = [
@@ -1455,6 +1463,14 @@ with tabs[0]:
         mp3_tab_csv, mp3_tab_scan = st.tabs(["📄 CSV をアップロード", "📂 フォルダをスキャン"])
 
         with mp3_tab_scan:
+            if not IS_LOCAL_WINDOWS:
+                # サーバーから利用者のパソコンの中は見えない。押しても
+                # 「見つかりません」になるだけなので、先に理由を出す
+                st.info(
+                    "ℹ️ この画面はサーバーで動いているため、お使いのパソコンの"
+                    "フォルダは読めません。「📄 CSV をアップロード」の方を"
+                    "使ってください。"
+                )
             mp3_folder = st.text_input(
                 "MP3 フォルダパス",
                 placeholder=r"例: H:\MP3ライブラリ",
@@ -1545,6 +1561,14 @@ with tabs[0]:
 
     with wav_tab_scan:
         st.caption("Audio フォルダのパスを貼り付けてスキャンします。PowerShell 不要です。")
+        if not IS_LOCAL_WINDOWS:
+            # サーバーから利用者のパソコンの中は見えない。押しても
+            # 「見つかりません」になるだけなので、先に理由を出す
+            st.info(
+                "ℹ️ この画面はサーバーで動いているため、お使いのパソコンの"
+                "フォルダは読めません。「📄 CSV をアップロード」の方を"
+                "使ってください。"
+            )
         wav_folder = st.text_input(
             "WAV フォルダパス",
             placeholder=r"例: H:\プロジェクト名\Audio",
@@ -1766,11 +1790,29 @@ with tabs[0]:
                 )
             with _mc3:
                 st.write("")
-                if st.button("🔑 MINC ログイン", use_container_width=True,
-                             help="Playwright でブラウザを開きます。ログイン後ブラウザを閉じると Cookie が保存されます。"):
+                # ブラウザを開く仕組みなので、手元の Windows でしか動かない。
+                # サーバーで押すと存在しない exe を起動しようとして落ちる
+                if st.button(
+                    "🔑 MINC ログイン",
+                    use_container_width=True,
+                    disabled=not IS_LOCAL_WINDOWS,
+                    help=("Playwright でブラウザを開きます。ログイン後ブラウザを"
+                          "閉じると Cookie が保存されます。"
+                          if IS_LOCAL_WINDOWS else
+                          "この機能は手元のパソコンでしか使えません。"
+                          "サーバーにはブラウザがないためです。"),
+                ):
                     import subprocess, re as _re
                     _login_py = r"H:\PROGRAM\search_music\src\login_browser.py"
                     _python   = r"H:\PROGRAM\search_music\.venv\Scripts\python.exe"
+                    if not Path(_python).is_file():
+                        st.error(
+                            "❌ ログイン用のプログラムが見つかりません。\n\n"
+                            f"探した場所: {_python}\n\n"
+                            "この機能は手元のパソコン（search_music を置いて"
+                            "あるところ）でだけ使えます。"
+                        )
+                        st.stop()
                     _env = os.environ.copy()
                     _mail_val = _minc_mail_input.strip()
                     _pass_val = _minc_pass_input.strip()
@@ -1816,8 +1858,14 @@ with tabs[0]:
             with _sync_col1:
                 with st.expander("方法 B: Chrome を閉じて自動同期"):
                     st.caption("Chrome をすべて終了してから押してください。")
+                    # 手元の Chrome から Cookie を読む仕組みなので、
+                    # サーバーでは読む相手がいない
                     if st.button("🔗 Chromeから自動同期", use_container_width=True,
-                                 key="minc_chrome_sync"):
+                                 key="minc_chrome_sync",
+                                 disabled=not IS_LOCAL_WINDOWS,
+                                 help=None if IS_LOCAL_WINDOWS else
+                                 "この機能は手元のパソコンでしか使えません。"
+                                 "サーバーには Chrome がないためです。"):
                         _sync_ok, _sync_msg = sync_session_from_chrome()
                         if _sync_ok:
                             st.session_state.pop("mf_client", None)
