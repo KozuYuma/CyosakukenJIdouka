@@ -76,11 +76,13 @@ def _login_form() -> None:
 
     # ID もプルダウンではなく手入力にする。一覧から選ばせると、
     # ログインしていない人にも全員の ID が見えてしまうため。
+    #
+    # autocomplete は指定しない。ブラウザの自動入力は欄に文字を表示しても
+    # Streamlit 側に値が届かないことがあり、見た目は埋まっているのに
+    # 「違います」になる。手で打てば確実に届く。
     with st.form("login_form"):
-        user_id = st.text_input("ID", key="login_id",
-                                autocomplete="username")
-        pw = st.text_input("PASSWORD", type="password", key="login_password",
-                           autocomplete="current-password")
+        user_id = st.text_input("ID", key="login_id")
+        pw = st.text_input("PASSWORD", type="password", key="login_password")
         ok = st.form_submit_button("ログイン", type="primary",
                                    use_container_width=True)
     if ok:
@@ -92,6 +94,13 @@ def _login_form() -> None:
         else:
             # どちらが違うかは言わない。ID だけ当てられるのを避けるため
             st.error("ID または PASSWORD が違います。")
+            # 受け取った「文字数」だけ出す。中身は出さないので漏れない。
+            # 欄が埋まって見えるのに 0 文字なら、ブラウザの自動入力が
+            # 表示だけしていて値が届いていない。手で打ち直せば直る。
+            st.caption(
+                f"受け取った内容: ID {len(user_id)} 文字 / "
+                f"PASSWORD {len(pw)} 文字"
+            )
 
 
 def require_login() -> str:
