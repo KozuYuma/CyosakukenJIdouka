@@ -228,6 +228,27 @@ def _apply_clear_on_jcd_change(row_idx: int, new_jcd: str) -> None:
                 songs.at[row_idx, col] = ""
 
 
+def _stale_multi_mask(songs: pd.DataFrame | None):
+    """昔「候補あり」と書かれた行のうち、本当は「複数候補あり」の行を選ぶ。
+
+    一括検索は昔、複数ヒットして自動入力しなかった行にも「候補あり」と
+    書いていた。人がどれか選びに行くべき行なので、今は「複数候補あり」と
+    書く。既に保存されている行はそのままなので、ここで拾って直す。
+
+    見分け方は「何も入っていないこと」。自動入力できた行には作品コードか
+    管理番号（か、少なくとも作曲者・作詞者）が入る。複数ヒットの行は印を
+    付けただけで何も入れていない。取りこぼす方が安全なので、全部空の行に
+    限る（人が手で「候補あり」に戻した行を巻き込まないため）。
+    """
+    if songs is None or songs.empty or "確認ステータス" not in songs.columns:
+        return None
+    mask = songs["確認ステータス"].astype(str).str.strip() == "候補あり"
+    for col in ("JASRAC作品コード", "NexTone管理番号", "作曲者", "作詞者"):
+        if col in songs.columns:
+            mask &= songs[col].astype(str).str.strip().isin(("", "nan", "None"))
+    return mask
+
+
 def _pick_shinkok_row(state: dict) -> None:
     """申告フォーマットの「選択」欄を1行だけに保つ。
 
@@ -2812,8 +2833,10 @@ with tabs[0]:
                                     if "邦洋区分" in st.session_state.songs_df.columns:
                                         st.session_state.songs_df.at[_mb_idx, "邦洋区分"] = _hy
                             st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
-                        elif _jw_r:  # 複数候補（絞り込めない）
-                            st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
+                        elif _jw_r:  # 当たりはあったが絞り込めなかった
+                            # 人がどれか選びに行く先なので、1件だけ当たった
+                            # 行（候補あり）とは分けて書く
+                            st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "複数候補あり"
 
                         _nt = _pip["nextone_results"]
                         _nt_r = _nt.get("results") or []
@@ -2829,7 +2852,7 @@ with tabs[0]:
                                 st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
                         elif _nt_r:
                             if st.session_state.songs_df.at[_mb_idx, "確認ステータス"] in ("未調査", "MP3補助確認"):
-                                st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
+                                st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "複数候補あり"
                     except Exception:
                         _mb_stats["エラー"] += 1
 
@@ -2907,9 +2930,27 @@ with tabs[0]:
             # HTML の要素になっていないため）。正確な言葉が要るときは、
             # 同じ表の「確認ステータス」列にそのまま出ている。
             _shinkok_src = _shinkok_df[_preview_cols].copy()
+            # 管理番号で当たった曲は印を出さない。管理番号は曲ごとに固有の
+            # 番号なので、当たった時点で行き先は決まっている。確認ステータス
+            # 自体は「未調査」のまま（調べたのは番号の照合だけで、権利者の
+            # 確認はまだのため）なので、印だけを消す
+            _numhit_events: set[str] = set()
+            if "WAV照合ステータス" in _shinkok_songs.columns:
+                _numhit_events = set(
+                    _shinkok_songs.loc[
+                        _shinkok_songs["WAV照合ステータス"].astype(str).str.strip()
+                        == "管理番号一致",
+                        "イベント名",
+                    ].astype(str)
+                )
+            _shinkok_status = _shinkok_src.get(
+                "確認ステータス", pd.Series([""] * len(_shinkok_src)))
+            _shinkok_evname = _shinkok_src.get(
+                "イベント名", pd.Series([""] * len(_shinkok_src)))
             _shinkok_src.insert(0, "状態", [
-                status_mark(v) for v in _shinkok_src.get(
-                    "確認ステータス", pd.Series([""] * len(_shinkok_src)))
+                "" if (str(_ev) in _numhit_events
+                       and status_mark(_v) == "・") else status_mark(_v)
+                for _v, _ev in zip(_shinkok_status, _shinkok_evname)
             ])
             _shinkok_src.insert(0, "選択", False)
             # 表示に使った DataFrame の位置で編集差分が返ってくるので、
@@ -2923,7 +2964,8 @@ with tabs[0]:
                     "状態", width="small",
                     help="どれか選ぶ必要がある行だけ印が付く。\n\n"
                          + STATUS_MARK_LEGEND.replace("　", "\n\n")
-                         + "\n\n（確定・一致・候補あり〔1件だけ当たった〕は印なし）",
+                         + "\n\n（確定・一致・候補あり〔1件だけ当たった〕・"
+                           "管理番号で当たった行は印なし）",
                 ),
             }
             _edited_shinkok = st.data_editor(
@@ -2938,8 +2980,42 @@ with tabs[0]:
             )
             st.caption(
                 f"状態の印: {STATUS_MARK_LEGEND}"
-                "　（確定・一致・1件だけ当たった「候補あり」は印なし）"
+                "　（確定・一致・1件だけ当たった「候補あり」・管理番号で"
+                "当たった行は印なし）"
             )
+
+            # 昔の書き方で保存された行の付け直し。
+            # 直す行があるときだけ出す（普段は畳んだ帯すら出さない）。
+            # 勝手に書き換えず、中身を見せてからボタンで直す
+            _stale_mask = _stale_multi_mask(_shinkok_songs)
+            if _stale_mask is not None and int(_stale_mask.sum()):
+                _stale_n = int(_stale_mask.sum())
+                with st.expander(f"🧹 古い「候補あり」を付け直す（{_stale_n} 曲）"):
+                    st.caption(
+                        "一括検索は昔、複数ヒットして自動入力しなかった行にも"
+                        "「候補あり」と書いていました。どれか選びに行くべき行なので、"
+                        "今は「複数候補あり」と書きます。"
+                        "下の行は、何も入っていないので昔の書き方だと分かるものです。"
+                    )
+                    st.dataframe(
+                        _shinkok_songs.loc[
+                            _stale_mask,
+                            [c for c in ("No", "曲名", "アーティスト", "確認ステータス")
+                             if c in _shinkok_songs.columns]
+                        ],
+                        use_container_width=True, hide_index=True, height=200,
+                    )
+                    if st.button(f"「複数候補あり」に付け直す（{_stale_n} 曲）",
+                                 key="shinkok_fix_stale", type="primary"):
+                        st.session_state.songs_df.loc[
+                            _stale_mask, "確認ステータス"] = "複数候補あり"
+                        # 保存できたときだけ伝言を差し替える。失敗した
+                        # ときは _autosave_to_db が入れた警告を残す
+                        if _autosave_to_db("（状態の付け直し）"):
+                            st.session_state["_autosave_msg"] = (
+                                f"{_stale_n} 曲を「複数候補あり」に付け直しました"
+                            )
+                        st.rerun()
 
             # チェックされた行のナビゲーションボタンを即表示
             _sel_pos = st.session_state.get("_shinkok_sel")
