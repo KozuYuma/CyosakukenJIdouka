@@ -180,6 +180,10 @@ def _ddl() -> list[str]:
                    label     TEXT NOT NULL DEFAULT '',
                    jasrac    TEXT NOT NULL DEFAULT ''
                )""",
+            # 作品コードから CD を引くための索引。これが無いと 36万行を
+            # 端から見ることになる。作品コードの無い行は引かないので外す
+            "CREATE INDEX IF NOT EXISTS ix_cd_master_jasrac "
+            "ON cd_master (jasrac) WHERE jasrac <> ''",
             # MINC の Cookie。サーバーでは書いたファイルが再起動で消える
             # ため、DB を置き場所にする。updated_at はファイルの更新時刻
             # （epoch 秒）。どちらが新しいかを比べるのに使う
@@ -235,6 +239,8 @@ def _ddl() -> list[str]:
                label     TEXT NOT NULL DEFAULT '',
                jasrac    TEXT NOT NULL DEFAULT ''
            )""",
+        "CREATE INDEX IF NOT EXISTS ix_cd_master_jasrac "
+        "ON cd_master (jasrac)",
         """CREATE TABLE IF NOT EXISTS minc_state (
                name       TEXT PRIMARY KEY,
                state      TEXT NOT NULL,
@@ -679,6 +685,72 @@ def cd_fetch(mgmt_keys: set[str]) -> list[dict]:
                     conn.execute(sql, {"mgmt": tuple(mgmt)}).mappings().all()]
     except Exception:
         return []
+
+
+def jasrac_variants(code: str) -> list[str]:
+    """作品コードの書き方の揺れを並べる。
+
+    台帳の元データは「237-8679-5」とハイフン入りのことも、
+    「23786795」と数字だけのこともある。どちらで来ても引けるよう、
+    両方の形を作って照合する。8桁でなければ元の形と数字だけの形。
+    """
+    raw = str(code or "").strip()
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if not digits:
+        return []
+    out = [digits]
+    if len(digits) == 8:
+        # JASRAC の作品コードは 3-4-1 桁で区切って表示する
+        out.append(f"{digits[:3]}-{digits[3:7]}-{digits[7:]}")
+    if raw and raw not in out:
+        out.append(raw)
+    return out
+
+
+def cd_fetch_by_jasrac(codes: set[str]) -> dict[str, list[dict]]:
+    """JASRAC作品コードで台帳を引く。
+
+    返すのは「数字だけにしたコード → その作品が入っている台帳の行」。
+    同じ作品が複数の盤に入っていることがあるので、行は並べて返す。
+    品番のある行を先に、その中は管理番号の順にする（毎回同じ順で
+    返るようにするため。呼ぶ側が先頭を採っても揺れない）。
+
+    台帳が空のとき・テーブルがまだ無いときは空を返す。ここで例外を
+    投げると一括検索が丸ごと止まってしまうため。
+    """
+    want: dict[str, str] = {}   # 台帳に問い合わせる形 → 数字だけの形
+    for c in codes or set():
+        digits = "".join(ch for ch in str(c or "") if ch.isdigit())
+        if not digits:
+            continue
+        for v in jasrac_variants(c):
+            want[v] = digits
+    if not want:
+        return {}
+
+    sql = text(
+        f"SELECT {', '.join(CD_COLUMNS)} FROM cd_master "
+        # jasrac <> '' は結果を変えない。PostgreSQL 側の索引が
+        # 「作品コードのある行だけ」なので、条件を揃えて使わせる
+        "WHERE jasrac <> '' AND jasrac IN :codes"
+    ).bindparams(bindparam("codes", expanding=True))
+    try:
+        with get_engine().connect() as conn:
+            rows = [dict(r) for r in
+                    conn.execute(sql, {"codes": tuple(want)}).mappings().all()]
+    except Exception:
+        return {}
+
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        key = want.get(str(r.get("jasrac", "")).strip())
+        if not key:
+            continue
+        out.setdefault(key, []).append(r)
+    for v in out.values():
+        v.sort(key=lambda r: (not str(r.get("cd_no", "")).strip(),
+                              str(r.get("mgmt_key", ""))))
+    return out
 
 
 # ─── MINC の Cookie（minc_state） ──────────────────────────

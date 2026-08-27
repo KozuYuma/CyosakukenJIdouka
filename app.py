@@ -27,6 +27,7 @@ from modules.csv_reader import (
 )
 from modules.database import (
     cd_count,
+    cd_fetch_by_jasrac,
     create_project,
     delete_project,
     describe_backend,
@@ -2126,8 +2127,13 @@ with tabs[0]:
                 stats: dict[str, int] = {
                     "自動入力": 0, "作曲者一致": 0, "アーティスト一致": 0,
                     "作曲者アーティスト一致": 0, "複数候補": 0,
-                    "ヒットなし": 0, "エラー": 0, "MINCエラー": 0
+                    "ヒットなし": 0, "エラー": 0, "MINCエラー": 0,
+                    "台帳CD": 0,
                 }
+                # 自社CD台帳の引き当て結果。同じ作品コードが何度も出て
+                # くるので、1回の実行の中では覚えておいて DB への往復を
+                # 減らす（Supabase は1往復 0.2秒ほどかかる）
+                _cd_ledger_cache: dict[str, list[dict]] = {}
 
                 for i, idx in enumerate(target_indices):
                     row = st.session_state.songs_df.loc[idx]
@@ -2360,6 +2366,43 @@ with tabs[0]:
                             stats["MINCエラー"] += 1
                             stats.setdefault("_minc_last_error", f"{type(_me).__name__}: {_me}")
 
+                    # ---- CD の情報を自社CD台帳（TSP）から埋める ----
+                    #
+                    # MINC に聞き直すと1曲ごとに通信が1回増える（応答は実測
+                    # 0.6〜12秒）。台帳はこちらの DB なので、作品コードさえ
+                    # 分かれば通信なしで品番・CD名・レコード会社名が入る。
+                    # 台帳が空（まだ取り込んでいない）なら何も起きない。
+                    _cd_code = (updates.get("JASRAC作品コード")
+                                or str(row.get("JASRAC作品コード", ""))).strip()
+                    _cd_filled = not _is_blank(
+                        updates.get("CD番号") or row.get("CD番号", ""))
+                    if _cd_code and not _cd_filled:
+                        _cd_dig = "".join(c for c in _cd_code if c.isdigit())
+                        if _cd_dig not in _cd_ledger_cache:
+                            try:
+                                _cd_ledger_cache.update(
+                                    cd_fetch_by_jasrac({_cd_dig})
+                                    or {_cd_dig: []})
+                            except Exception:
+                                _cd_ledger_cache[_cd_dig] = []
+                        _cd_cands = _cd_ledger_cache.get(_cd_dig) or []
+                        # 同じ作品が複数の盤に入っていることがある。手元に
+                        # アーティスト名があれば、それに合う盤を選ぶ
+                        _cd_hit = next(
+                            (_c for _c in _cd_cands
+                             if _artist_matches(_art_known, _c.get("artist", ""))),
+                            _cd_cands[0] if _cd_cands else None,
+                        )
+                        if _cd_hit:
+                            for _col, _key in (("CD番号", "cd_no"),
+                                               ("CD名", "cd_name"),
+                                               ("レコード会社名", "label")):
+                                if _cd_hit.get(_key) and not updates.get(_col) \
+                                        and _is_blank(row.get(_col, "")):
+                                    updates[_col] = _cd_hit[_key]
+                            if updates.get("CD番号"):
+                                stats["台帳CD"] += 1
+
                     # I/V区分 自動判定
                     #   ① MINC の CD情報に I/V 表記があればそれを使う
                     #   ② 無ければ作詞者の有無で判定（作詞者あり→ヴォーカル／なし→インスト）
@@ -2432,6 +2475,8 @@ with tabs[0]:
                        if stats["作曲者一致"] else "")
                     + (f"（うちアーティストのみ一致 {stats['アーティスト一致']} 件）"
                        if stats["アーティスト一致"] else "")
+                    + (f"（うち CD を台帳から {stats['台帳CD']} 件）"
+                       if stats["台帳CD"] else "")
                     + f" ／ 複数候補 {stats['複数候補']} 件 ／ "
                     f"ヒットなし {stats['ヒットなし']} 件"
                 )
