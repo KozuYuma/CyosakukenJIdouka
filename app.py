@@ -25,6 +25,7 @@ from modules.csv_reader import (
     validate_wav_csv,
 )
 from modules.database import (
+    cd_count,
     create_project,
     delete_project,
     describe_backend,
@@ -39,6 +40,7 @@ from modules.database import (
     save_songs,
     set_project_owner,
 )
+from modules.cd_master import fill as cd_fill
 from modules.excel_exporter import export_to_excel, build_shinkok_df, _SHINKOK_RENAME
 from modules.matcher import build_song_list
 from modules.song_master import (
@@ -1702,6 +1704,19 @@ with tabs[0]:
         except Exception as _e:
             st.warning(f"⚠️ 共有楽曲データの参照に失敗しました: {_e}")
 
+        # 自社CDの台帳で、まだ空いている欄を埋める。共有楽曲データより
+        # 後に置くこと。人が手で直した値のほうが強いので、先に入れさせる
+        try:
+            _c_df, _c_hits, _c_filled = cd_fill(st.session_state.songs_df)
+            if _c_filled:
+                st.session_state.songs_df = _c_df
+                st.success(
+                    f"💿 自社CDの台帳から {_c_hits} 曲・{_c_filled} 欄を"
+                    f"自動補完しました。"
+                )
+        except Exception as _e:
+            st.warning(f"⚠️ 自社CDの台帳の参照に失敗しました: {_e}")
+
         # 保存はここまで全部終えてから。以前は照合直後に保存していたので、
         # ID3 の補完結果が保存されずに消えていた
         if st.session_state.project_id:
@@ -2673,6 +2688,15 @@ with tabs[2]:
         "「手入力」として残るので、あとから機械が調べ直しても"
         "上書きされません。"
     )
+
+    # 自社CDの台帳（TSP）はここでは直せない読み取り専用の資料。
+    # 入っているかどうかだけ分かるようにしておく
+    _cd_total = cd_count()
+    if _cd_total:
+        st.caption(
+            f"💿 自社CDの台帳: {_cd_total:,} 曲（読み取り専用）。"
+            "照合のとき、管理番号が一致した曲の空欄をここから埋めます。"
+        )
 
     _total = master_count()
     if not _total:

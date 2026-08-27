@@ -114,6 +114,11 @@ def get_engine() -> Engine:
 def describe_backend() -> str:
     """設定画面などに出す用の説明。接続文字列は秘密なので出さない。"""
     if not is_postgres():
+        url = get_db_url()
+        # 試験で sqlite:/// を直接指定することがある。その場合は
+        # 既定の置き場所ではなく、実際に使うファイルを出す
+        if url.startswith("sqlite"):
+            return f"SQLite（{url.split('///')[-1]}）"
         return f"SQLite（{DB_PATH}）"
     host = get_db_url().split("@")[-1].split("/")[0] if "@" in get_db_url() else "?"
     return f"PostgreSQL（{host}）"
@@ -160,6 +165,21 @@ def _ddl() -> list[str]:
             "ON song_master (mgmt_key) WHERE mgmt_key <> ''",
             "CREATE INDEX IF NOT EXISTS ix_song_master_track "
             "ON song_master (track_key) WHERE track_key <> ''",
+            # 自社CDの台帳（TSP）。人が育てる song_master とは別に持つ。
+            # 元データを丸ごと入れ替えられるよう、JSON にせず普通の列にする
+            """CREATE TABLE IF NOT EXISTS cd_master (
+                   mgmt_key  TEXT PRIMARY KEY,
+                   disc_key  TEXT NOT NULL DEFAULT '',
+                   track_key TEXT NOT NULL DEFAULT '',
+                   track_no  TEXT NOT NULL DEFAULT '',
+                   title     TEXT NOT NULL DEFAULT '',
+                   artist    TEXT NOT NULL DEFAULT '',
+                   composer  TEXT NOT NULL DEFAULT '',
+                   cd_name   TEXT NOT NULL DEFAULT '',
+                   cd_no     TEXT NOT NULL DEFAULT '',
+                   label     TEXT NOT NULL DEFAULT '',
+                   jasrac    TEXT NOT NULL DEFAULT ''
+               )""",
         ]
     return [
         """CREATE TABLE IF NOT EXISTS projects (
@@ -194,6 +214,19 @@ def _ddl() -> list[str]:
         "ON song_master (mgmt_key)",
         "CREATE INDEX IF NOT EXISTS ix_song_master_track "
         "ON song_master (track_key)",
+        """CREATE TABLE IF NOT EXISTS cd_master (
+               mgmt_key  TEXT PRIMARY KEY,
+               disc_key  TEXT NOT NULL DEFAULT '',
+               track_key TEXT NOT NULL DEFAULT '',
+               track_no  TEXT NOT NULL DEFAULT '',
+               title     TEXT NOT NULL DEFAULT '',
+               artist    TEXT NOT NULL DEFAULT '',
+               composer  TEXT NOT NULL DEFAULT '',
+               cd_name   TEXT NOT NULL DEFAULT '',
+               cd_no     TEXT NOT NULL DEFAULT '',
+               label     TEXT NOT NULL DEFAULT '',
+               jasrac    TEXT NOT NULL DEFAULT ''
+           )""",
     ]
 
 
@@ -562,3 +595,74 @@ def master_count() -> int:
                 text("SELECT COUNT(*) FROM song_master")).scalar_one())
     except Exception:
         return 0
+
+
+# ─── 自社CDの台帳（cd_master） ─────────────────────────
+#
+# TSP から書き出した36万曲。人は直さない。元データが更新されたら
+# scripts/import_tsp.py で丸ごと入れ替える。
+
+CD_COLUMNS: tuple[str, ...] = (
+    "mgmt_key", "disc_key", "track_key", "track_no", "title",
+    "artist", "composer", "cd_name", "cd_no", "label", "jasrac",
+)
+
+
+def cd_count() -> int:
+    """台帳に入っている曲数。テーブルがまだ無ければ 0。"""
+    try:
+        with get_engine().connect() as conn:
+            return int(conn.execute(
+                text("SELECT COUNT(*) FROM cd_master")).scalar_one())
+    except Exception:
+        return 0
+
+
+def cd_clear() -> None:
+    """台帳を空にする。入れ替えの前に呼ぶ。"""
+    with get_engine().begin() as conn:
+        conn.execute(text("DELETE FROM cd_master"))
+
+
+def cd_insert(rows: list[dict]) -> int:
+    """台帳に書き込む。同じ管理番号が来たら先に入っていた方を残す。
+
+    元データには同じ固定管理番号が2回出てくることが少しだけある。
+    どちらが正しいか判断できないので、黙って上書きせず先着を残す。
+    """
+    if not rows:
+        return 0
+
+    cols = ", ".join(CD_COLUMNS)
+    vals = ", ".join(f":{c}" for c in CD_COLUMNS)
+    # ON CONFLICT は PostgreSQL でも SQLite でも同じ書き方で通る
+    sql = text(f"INSERT INTO cd_master ({cols}) VALUES ({vals}) "
+               "ON CONFLICT (mgmt_key) DO NOTHING")
+
+    payload = [{c: str(r.get(c) or "") for c in CD_COLUMNS} for r in rows]
+    with get_engine().begin() as conn:
+        conn.execute(sql, payload)
+    return len(payload)
+
+
+def cd_fetch(mgmt_keys: set[str]) -> list[dict]:
+    """管理番号で台帳を引く。
+
+    曲名＋トラック番号では引かない。台帳は36万曲あり、「1曲目・
+    オープニング」のような組み合わせが1万3千種類も重なっているため、
+    曲名で当てると別の盤の曲を掴んでしまう。
+    """
+    mgmt = [k for k in (mgmt_keys or set()) if k]
+    if not mgmt:
+        return []
+
+    sql = text(
+        f"SELECT {', '.join(CD_COLUMNS)} FROM cd_master "
+        "WHERE mgmt_key IN :mgmt"
+    ).bindparams(bindparam("mgmt", expanding=True))
+    try:
+        with get_engine().connect() as conn:
+            return [dict(r) for r in
+                    conn.execute(sql, {"mgmt": tuple(mgmt)}).mappings().all()]
+    except Exception:
+        return []
