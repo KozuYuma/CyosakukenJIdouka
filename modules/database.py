@@ -36,10 +36,21 @@ _engine: Engine | None = None
 
 # ─── 接続 ──────────────────────────────────────────────
 
+_env_loaded = False
+
+
 def _load_local_env() -> None:
-    """開発機の .env を読む。Render 等では環境変数が直接入るので何もしない。"""
-    if os.environ.get("DATABASE_URL"):
+    """開発機の .env を読む。Render 等では環境変数が直接入る。
+
+    以前は DATABASE_URL が既にあれば読まずに戻していたが、.env には
+    ログインの合言葉（APP_USERS）など DB 以外の設定も入るようになった
+    ので、一度だけ全部読むようにした。既にある環境変数は setdefault
+    なので上書きしない（Render 側の設定が .env に負けることはない）。
+    """
+    global _env_loaded
+    if _env_loaded:
         return
+    _env_loaded = True
     for cand in (Path(__file__).parent.parent / ".env",
                  Path(r"H:\PROGRAM\search_music\.env")):
         if not cand.is_file():
@@ -53,6 +64,11 @@ def _load_local_env() -> None:
                 os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
         except Exception:
             continue
+
+
+def load_local_env() -> None:
+    """.env を読む公開版。DB 以外（ログインの合言葉など）でも使う。"""
+    _load_local_env()
 
 
 def get_db_url() -> str:
@@ -111,9 +127,12 @@ def _ddl() -> list[str]:
                    id          SERIAL PRIMARY KEY,
                    name        TEXT NOT NULL,
                    description TEXT DEFAULT '',
+                   owner       TEXT DEFAULT '',
                    created_at  TIMESTAMPTZ DEFAULT now(),
                    updated_at  TIMESTAMPTZ DEFAULT now()
                )""",
+            # 既にテーブルがある場合の追加。IF NOT EXISTS があるので何度でも通る
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner TEXT DEFAULT ''",
             """CREATE TABLE IF NOT EXISTS song_rows (
                    project_id INTEGER NOT NULL,
                    row_no     INTEGER NOT NULL,
@@ -132,6 +151,7 @@ def _ddl() -> list[str]:
                id          INTEGER PRIMARY KEY AUTOINCREMENT,
                name        TEXT NOT NULL,
                description TEXT DEFAULT '',
+               owner       TEXT DEFAULT '',
                created_at  TEXT DEFAULT (datetime('now','localtime')),
                updated_at  TEXT DEFAULT (datetime('now','localtime'))
            )""",
@@ -155,6 +175,18 @@ def init_db() -> None:
     with get_engine().begin() as conn:
         for stmt in _ddl():
             conn.execute(text(stmt))
+
+    if not is_postgres():
+        # SQLite に ADD COLUMN IF NOT EXISTS は無い。既に列があれば
+        # "duplicate column name" で失敗するだけなので、それを握りつぶす。
+        # 失敗しても他の DDL を巻き込まないよう、接続を分けて実行する。
+        try:
+            with get_engine().begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE projects ADD COLUMN owner TEXT DEFAULT ''"
+                ))
+        except Exception:
+            pass
 
 
 def _now_sql() -> str:
@@ -259,37 +291,57 @@ def _as_text(v) -> str:
     return v.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def list_projects() -> list[dict]:
-    """全プロジェクトを更新日時の降順で返す。"""
+def list_projects(owner: str | None = None) -> list[dict]:
+    """プロジェクトを更新日時の降順で返す。
+
+    owner を渡すとその人のものだけを返す。owner が空文字のプロジェクト
+    （所有者を分ける前に作られたもの）は誰のものか分からないので、
+    誰が見ても出す。取りこぼして「消えた」と思われる方が困るため。
+    owner=None（既定）は絞り込みなし。
+    """
+    sql = ("SELECT id, name, description, owner, created_at, updated_at "
+           "FROM projects")
+    params: dict = {}
+    if owner:
+        sql += " WHERE owner = :owner OR owner IS NULL OR owner = ''"
+        params["owner"] = owner
+    sql += " ORDER BY updated_at DESC"
     try:
         with get_engine().connect() as conn:
-            rows = conn.execute(text(
-                "SELECT id, name, description, created_at, updated_at "
-                "FROM projects ORDER BY updated_at DESC"
-            )).mappings().all()
+            rows = conn.execute(text(sql), params).mappings().all()
         out = []
         for r in rows:
             d = dict(r)
             for k in ("created_at", "updated_at"):
                 d[k] = _as_text(d.get(k))
+            d["owner"] = d.get("owner") or ""
             out.append(d)
         return out
     except Exception:
         return []
 
 
-def create_project(name: str, description: str = "") -> int:
+def create_project(name: str, description: str = "", owner: str = "") -> int:
     """新規プロジェクトを作成してIDを返す。"""
-    params = {"name": name.strip(), "description": description.strip()}
+    params = {"name": name.strip(), "description": description.strip(),
+              "owner": (owner or "").strip()}
     with get_engine().begin() as conn:
         if is_postgres():
             return conn.execute(text(
-                "INSERT INTO projects (name, description) "
-                "VALUES (:name, :description) RETURNING id"
+                "INSERT INTO projects (name, description, owner) "
+                "VALUES (:name, :description, :owner) RETURNING id"
             ), params).scalar_one()
         return conn.execute(text(
-            "INSERT INTO projects (name, description) VALUES (:name, :description)"
+            "INSERT INTO projects (name, description, owner) "
+            "VALUES (:name, :description, :owner)"
         ), params).lastrowid
+
+
+def set_project_owner(project_id: int, owner: str) -> None:
+    """所有者を付け替える。所有者が空のまま残ったものを引き取る用。"""
+    with get_engine().begin() as conn:
+        conn.execute(text("UPDATE projects SET owner = :owner WHERE id = :pid"),
+                     {"owner": (owner or "").strip(), "pid": project_id})
 
 
 def delete_project(project_id: int) -> None:

@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as _stc
 
+from modules.auth import current_user, is_enabled as auth_enabled, logout_button, require_login
 from modules.csv_reader import (
     normalize_cue_columns,
     read_csv_auto,
@@ -31,6 +32,7 @@ from modules.database import (
     load_songs,
     save_events,
     save_songs,
+    set_project_owner,
 )
 from modules.excel_exporter import export_to_excel, build_shinkok_df, _SHINKOK_RENAME
 from modules.matcher import build_song_list
@@ -908,6 +910,13 @@ if _sync_param:
     st.query_params.clear()
 
 # =====================================================================
+# ログイン（APP_USERS 未設定なら素通り）
+# =====================================================================
+# Cookie 同期より後に置くこと。Chrome 拡張機能は裏で新しいセッションを
+# 開くので、先に止めると同期が届かなくなる。
+CURRENT_USER = require_login()
+
+# =====================================================================
 # nuendo_mp3_finder CSV ヘルパー
 # =====================================================================
 _MP3FINDER_KEY_COLS = {"イベント名", "ファイル名"}
@@ -1120,6 +1129,8 @@ _db_txt = ("クラウド（Supabase）" if describe_backend().startswith("Postgr
 status_bar(
     "🎵 著作権調査支援ツール",
     [
+        # ログインしていないときは項目ごと出さない（status_bar が空を飛ばす）
+        ("ログイン中", CURRENT_USER if auth_enabled() else "", "ok"),
         # 案件が無いとDBに保存されないので、未選択は「注意」の色で出す
         ("案件", st.session_state.get("project_name") or "未選択（未保存）",
          "" if st.session_state.get("project_id") else "warn"),
@@ -1132,6 +1143,12 @@ status_bar(
 # ダウンロード時の自動保存はコールバックの中で走るので、結果はここで出す
 if "_autosave_msg" in st.session_state:
     st.toast(st.session_state.pop("_autosave_msg"))
+
+# ログアウトは滅多に押さないので、本文を狭めないようサイドバーへ
+if auth_enabled():
+    with st.sidebar:
+        st.markdown(f"**{CURRENT_USER}** さんでログイン中")
+        logout_button()
 
 tabs = st.tabs(
     [
@@ -1154,7 +1171,8 @@ with tabs[0]:
         # 未選択のときは下に警告を出すので、開きっぱなしにしなくてよい。
         expanded=False,
     ):
-        _projects = list_projects()
+        # 自分の案件 ＋ 所有者が空の案件（分ける前に作られたもの）だけ出す
+        _projects = list_projects(CURRENT_USER)
 
         _pm_col1, _pm_col2 = st.columns(2)
 
@@ -1173,7 +1191,8 @@ with tabs[0]:
             )
             if st.button("➕ 新規作成", key="btn_create_project", use_container_width=True):
                 if _new_name.strip():
-                    _pid = create_project(_new_name.strip(), _new_desc.strip())
+                    _pid = create_project(_new_name.strip(), _new_desc.strip(),
+                                          owner=CURRENT_USER)
                     st.session_state.project_id = _pid
                     st.session_state.project_name = _new_name.strip()
                     st.success(f"✅ プロジェクト「{_new_name.strip()}」を作成しました（ID: {_pid}）")
@@ -1185,8 +1204,10 @@ with tabs[0]:
         with _pm_col2:
             st.markdown("**既存プロジェクトを読み込む**")
             if _projects:
+                # 所有者が空のものは印を付ける。読み込むと自分のものになる
                 _proj_labels = [
                     f"[{p['id']}] {p['name']}  （{p['updated_at'][:10]}）"
+                    + ("　🔓 所有者なし" if not p.get("owner") else "")
                     for p in _projects
                 ]
                 _sel_label = st.selectbox(
@@ -1207,6 +1228,11 @@ with tabs[0]:
                             st.session_state.events_df = _loaded_events
                             st.session_state.project_id = _pid
                             st.session_state.project_name = _sel_proj["name"]
+                            # 所有者が空のものは、読み込んだ人のものにする。
+                            # これで所有者を分ける前の案件が自然に片付き、
+                            # 移行用のスクリプトを別に用意しなくて済む。
+                            if not _sel_proj.get("owner"):
+                                set_project_owner(_pid, CURRENT_USER)
                             st.success(
                                 f"✅ 「{_sel_proj['name']}」を読み込みました"
                                 f"（楽曲 {len(_loaded_songs)} 件）"
@@ -1560,7 +1586,7 @@ with tabs[0]:
             _auto_name = _default_project_name()
             try:
                 st.session_state.project_id = create_project(
-                    _auto_name, "照合実行時に自動作成"
+                    _auto_name, "照合実行時に自動作成", owner=CURRENT_USER
                 )
                 st.session_state.project_name = _auto_name
                 st.info(f"🗄️ 案件「{_auto_name}」を自動で作成しました。")
