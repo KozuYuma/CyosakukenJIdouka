@@ -1087,8 +1087,9 @@ _db_txt = ("クラウド（Supabase）" if describe_backend().startswith("Postgr
 status_bar(
     "🎵 著作権調査支援ツール",
     [
-        ("案件", st.session_state.get("project_name") or "未選択",
-         "" if st.session_state.get("project_name") else "off"),
+        # 案件が無いとDBに保存されないので、未選択は「注意」の色で出す
+        ("案件", st.session_state.get("project_name") or "未選択（未保存）",
+         "" if st.session_state.get("project_id") else "warn"),
         ("保存先", _db_txt, ""),
         ("MINC", _minc_txt, _minc_tone),
     ],
@@ -1112,7 +1113,9 @@ with tabs[0]:
     # ── プロジェクト管理 ──────────────────────────────────
     with st.expander(
         "🗄️ プロジェクト管理（DB保存・読み込み・マスターDB）",
-        expanded=st.session_state.project_id is None,
+        # マスターDBも入れて縦に長くなったので、常に畳んでおく。
+        # 未選択のときは下に警告を出すので、開きっぱなしにしなくてよい。
+        expanded=False,
     ):
         _projects = list_projects()
 
@@ -1255,6 +1258,16 @@ with tabs[0]:
             else:
                 st.info("「照合実行」後に補完ボタンが表示されます。")
 
+    # DBへの保存は project_id がある時だけ走る（照合後の自動保存も💾ボタンも）。
+    # 案件を作らずに作業すると再読み込みで全部消えるので、畳んだ状態でも
+    # 気付けるようにここで知らせる。
+    if not st.session_state.project_id:
+        st.warning(
+            "⚠️ 案件が未選択です。このままだと結果は**DBに保存されません**"
+            "（ブラウザを再読み込みすると消えます）。"
+            "上の「🗄️ プロジェクト管理」を開いて、案件を作成または読み込んでください。"
+        )
+
     st.divider()
 
     col_left, col_right = st.columns(2)
@@ -1289,7 +1302,9 @@ with tabs[0]:
         st.subheader("② MP3 ファイル一覧")
         st.caption("WAV の補助、または WAV なしで作曲者・フル尺などを補完できます。")
 
-        mp3_tab_scan, mp3_tab_csv = st.tabs(["📂 フォルダをスキャン", "📄 CSV をアップロード"])
+        # CSV（nuendo_mp3_finder の出力）を使うことがほとんどなので先に置く。
+        # 先頭のタブが初期表示になる。
+        mp3_tab_csv, mp3_tab_scan = st.tabs(["📄 CSV をアップロード", "📂 フォルダをスキャン"])
 
         with mp3_tab_scan:
             mp3_folder = st.text_input(
