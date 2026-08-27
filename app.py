@@ -257,6 +257,28 @@ def _stale_multi_mask(songs: pd.DataFrame | None):
     return mask
 
 
+def _mgmt_missing_mask(songs: pd.DataFrame | None):
+    """放送・配信がまだ入っていない行を選ぶ。JASRAC作品コードがある行だけ。
+
+    管理状況は作品コードで J-WID を引いて取る。コードが無い行は引きようが
+    ないので数に入れない。台帳で当たった行（台帳一致）は J-WID の詳細を
+    引いていないので、ここに並ぶことになる。
+    """
+    if songs is None or songs.empty or "JASRAC作品コード" not in songs.columns:
+        return None
+    blank = ("", "nan", "None")
+    mask = ~songs["JASRAC作品コード"].astype(str).str.strip().isin(blank)
+    missing = None
+    for col in JWID_MGMT_COLS:
+        if col not in songs.columns:
+            continue
+        col_blank = songs[col].astype(str).str.strip().isin(blank)
+        missing = col_blank if missing is None else (missing | col_blank)
+    if missing is None:
+        return None
+    return mask & missing
+
+
 def _pick_shinkok_row(state: dict) -> None:
     """申告フォーマットの「選択」欄を1行だけに保つ。
 
@@ -3045,6 +3067,82 @@ with tabs[0]:
                         st.session_state["_autosave_msg"] = (
                             f"台帳から {_rf_hits} 曲・{_rf_filled} 欄を埋めました"
                         )
+                        st.rerun()
+
+            # 放送・配信を J-WID から引く。
+            #
+            # 表に空欄が見えている、その場で引けるようにする。同じことは
+            # 「書き出し」タブの管理状況 CSV でもできるが、空欄に気づくのは
+            # この表なので、気づいた場所に導線を置く。
+            # 引く行があるときだけ出す
+            _mg_mask = _mgmt_missing_mask(_shinkok_songs)
+            if _mg_mask is not None and int(_mg_mask.sum()):
+                _mg_n = int(_mg_mask.sum())
+                with st.expander(f"📡 放送・配信を J-WID から引く（{_mg_n} 曲）"):
+                    st.caption(
+                        "JASRAC作品コードで J-WID を引いて、放送・配信の管理状況"
+                        "（○△×）を入れます。1曲あたり 1〜2 秒かかります。"
+                        "既に入っている欄は引き直しません。"
+                        "　※管理状況は変わるものなので、共有楽曲データには貯めて"
+                        "いません。最新を知りたいときはここから引き直してください。"
+                    )
+                    st.dataframe(
+                        _shinkok_songs.loc[
+                            _mg_mask,
+                            [c for c in ("No", "曲名", "JASRAC作品コード",
+                                         "確認ステータス", "放送", "配信")
+                             if c in _shinkok_songs.columns]
+                        ],
+                        use_container_width=True, hide_index=True, height=200,
+                    )
+                    if st.button(f"J-WID から引く（{_mg_n} 曲）",
+                                 key="shinkok_fetch_mgmt", type="primary"):
+                        from modules.scraper import (
+                            fetch_jwid_rights_by_code as _fetch_rights)
+                        _mg_songs = st.session_state.songs_df
+                        _mg_idxs = list(_shinkok_songs.index[_mg_mask])
+                        _mg_prog = st.progress(0)
+                        _mg_stat = st.empty()
+                        _mg_cache: dict[str, dict] = {}
+                        _mg_filled = _mg_err = 0
+                        for _mg_i, _mg_idx in enumerate(_mg_idxs):
+                            _mg_code = str(
+                                _mg_songs.at[_mg_idx, "JASRAC作品コード"]).strip()
+                            _mg_name = str(_mg_songs.at[_mg_idx, "曲名"]).strip()
+                            _mg_stat.text(
+                                f"取得中: {_mg_i + 1}/{_mg_n} — {_mg_name}（{_mg_code}）")
+                            # 同じ作品コードの曲が複数あっても引くのは1回
+                            if _mg_code not in _mg_cache:
+                                try:
+                                    _mg_cache[_mg_code] = _fetch_rights(_mg_code)
+                                except Exception as _e:
+                                    _mg_cache[_mg_code] = {"error": str(_e),
+                                                           "管理状況": {}}
+                            _mg_res = _mg_cache[_mg_code]
+                            if _mg_res.get("error"):
+                                _mg_err += 1
+                            _mg_u: dict = {}
+                            _apply_management_status(
+                                _mg_res.get("管理状況") or {}, _mg_u)
+                            for _mg_col, _mg_val in _mg_u.items():
+                                if _mg_col not in _mg_songs.columns:
+                                    continue
+                                # 既に入っている欄は触らない
+                                if str(_mg_songs.at[_mg_idx, _mg_col]).strip():
+                                    continue
+                                _mg_songs.at[_mg_idx, _mg_col] = _mg_val
+                                _mg_filled += 1
+                            _mg_prog.progress((_mg_i + 1) / _mg_n)
+                        _mg_prog.empty()
+                        _mg_stat.empty()
+                        if _mg_err:
+                            st.warning(f"⚠️ {_mg_err} 曲は取得できませんでした。")
+                        if not _mg_filled:
+                            st.info("埋めるものはありませんでした。")
+                        elif _autosave_to_db("（放送・配信の取り込み）"):
+                            st.session_state["_autosave_msg"] = (
+                                f"放送・配信を {_mg_filled} 欄ぶん入れました"
+                            )
                         st.rerun()
 
             # 昔の書き方で保存された行の付け直し。
