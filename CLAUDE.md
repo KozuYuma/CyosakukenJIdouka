@@ -255,8 +255,18 @@ SPOTIFY_CLIENT_SECRET=xxxxx
 - スキーマ変更: 旧 `songs` / `nuendo_events`（列がそのままテーブル列で
   `ALTER TABLE ADD COLUMN` していた）→ 新 `song_rows` / `event_rows`
   （1行 = 1 JSON）。**旧テーブルは残してある**ので戻せる
-- ローカルの実データは移行済み（楽曲 136 行 / 4 プロジェクト）。
+- **Supabase 接続・移行・アプリ動作まで確認済み（2026-08-27）**。
+  リージョンは `ap-northeast-2`（ソウル）、**Session pooler** 接続。
+  Data API は無効のまま（Python から直接 PostgreSQL に繋ぐので不要）
+- ローカルの実データは移行済み（楽曲 136 行 / 9 プロジェクト）。
   移行前のバックアップ: `data/cyosakuken.db.bak_before_migrate`
+- **移行中に見つけて直した SQLite との差** ―― 今後 PostgreSQL 特有の
+  問題が出たらまずここを疑う:
+  - 全行が空の列を pandas が float と見なし、`NaN`（JSON に無い語）を
+    書き出していた → 値ごとに None へ直す `_jsonable()`。
+    `json.dumps(..., allow_nan=False)` で再発時は即例外にする
+  - 日時が SQLite=文字列 / PostgreSQL=datetime で、`app.py:1110` の
+    `p["updated_at"][:10]` が落ちた → `list_projects()` 側で文字列に揃える
 - `scripts/check_db.py` … 接続確認、`scripts/migrate_db.py` … 移行（`--dry-run` あり）
 - 手順書: `docs/Supabase設定手順.md`、雛形: `.env.example`
 
@@ -294,12 +304,8 @@ SPOTIFY_CLIENT_SECRET=xxxxx
 
 **次にやること**
 
-1. **Supabase の続き（ユーザー作業待ち）**
-   - `docs/Supabase設定手順.md` の 1〜3 に従ってプロジェクト作成 →
-     **Session pooler** の接続文字列を `.env` の `DATABASE_URL` に貼る
-     （接続文字列はパスワードそのもの。チャット等に貼らせないこと）
-   - `scripts/check_db.py` で疎通 → `migrate_db.py --from-sqlite` で移行
-2. **Render デプロイ**（Supabase が動いてから）
+1. ~~Supabase 対応~~ **完了（2026-08-27）**
+2. **Render デプロイ** ← 次はここ
    - 既知の制約: WAV/MP3 のフォルダ走査は不可（CSV アップロード経路を使う）、
      Playwright の MINC ログインも不可（Chrome 拡張の Cookie 同期に寄せ、
      `popup.js` の `APP_URL` を公開URLに書き換える）、無料枠は15分でスリープ
