@@ -245,6 +245,20 @@ def _load_rows(table: str, project_id: int) -> pd.DataFrame | None:
 
 # ─── プロジェクト ───────────────────────────────────────
 
+def _as_text(v) -> str:
+    """日時を "YYYY-MM-DD HH:MM:SS" の文字列にする。
+
+    SQLite は文字列を返すが PostgreSQL は datetime を返す。app.py は
+    `p["updated_at"][:10]` のように文字列として切り出しているので、
+    ここで形を揃えて app.py 側を変えずに済ませる。
+    """
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    return v.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def list_projects() -> list[dict]:
     """全プロジェクトを更新日時の降順で返す。"""
     try:
@@ -253,7 +267,13 @@ def list_projects() -> list[dict]:
                 "SELECT id, name, description, created_at, updated_at "
                 "FROM projects ORDER BY updated_at DESC"
             )).mappings().all()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            for k in ("created_at", "updated_at"):
+                d[k] = _as_text(d.get(k))
+            out.append(d)
+        return out
     except Exception:
         return []
 
