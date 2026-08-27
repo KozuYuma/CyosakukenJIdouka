@@ -216,15 +216,19 @@ _SHINKOK_ORDER = [
     "自社楽曲ID",
     # 参照列（申告書には不要だが確認用）
     "トラック", "イベント名", "START TIME", "使用尺",
-    # 補助列（申告書外・右端）
-    "確認ステータス", "委任者", "CD名",
+    # 補助列（申告書外・右端）。放送・配信は J-WID の管理状況の同名項目で、
+    # 委任者と並べて権利まわりをひとまとまりに見せる
+    "確認ステータス", "委任者", "放送", "配信", "CD名",
 ]
+
+#: 申告書には出ないが、確認のために持ち回る楽曲側の欄
+_SHINKOK_AUX_COLS = ("確認ステータス", "委任者", "放送", "配信", "CD名")
 
 # 申告シートで整数として出力する列
 _SHINKOK_INT_COLS = {"使用時間（分）", "使用時間（秒）"}
 
 # 参照列（申告シート内でグレー背景にする）
-_SHINKOK_REF_COLS = {"トラック", "イベント名", "START TIME", "使用尺", "確認ステータス", "委任者", "CD名"}
+_SHINKOK_REF_COLS = {"トラック", "イベント名", "START TIME", "使用尺", *_SHINKOK_AUX_COLS}
 
 
 def build_shinkok_df(songs_df: pd.DataFrame, events_df: pd.DataFrame) -> pd.DataFrame:
@@ -233,8 +237,8 @@ def build_shinkok_df(songs_df: pd.DataFrame, events_df: pd.DataFrame) -> pd.Data
     1行 per event（同じ曲が複数箇所で使われる場合はそれぞれ別行）。
     join key: イベント名
     """
-    # songs_df の申告列 + 補助列（確認ステータス・委任者・CD名）を選択
-    _extra_cols = [c for c in ("確認ステータス", "委任者", "CD名") if c in songs_df.columns]
+    # songs_df の申告列 + 補助列（確認ステータス・委任者・放送・配信・CD名）を選択
+    _extra_cols = [c for c in _SHINKOK_AUX_COLS if c in songs_df.columns]
     song_rename = {src: dst for src, dst in _SHINKOK_RENAME.items() if src in songs_df.columns}
     songs_sub = songs_df[["イベント名"] + list(song_rename.keys()) + _extra_cols].copy()
     songs_sub.rename(columns=song_rename, inplace=True)

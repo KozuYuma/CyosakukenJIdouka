@@ -203,11 +203,18 @@ _SHINKOK_RENAME_REV: dict[str, str] = {v: k for k, v in _SHINKOK_RENAME.items()}
 # 申告フォーマットに固有の追加列（_SHINKOK_RENAME に含まれないが songs_df に直接対応する列）
 _SHINKOK_EXTRA_COLS = ("確認ステータス", "委任者", "CD名")
 
+#: 表に出す J-WID 管理状況の項目。名前は J-WID の 管理状況 dict のキーと
+#: 同じ。管理状況は全部で18項目あるが、申告のときに毎回 J-WID を開いて
+#: 見に行っていたのはこの2つなので、ここだけ楽曲の欄として持ち回る。
+JWID_MGMT_COLS = ("放送", "配信")
+
 # JASRACコード変更時にクリアすべき songs_df 列
 _CLEAR_ON_JCD_CHANGE = [
     "CD番号", "CD名", "レコード会社名", "委任者",
     "邦洋区分", "原訳詞区分", "I/V区分",
     "作詞者", "作曲者", "編曲者", "訳詞者",
+    # 管理状況は作品コードに紐づくので、コードが変われば意味を失う
+    *JWID_MGMT_COLS,
 ]
 
 
@@ -840,6 +847,8 @@ _SONG_DEFAULTS: dict[str, str] = {
     "レコード会社名": "",
     "CD名": "",
     "委任者": "",
+    "放送": "",
+    "配信": "",
     "自社楽曲ID": "",
 }
 
@@ -873,6 +882,24 @@ def _format_management_status(mgmt: dict) -> str:
             parts.append(f"{short}:{icon}")
         lines.append(f"**{cat}**: {', '.join(parts)}")
     return "  \n".join(lines)
+
+
+def _apply_management_status(mgmt: dict, updates: dict) -> int:
+    """管理状況から「放送」「配信」を updates に入れる。入れた数を返す。
+
+    J-WID を1曲ずつ開いて見に行っていた欄なので、当たった時点で
+    書き取っておく。値は ○ / △ / × で、J-WID の表記のまま持つ。
+    「?」は取れなかったという意味なので入れない。
+    """
+    if not mgmt:
+        return 0
+    n = 0
+    for col in JWID_MGMT_COLS:
+        val = str(mgmt.get(col, "") or "").strip()
+        if val and val != "?":
+            updates[col] = val
+            n += 1
+    return n
 
 
 def _infer_houyo(jasrac: str) -> str:
@@ -2344,6 +2371,10 @@ with tabs[0]:
                                     if _jwd_b.get("作詞者"): updates["作詞者"] = _jwd_b["作詞者"]
                                     if _jwd_b.get("編曲者"): updates["編曲者"] = _jwd_b["編曲者"]
                                     if _jwd_b.get("訳詞者"): updates["訳詞者"] = _jwd_b["訳詞者"]
+                                    # 放送・配信。詳細ページはもう取ってある
+                                    # ので、ここで書き取るのに追加の通信は要らない
+                                    _apply_management_status(
+                                        _jwd_b.get("管理状況") or {}, updates)
                             except Exception:
                                 pass
 
@@ -2907,6 +2938,18 @@ with tabs[0]:
                 "原・訳詞区分":  st.column_config.TextColumn("原・訳詞区分", width="small"),
                 "確認ステータス": st.column_config.TextColumn("確認ステータス", width="medium"),
                 "委任者":        st.column_config.TextColumn("委任者", width="small"),
+                # 放送・配信は J-WID の管理状況をそのまま写した欄。人が
+                # 書き換えるものではないので編集できないようにしてある
+                "放送": st.column_config.TextColumn(
+                    "放送", width="small",
+                    help="J-WID の管理状況「放送」。○ 管理あり／"
+                         "△ 一部管理／× 管理なし。空欄はまだ引いていない",
+                ),
+                "配信": st.column_config.TextColumn(
+                    "配信", width="small",
+                    help="J-WID の管理状況「配信」。○ 管理あり／"
+                         "△ 一部管理／× 管理なし。空欄はまだ引いていない",
+                ),
                 "CD名":          st.column_config.TextColumn("CD名", width="medium"),
             }
 
@@ -2960,7 +3003,7 @@ with tabs[0]:
                 height=460,
                 key="shinkok_editor",
                 column_config=_SHINKOK_COL_CFG,
-                disabled=["状態"],
+                disabled=["状態", *JWID_MGMT_COLS],
                 on_change=_sync_shinkok_to_songs,
             )
             st.caption(
@@ -3749,6 +3792,8 @@ with tabs[0]:
                                     "委任者":          _委任者,
                                     "確認ステータス":  "候補あり",
                                 }
+                                _apply_management_status(
+                                    _jw_d.get("管理状況") or {}, _mf_apply)
                                 _hy = _infer_houyo(_mf_jcd2)
                                 _cur_hy_mf = str(st.session_state.songs_df.at[row_idx, "邦洋区分"] if "邦洋区分" in st.session_state.songs_df.columns else "").strip()
                                 if _hy and not _cur_hy_mf:
@@ -4642,6 +4687,8 @@ with tabs[0]:
                                             "アーティスト":   item.get("アーティスト","") or (mb_best.get("artist","") if mb_best else ""),
                                             "確認ステータス": "確定",
                                         }
+                                        _apply_management_status(
+                                            _detail.get("管理状況") or {}, _pip_j_apply)
                                         _hy = _infer_houyo(_pip_j_jcd)
                                         _cur_hy = str(st.session_state.songs_df.at[row_idx, "邦洋区分"] if "邦洋区分" in st.session_state.songs_df.columns else "").strip()
                                         if _hy and not _cur_hy:
@@ -5118,7 +5165,34 @@ with tabs[0]:
                 st.session_state["jwid_rights_batch"] = _rights_results
                 _prog.empty()
                 _stat.empty()
+
+                # 取れた放送・配信は楽曲側にも書き取る。CSV を落とさなくても
+                # 申告フォーマットの表でそのまま見られるようにするため。
+                # 台帳で当たった行は J-WID の詳細を引いていないので、ここが
+                # 放送・配信の入り口になる
+                _rts_all = st.session_state.songs_df
+                _rts_upd = 0
+                for _rts_idx in _rts_all.index:
+                    _rts_code = str(_rts_all.at[_rts_idx, "JASRAC作品コード"]).strip()
+                    if not _rts_code:
+                        continue
+                    _rts_u: dict = {}
+                    _apply_management_status(
+                        (_rights_results.get(_rts_code) or {}).get("管理状況") or {},
+                        _rts_u,
+                    )
+                    for _rts_col, _rts_val in _rts_u.items():
+                        if _rts_col not in _rts_all.columns:
+                            continue
+                        if str(_rts_all.at[_rts_idx, _rts_col]).strip() != _rts_val:
+                            _rts_all.at[_rts_idx, _rts_col] = _rts_val
+                            _rts_upd += 1
+
                 st.success(f"✅ {_n} 件の取得完了")
+                if _rts_upd and _autosave_to_db("（放送・配信の取り込み）"):
+                    st.session_state["_autosave_msg"] = (
+                        f"放送・配信を {_rts_upd} 欄ぶん楽曲に書き取りました"
+                    )
                 st.rerun()
 
             # 取得済み結果の表示と CSV ダウンロード
