@@ -1052,6 +1052,39 @@ def _import_master_db(
     return songs_df, updated
 
 
+def _default_project_name() -> str:
+    """Cue CSV のファイル名から案件名を作る。"""
+    _name = str(st.session_state.get("cue_file_name") or "").strip()
+    _stem = os.path.splitext(_name)[0].strip()
+    return _stem[:120] if _stem else "無題の案件"
+
+
+def _autosave_to_db(note: str = "") -> bool:
+    """今の内容をDBに保存する。案件が無ければ何もしない。
+
+    ダウンロードボタンの on_click から呼ぶ。照合の後の作業（一括検索の
+    結果や手入力の修正）は💾ボタンでしか保存されないので、書き出した
+    ファイルとDBの中身がずれないよう、書き出す瞬間にも保存しておく。
+
+    コールバックの中で st.success を出しても表示前に再実行が走って
+    消えるため、伝言を session_state に置いて本体側で出す。
+    """
+    _pid = st.session_state.get("project_id")
+    if not _pid or st.session_state.get("songs_df") is None:
+        return False
+    try:
+        save_songs(_pid, st.session_state.songs_df)
+        if st.session_state.get("events_df") is not None:
+            save_events(_pid, st.session_state.events_df)
+        st.session_state["_autosave_msg"] = (
+            f"💾 「{st.session_state.get('project_name', '')}」に保存しました{note}"
+        )
+        return True
+    except Exception as _e:
+        st.session_state["_autosave_msg"] = f"⚠️ 自動保存に失敗しました: {_e}"
+        return False
+
+
 # =====================================================================
 # ヘッダー
 # =====================================================================
@@ -1095,6 +1128,10 @@ status_bar(
     ],
     progress=count_done(_bar_songs),
 )
+
+# ダウンロード時の自動保存はコールバックの中で走るので、結果はここで出す
+if "_autosave_msg" in st.session_state:
+    st.toast(st.session_state.pop("_autosave_msg"))
 
 tabs = st.tabs(
     [
@@ -1262,10 +1299,11 @@ with tabs[0]:
     # 案件を作らずに作業すると再読み込みで全部消えるので、畳んだ状態でも
     # 気付けるようにここで知らせる。
     if not st.session_state.project_id:
-        st.warning(
-            "⚠️ 案件が未選択です。このままだと結果は**DBに保存されません**"
-            "（ブラウザを再読み込みすると消えます）。"
-            "上の「🗄️ プロジェクト管理」を開いて、案件を作成または読み込んでください。"
+        st.info(
+            "🗄️ 案件が未選択です。このまま「🔄 照合実行」すると、"
+            "**Cue CSV のファイル名で案件を自動作成**して保存します。"
+            "続きをやる場合や名前を決めたい場合は、上の「🗄️ プロジェクト管理」から"
+            "作成・読み込みしてください。"
         )
 
     st.divider()
@@ -1291,6 +1329,8 @@ with tabs[0]:
                     )
                 else:
                     st.session_state.cue_df = df
+                    # 案件を自動で作るときの名前に使う
+                    st.session_state.cue_file_name = cue_file.name
                     st.success(f"✅ 読み込み完了（{enc}）: {len(df)} 件")
                     with st.expander("プレビュー（先頭 5 行）"):
                         st.dataframe(df.head(5), use_container_width=True)
@@ -1512,6 +1552,23 @@ with tabs[0]:
                     st.dataframe(mp3_counts, use_container_width=True, hide_index=True)
 
         st.info("「楽曲まとめ」タブで内容を確認・編集してください。")
+
+        # 案件が無ければここで作る。データが生まれるのはこの瞬間なので、
+        # ここで作らないと以降の自動保存がすべて素通りし、再読み込みで
+        # 全部消えてしまう。
+        if not st.session_state.project_id:
+            _auto_name = _default_project_name()
+            try:
+                st.session_state.project_id = create_project(
+                    _auto_name, "照合実行時に自動作成"
+                )
+                st.session_state.project_name = _auto_name
+                st.info(f"🗄️ 案件「{_auto_name}」を自動で作成しました。")
+            except Exception as _e:
+                st.warning(
+                    f"⚠️ 案件の自動作成に失敗しました: {_e}\n\n"
+                    "「🗄️ プロジェクト管理」から手動で作成してください。"
+                )
 
         # プロジェクトが選択済みなら照合結果を自動保存
         if st.session_state.project_id:
@@ -2396,6 +2453,10 @@ with tabs[0]:
                         file_name="申告フォーマット.csv",
                         mime="text/csv",
                         use_container_width=True,
+                        # 書き出した内容とDBの中身がずれないよう、
+                        # ダウンロードと同時に保存する
+                        on_click=_autosave_to_db,
+                        args=("（CSV書き出し時）",),
                     )
 
 
@@ -4174,6 +4235,12 @@ with tabs[0]:
                     st.session_state.search_df,
                     shinkok_df=_shinkok_df,
                 )
+
+            # 書き出した内容とDBの中身がずれないよう、ここでも保存する。
+            # 下のダウンロードボタンは押すと再実行で消えてしまうので、
+            # 確実に一度だけ通る生成側に置く。
+            if _autosave_to_db("（Excel生成時）"):
+                st.info(st.session_state.pop("_autosave_msg"))
 
             st.download_button(
                 label="⬇️ ダウンロード",
