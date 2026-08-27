@@ -24,6 +24,7 @@ from modules.csv_reader import (
 from modules.database import (
     create_project,
     delete_project,
+    describe_backend,
     init_db,
     list_projects,
     load_events,
@@ -48,6 +49,7 @@ from modules.pipeline import run_pipeline
 from modules.scraper import search_all
 from modules.search_helper import JWID_BASE, generate_search_terms
 from modules.spotify import is_available as spotify_available, spotify_search_url
+from modules.ui import count_done, inject_css, status_bar, style_status
 
 # =====================================================================
 # アプリ設定
@@ -58,6 +60,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# 配色・書体は .streamlit/config.toml。ここでは余白と共通部品だけ入れる
+inject_css()
 
 # 確認ステータスの選択肢（全画面共通）
 CONFIRM_STATUS_OPTIONS = [
@@ -1050,10 +1055,44 @@ def _import_master_db(
 # =====================================================================
 # ヘッダー
 # =====================================================================
-st.title("🎵 著作権調査支援ツール")
-st.caption(
-    "NUENDO Cue CSV × WAV 一覧照合 → 権利情報手入力 → Excel 出力 | "
-    "音響効果・選曲業務 Cue Sheet 作成補助"
+def _minc_state() -> tuple[str, str]:
+    """MINC ログインの状態を (表示文字, 調子) で返す。
+
+    check_session() は MINC に実際に接続しに行くので、毎回の再実行で
+    呼ぶわけにはいかない（画面が数秒止まる）。ここは state.json を見る
+    だけの判定にとどめ、本当に生きているかの確認は従来どおり各タブの
+    ボタンに任せる。
+    """
+    try:
+        _p = get_state_path()
+        if not _p.is_file():
+            return ("未接続", "off")
+        _has_sess = '"_sess"' in _p.read_text(encoding="utf-8")
+        from modules.musicforest import _session_age_str
+        _age = _session_age_str(_p)
+        if not _has_sess:
+            return ("要ログイン", "warn")
+        return (f"接続済み（{_age}）" if _age else "接続済み", "ok")
+    except Exception:
+        return ("不明", "off")
+
+
+_bar_songs = st.session_state.get("songs_df")
+_minc_txt, _minc_tone = _minc_state()
+# describe_backend() は SQLite のフルパスまで返して長いので、バーには
+# どちらに繋がっているかだけ出す（接続文字列は秘密なので元から出ない）
+_db_txt = ("クラウド（Supabase）" if describe_backend().startswith("PostgreSQL")
+           else "ローカル")
+
+status_bar(
+    "🎵 著作権調査支援ツール",
+    [
+        ("案件", st.session_state.get("project_name") or "未選択",
+         "" if st.session_state.get("project_name") else "off"),
+        ("保存先", _db_txt, ""),
+        ("MINC", _minc_txt, _minc_tone),
+    ],
+    progress=count_done(_bar_songs),
 )
 
 tabs = st.tabs(
@@ -2273,7 +2312,10 @@ with tabs[0]:
                 "　行をクリックして選択 → 下のボタンで補完検索に移動できます。"
             )
             _shinkok_view = st.dataframe(
-                _shinkok_df[_preview_cols],
+                # 確認ステータスに色を敷く。色を付けられるのはこの
+                # 閲覧用の表だけで、下の st.data_editor は Styler を
+                # 受け取れない
+                style_status(_shinkok_df[_preview_cols]),
                 use_container_width=True,
                 hide_index=True,
                 height=420,

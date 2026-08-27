@@ -1,0 +1,88 @@
+# 画面の見た目。色や字はここで一括して決める。
+#
+# アクセント色は藍にしてある。緑・黄・橙・赤は「確認ステータス」の意味
+# （確定 / 候補あり / 要確認 / 該当なし）に予約しているため、アクセントに
+# 使ってしまうと状態の色分けが読み取れなくなる。
+#
+# light と dark の両方を定義してある。利用者のOS設定や右上メニューで
+# 切り替わるので、どちらか片方だけ整えると片方が読みにくくなる。
+
+[theme]
+base = "light"
+
+# 日本語が痩せて見えないよう、Windows標準のUI書体を先頭に置く。
+# Noto Sans JP は Render など Windows 以外で表示したときの受け皿。
+font = '"Yu Gothic UI", "Yu Gothic", "Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif'
+headingFont = '"Yu Gothic UI", "Yu Gothic", "Noto Sans JP", "Hiragino Sans", "Meiryo", sans-serif'
+# 管理番号・JASRAC作品コードなど桁の揃うべき値は等幅で出す
+codeFont = '"Consolas", "SFMono-Regular", "Roboto Mono", monospace'
+
+baseFontSize = 15
+baseRadius = "small"
+buttonRadius = "small"
+showWidgetBorder = true
+linkUnderline = false
+
+
+[theme.light]
+primaryColor = "#2F4B8F"            # 藍
+backgroundColor = "#FAFAFC"         # 紙。無彩色ではなく藍にわずかに寄せた白
+secondaryBackgroundColor = "#EEF0F6"
+textColor = "#1A1D2B"               # 藍寄りの黒
+borderColor = "#D7DAE5"
+linkColor = "#2F4B8F"
+dataframeHeaderBackgroundColor = "#E7EAF3"
+dataframeBorderColor = "#D7DAE5"
+codeBackgroundColor = "#EEF0F6"
+codeTextColor = "#2A3352"
+
+# 状態の色。Streamlit の st.success / st.warning などにも効く
+greenColor = "#1B7A56"
+greenBackgroundColor = "#DDEFE6"
+greenTextColor = "#11543A"
+yellowColor = "#A8730B"
+yellowBackgroundColor = "#F8EED6"
+yellowTextColor = "#6E4B04"
+orangeColor = "#B85C1E"
+orangeBackgroundColor = "#FAE6D8"
+orangeTextColor = "#7A3A0F"
+redColor = "#B3261E"
+redBackgroundColor = "#F8DEDC"
+redTextColor = "#7A1811"
+grayColor = "#6B7186"
+grayBackgroundColor = "#E7E9F0"
+grayTextColor = "#4A5064"
+
+
+[theme.dark]
+primaryColor = "#8FA6E8"            # 暗い地の上では藍を明るく振らないと読めない
+backgroundColor = "#14161F"
+secondaryBackgroundColor = "#1E2130"
+textColor = "#E3E6F0"
+borderColor = "#2F3448"
+linkColor = "#9DB2EE"
+dataframeHeaderBackgroundColor = "#242939"
+dataframeBorderColor = "#2F3448"
+codeBackgroundColor = "#1E2130"
+codeTextColor = "#C7CEE8"
+
+greenColor = "#4FBF8B"
+greenBackgroundColor = "#16352A"
+greenTextColor = "#8AD9B2"
+yellowColor = "#D9A83C"
+yellowBackgroundColor = "#3A2F14"
+yellowTextColor = "#E8C878"
+orangeColor = "#E08A4E"
+orangeBackgroundColor = "#3A2418"
+orangeTextColor = "#EFA97A"
+redColor = "#E5726A"
+redBackgroundColor = "#3A1C1A"
+redTextColor = "#F0A09A"
+grayColor = "#8C93A8"
+grayBackgroundColor = "#242939"
+grayTextColor = "#A8AEC2"
+
+
+[server]
+# 大きな Cue CSV / WAV 一覧を上げられるように
+maxUploadSize = 200
