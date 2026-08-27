@@ -163,16 +163,42 @@ def _now_sql() -> str:
 
 # ─── DataFrame ⇔ 行 ────────────────────────────────────
 
+def _jsonable(v):
+    """欠損値を None（＝JSON の null）に直す。
+
+    DataFrame ごと `where(notna)` で置き換える方法は使えない。列の中身が
+    すべて空だと pandas はその列を float 型と見なし、None を入れても
+    NaN に戻してしまうため。実際 `使用形態` などの未入力列がそうなり、
+    JSON に `NaN` という不正な語が書き出されていた（SQLite は文字列として
+    受け取るので気付けず、PostgreSQL の JSONB で初めて弾かれた）。
+    そこで値ひとつずつ見る。
+    """
+    if v is None:
+        return None
+    if isinstance(v, float):
+        # NaN と ±Inf は JSON に無い。どちらも「値なし」として扱う
+        return None if (v != v or v in (float("inf"), float("-inf"))) else v
+    try:
+        # NaT や pd.NA もここで拾う。配列が入っていると例外になるので囲う
+        if not isinstance(v, (list, tuple, dict, set)) and pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return v
+
+
 def _df_to_rows(df: pd.DataFrame, project_id: int) -> list[dict]:
-    """DataFrame を 1行1JSON に変換する。NaN は None（＝JSON null）にする。"""
-    clean = df.where(pd.notna(df), other=None)
+    """DataFrame を 1行1JSON に変換する。欠損は None（＝JSON null）にする。"""
     rows = []
-    for i, rec in enumerate(clean.to_dict(orient="records")):
-        # 表の列名・値はそのまま保持する。ensure_ascii=False で日本語を潰さない
+    for i, rec in enumerate(df.to_dict(orient="records")):
+        rec = {k: _jsonable(v) for k, v in rec.items()}
+        # 表の列名・値はそのまま保持する。ensure_ascii=False で日本語を潰さない。
+        # allow_nan=False: 取りこぼしがあれば無言で不正な JSON を作らず例外にする
         rows.append({
             "project_id": project_id,
             "row_no": i,
-            "data": json.dumps(rec, ensure_ascii=False, default=str),
+            "data": json.dumps(rec, ensure_ascii=False, default=str,
+                               allow_nan=False),
         })
     return rows
 
