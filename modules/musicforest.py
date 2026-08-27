@@ -999,6 +999,36 @@ def _parse_record_company(raw: str) -> str:
     return ""
 
 
+#: 曲名として拾ってはいけないボタンのラベル。
+#: 作品テーブルの曲名セルが空に見えるとき、フォールバックでこの
+#: ボタン名を曲名にしてしまい、曲名での照合が全部外れていた。
+_BTN_LABELS = frozenset({"管理情報", "著作権管理情報", "詳細"})
+
+
+def _split_title_cell(cell) -> tuple[str, str]:
+    """「作品名・副題」セルを (作品名, 副題) に分ける。
+
+    MINC の作品テーブルは1つのセルに両方を入れていて、副題だけ
+    span.sub_title に包まれている。まとめて読むと
+    「オオサキプラザホテル 純と愛より（ＮＨＫ連続テレビ小説）」の
+    ように繋がり、曲名で照合できなくなる。
+    """
+    if cell is None:
+        return "", ""
+    subs = cell.select("span.sub_title")
+    subtitle = " ".join(
+        s.get_text(" ", strip=True) for s in subs
+        if s.get_text(strip=True)
+    ).strip()
+    # 元の木を壊さないように、副題を抜いた文字列は差分で作る
+    whole = cell.get_text(" ", strip=True)
+    for s in subs:
+        part = s.get_text(" ", strip=True)
+        if part:
+            whole = whole.replace(part, " ")
+    return " ".join(whole.split()), subtitle
+
+
 #: 検索結果テーブルの役割表記 → 申告フォーマットの項目名
 #: 「作曲作詞:NAME」のように 1 行で 2 役割を兼ねる表記があるため部分一致で判定する。
 _CREDIT_ROLES = (("訳詞", "訳詞者"), ("編曲", "編曲者"), ("作詞", "作詞者"), ("作曲", "作曲者"))
@@ -1160,7 +1190,14 @@ def _parse_search_results(soup: BeautifulSoup, include_uncoded: bool = False) ->
             ) if col_map else _parse_credit_cell(None)
 
             if col_map:
-                title         = _cell(row_cells, "曲名")
+                # 曲名の列名はテーブルごとに違う。収録曲・配信曲は「曲名」、
+                # 作品は「作品名・副題」。後者は1つのセルに作品名と副題が
+                # 並んでいて、副題だけ span.sub_title に入っている
+                title = _cell(row_cells, "曲名")
+                subtitle = ""
+                if not title:
+                    title, subtitle = _split_title_cell(
+                        _cell_el(row_els, "作品名"))
                 artist        = _cell(row_cells, "アーティスト")
                 catalog       = _cell(row_cells, "品番")
                 cd_title      = _cell(row_cells, "CD商品タイトル")
@@ -1176,6 +1213,7 @@ def _parse_search_results(soup: BeautifulSoup, include_uncoded: bool = False) ->
                 # ヘッダー取得不可時の位置ベースフォールバック
                 tds = [c.get_text(" ", strip=True) for c in row.find_all("td")]
                 title         = tds[0] if tds else ""
+                subtitle      = ""
                 artist        = tds[1] if len(tds) > 1 else ""
                 catalog       = ""
                 cd_title      = ""
@@ -1184,8 +1222,13 @@ def _parse_search_results(soup: BeautifulSoup, include_uncoded: bool = False) ->
                 album_name    = ""
                 release_date  = ""
 
+            # ボタンのラベルを曲名として拾わない。作品テーブルでは
+            # 「管理情報」というボタン名がそのまま作品名になってしまい、
+            # 曲名で照合する側が一致を取り逃していた
             if not title and btn is not None:
-                title = btn.get_text(strip=True)
+                _btn_text = btn.get_text(strip=True)
+                if _btn_text not in _BTN_LABELS:
+                    title = _btn_text
 
             # 品番が空の場合: collapseDetail アンカーのテキストから補完
             # 2枚組など複数 CD 行の場合、select_one が最初のアンカー = このトラック収録 CD を返す
@@ -1217,6 +1260,7 @@ def _parse_search_results(soup: BeautifulSoup, include_uncoded: bool = False) ->
 
             item: dict = {
                 "作品名":           title,
+                "副題":             subtitle,
                 "アーティスト":     artist,
                 "品番":             catalog,
                 "CD商品タイトル":   cd_title,
