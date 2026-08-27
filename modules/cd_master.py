@@ -11,7 +11,7 @@ from __future__ import annotations
 import pandas as pd
 
 from modules.database import cd_fetch
-from modules.song_master import _cell, norm_id
+from modules.song_master import _cell, mark_status, norm_id
 
 # 出典の名前。song_master.SRC_RANK に載せてある
 SRC = "自社CD"
@@ -78,6 +78,10 @@ def fill(songs_df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
             continue
         idx = df.index[pos]
         touched = False
+        # 当てているのは管理番号だけなので、当たった行はどの曲かが決まる
+        if mark_status(df, idx):
+            filled += 1
+            touched = True
         for src_col, dst_col in COLUMN_MAP.items():
             if dst_col not in df.columns:
                 continue

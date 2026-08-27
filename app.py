@@ -162,6 +162,7 @@ CONFIRM_STATUS_OPTIONS = [
     "該当なし",
     "作曲者一致",
     "アーティスト一致",
+    "台帳一致",
     "候補あり",
     "複数候補あり",
     "確定",
@@ -2930,27 +2931,9 @@ with tabs[0]:
             # HTML の要素になっていないため）。正確な言葉が要るときは、
             # 同じ表の「確認ステータス」列にそのまま出ている。
             _shinkok_src = _shinkok_df[_preview_cols].copy()
-            # 管理番号で当たった曲は印を出さない。管理番号は曲ごとに固有の
-            # 番号なので、当たった時点で行き先は決まっている。確認ステータス
-            # 自体は「未調査」のまま（調べたのは番号の照合だけで、権利者の
-            # 確認はまだのため）なので、印だけを消す
-            _numhit_events: set[str] = set()
-            if "WAV照合ステータス" in _shinkok_songs.columns:
-                _numhit_events = set(
-                    _shinkok_songs.loc[
-                        _shinkok_songs["WAV照合ステータス"].astype(str).str.strip()
-                        == "管理番号一致",
-                        "イベント名",
-                    ].astype(str)
-                )
-            _shinkok_status = _shinkok_src.get(
-                "確認ステータス", pd.Series([""] * len(_shinkok_src)))
-            _shinkok_evname = _shinkok_src.get(
-                "イベント名", pd.Series([""] * len(_shinkok_src)))
             _shinkok_src.insert(0, "状態", [
-                "" if (str(_ev) in _numhit_events
-                       and status_mark(_v) == "・") else status_mark(_v)
-                for _v, _ev in zip(_shinkok_status, _shinkok_evname)
+                status_mark(v) for v in _shinkok_src.get(
+                    "確認ステータス", pd.Series([""] * len(_shinkok_src)))
             ])
             _shinkok_src.insert(0, "選択", False)
             # 表示に使った DataFrame の位置で編集差分が返ってくるので、
@@ -2981,8 +2964,43 @@ with tabs[0]:
             st.caption(
                 f"状態の印: {STATUS_MARK_LEGEND}"
                 "　（確定・一致・1件だけ当たった「候補あり」・管理番号で"
-                "当たった行は印なし）"
+                "台帳に当たった行は印なし）"
             )
+
+            # 台帳の当たりを書き直す。
+            #
+            # 台帳を引くのは CSV を読み込んだときの1回だけなので、それより
+            # 前に作った案件には「台帳一致」が入っていない。ここから引き
+            # 直せるようにしておく。埋めるのは空欄だけ・上書きするのは
+            # 「未調査」の確認ステータスだけなので、何度押しても害はない
+            with st.expander("🗃️ 台帳で埋め直す（管理番号で当たった行に印を付けない）"):
+                st.caption(
+                    "共有楽曲データと自社CD台帳を管理番号で引き直します。"
+                    "空いている欄だけを埋め、確認ステータスは「未調査」の行だけ"
+                    "「台帳一致」に変えます。人が入れた値は動きません。"
+                )
+                if st.button("台帳で埋め直す", key="shinkok_refill_ledger"):
+                    _rf_hits = _rf_filled = 0
+                    _rf_err = ""
+                    for _rf_fn, _rf_name in ((master_fill, "共有楽曲データ"),
+                                             (cd_fill, "自社CDの台帳")):
+                        try:
+                            _rf_df, _rf_h, _rf_f = _rf_fn(st.session_state.songs_df)
+                            if _rf_f:
+                                st.session_state.songs_df = _rf_df
+                                _rf_hits += _rf_h
+                                _rf_filled += _rf_f
+                        except Exception as _e:
+                            _rf_err = f"{_rf_name}の参照に失敗しました: {_e}"
+                    if _rf_err:
+                        st.warning(f"⚠️ {_rf_err}")
+                    elif not _rf_filled:
+                        st.info("埋めるものはありませんでした。")
+                    if _rf_filled and _autosave_to_db("（台帳で埋め直し）"):
+                        st.session_state["_autosave_msg"] = (
+                            f"台帳から {_rf_hits} 曲・{_rf_filled} 欄を埋めました"
+                        )
+                        st.rerun()
 
             # 昔の書き方で保存された行の付け直し。
             # 直す行があるときだけ出す（普段は畳んだ帯すら出さない）。

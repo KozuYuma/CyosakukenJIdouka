@@ -73,6 +73,20 @@ TRUSTED_STATUS: dict[str, str] = {
     "アーティスト一致": "MINC",
 }
 
+# 管理番号で台帳に当たった行に付ける確認ステータス。
+#
+# 管理番号は曲ごとに固有の番号なので、当たった時点でどの曲かは決まって
+# いる。まだ「未調査」と出ていると、人が調べに行く先として毎回目に入って
+# しまうので、当たったことを書いておく。
+#
+# TRUSTED_STATUS には入れない。台帳から入れた値を、そのまま台帳に貯め
+# 直すことになるため（同じ値が出典だけ強くなって戻ってくる）。
+LEDGER_STATUS = "台帳一致"
+
+# 台帳の当たりで上書きしてよい確認ステータス。人や検索が何か書いた行は
+# 触らない
+LEDGER_OVERWRITABLE = ("", "未調査")
+
 
 def rank(src: str) -> int:
     """出典の強さ。知らない出典は一番弱く扱う。"""
@@ -230,6 +244,19 @@ def save(songs_df: pd.DataFrame, user: str = "") -> int:
 
 # ─── 使う ──────────────────────────────────────────────
 
+def mark_status(df: pd.DataFrame, idx) -> bool:
+    """管理番号で台帳に当たった行に LEDGER_STATUS を書く。書いたら True。
+
+    自社CD台帳（cd_master）からも同じ形で呼ぶ。
+    """
+    if "確認ステータス" not in df.columns:
+        return False
+    if _cell(df.at[idx, "確認ステータス"]) not in LEDGER_OVERWRITABLE:
+        return False
+    df.at[idx, "確認ステータス"] = LEDGER_STATUS
+    return True
+
+
 def fill(songs_df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
     """song_master の値で songs_df の空欄を埋める。
 
@@ -257,11 +284,18 @@ def fill(songs_df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
     hit_rows = 0
     filled = 0
     for pos, (mgmt_key, track_key) in enumerate(keys):
+        by_number = bool(mgmt_key) and mgmt_key in by_mgmt
         hit = by_mgmt.get(mgmt_key) or by_track.get(track_key)
         if hit is None:
             continue
         idx = df.index[pos]
         touched = False
+        # 管理番号で当たった行は、それだけで「どの曲か」が決まる。
+        # 曲名＋トラック番号で当たった方は付けない（同名の別物が
+        # 混ざりうるので、人が見に行く先として残す）
+        if by_number and mark_status(df, idx):
+            filled += 1
+            touched = True
         for col, cell in (hit.get("data") or {}).items():
             if col not in df.columns:
                 continue
