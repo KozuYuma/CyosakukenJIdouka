@@ -208,13 +208,21 @@ _SHINKOK_EXTRA_COLS = ("確認ステータス", "委任者", "CD名")
 #: 見に行っていたのはこの2つなので、ここだけ楽曲の欄として持ち回る。
 JWID_MGMT_COLS = ("放送", "配信")
 
+#: 放送・配信を出どころ別に持っておく欄。J は JASRAC（J-WID）、
+#: N は NexTone。同じ曲が両方に載っていて、JASRAC では × でも NexTone
+#: では ○ ということがある。片方だけ見ると「管理なし」に見えてしまうので、
+#: 生の値は別々に持ち、表に出す「放送」「配信」は両方を合わせて作る。
+MGMT_SOURCE_COLS = {c: (f"{c}J", f"{c}N") for c in JWID_MGMT_COLS}
+_MGMT_RAW_COLS = tuple(c for pair in MGMT_SOURCE_COLS.values() for c in pair)
+
 # JASRACコード変更時にクリアすべき songs_df 列
 _CLEAR_ON_JCD_CHANGE = [
     "CD番号", "CD名", "レコード会社名", "委任者",
     "邦洋区分", "原訳詞区分", "I/V区分",
     "作詞者", "作曲者", "編曲者", "訳詞者",
-    # 管理状況は作品コードに紐づくので、コードが変われば意味を失う
-    *JWID_MGMT_COLS,
+    # 管理状況は作品コードに紐づくので、コードが変われば意味を失う。
+    # 消すのは JASRAC 由来の値だけ。NexTone 側は管理番号の話なので残す
+    *(pair[0] for pair in MGMT_SOURCE_COLS.values()),
 ]
 
 
@@ -234,6 +242,11 @@ def _apply_clear_on_jcd_change(row_idx: int, new_jcd: str) -> None:
         for col in _CLEAR_ON_JCD_CHANGE:
             if col in songs.columns:
                 songs.at[row_idx, col] = ""
+        # JASRAC 側を消したので、表に出す欄は NexTone 側だけで作り直す
+        for col, (_, nt_col) in MGMT_SOURCE_COLS.items():
+            if col in songs.columns and nt_col in songs.columns:
+                songs.at[row_idx, col] = _combine_mgmt(
+                    "", songs.at[row_idx, nt_col])
 
 
 def _stale_multi_mask(songs: pd.DataFrame | None):
@@ -258,25 +271,33 @@ def _stale_multi_mask(songs: pd.DataFrame | None):
 
 
 def _mgmt_missing_mask(songs: pd.DataFrame | None):
-    """放送・配信がまだ入っていない行を選ぶ。JASRAC作品コードがある行だけ。
+    """放送・配信をまだ引いていない行を選ぶ。
 
-    管理状況は作品コードで J-WID を引いて取る。コードが無い行は引きようが
-    ないので数に入れない。台帳で当たった行（台帳一致）は J-WID の詳細を
-    引いていないので、ここに並ぶことになる。
+    管理状況は JASRAC作品コードで J-WID を、NexTone管理番号で NexTone を
+    引いて取る。番号が入っている方だけを数に入れる。両方に番号がある曲は
+    両方引く（JASRAC で × でも NexTone で ○ のことがあるため）。
+    台帳で当たった行（台帳一致）は詳細を引いていないので、ここに並ぶ。
     """
-    if songs is None or songs.empty or "JASRAC作品コード" not in songs.columns:
+    if songs is None or songs.empty:
         return None
     blank = ("", "nan", "None")
-    mask = ~songs["JASRAC作品コード"].astype(str).str.strip().isin(blank)
-    missing = None
-    for col in JWID_MGMT_COLS:
-        if col not in songs.columns:
+    need = None
+    for code_col, side in (("JASRAC作品コード", 0), ("NexTone管理番号", 1)):
+        if code_col not in songs.columns:
             continue
-        col_blank = songs[col].astype(str).str.strip().isin(blank)
-        missing = col_blank if missing is None else (missing | col_blank)
-    if missing is None:
-        return None
-    return mask & missing
+        has_code = ~songs[code_col].astype(str).str.strip().isin(blank)
+        missing = None
+        for pair in MGMT_SOURCE_COLS.values():
+            src_col = pair[side]
+            if src_col not in songs.columns:
+                continue
+            col_blank = songs[src_col].astype(str).str.strip().isin(blank)
+            missing = col_blank if missing is None else (missing | col_blank)
+        if missing is None:
+            continue
+        part = has_code & missing
+        need = part if need is None else (need | part)
+    return need
 
 
 def _pick_shinkok_row(state: dict) -> None:
@@ -871,6 +892,11 @@ _SONG_DEFAULTS: dict[str, str] = {
     "委任者": "",
     "放送": "",
     "配信": "",
+    # 出どころ別の生の値（表には出さない）
+    "放送J": "",
+    "放送N": "",
+    "配信J": "",
+    "配信N": "",
     "自社楽曲ID": "",
 }
 
@@ -880,7 +906,27 @@ def _ensure_song_defaults(df: pd.DataFrame) -> pd.DataFrame:
     for col, default in _SONG_DEFAULTS.items():
         if col not in df.columns:
             df[col] = default
+    _migrate_mgmt_sources(df)
     return df
+
+
+def _migrate_mgmt_sources(df: pd.DataFrame) -> None:
+    """先に配った「放送」「配信」を、出どころ別の欄へ写す。
+
+    最初は J-WID の値しか入れていなかったので、出どころ別の欄がどちらも
+    空で表示欄だけ埋まっている行は、その値を JASRAC 由来として写す。
+    もう写してある行は触らない。
+    """
+    blank = ("", "nan", "None")
+    for col, (jw_col, nt_col) in MGMT_SOURCE_COLS.items():
+        if not {col, jw_col, nt_col} <= set(df.columns):
+            continue
+        cur = df[col].astype(str).str.strip()
+        need = (df[jw_col].astype(str).str.strip().isin(blank)
+                & df[nt_col].astype(str).str.strip().isin(blank)
+                & ~cur.isin(blank))
+        if need.any():
+            df.loc[need, jw_col] = cur[need]
 
 
 # J-WID 管理状況カテゴリ定義（利用分野の表示用）
@@ -906,21 +952,101 @@ def _format_management_status(mgmt: dict) -> str:
     return "  \n".join(lines)
 
 
-def _apply_management_status(mgmt: dict, updates: dict) -> int:
+#: 管理の強さ。○（管理あり）＞△（一部管理）＞×（管理なし）
+_MGMT_RANK = {"○": 2, "△": 1, "×": 0}
+
+
+def _combine_mgmt(jw: str, nt: str) -> str:
+    """JASRAC と NexTone の管理状況を、表に出す1つの値にまとめる。
+
+    どちらかが ○ なら使える曲なので ○ にする。NexTone 側を採ったときだけ
+    「(N)」を付けて出どころを残す（JASRAC で引くと × に見えるのに実際は
+    NexTone が管理している、というのが分かるように）。
+    空文字はまだ引いていないという意味。
+    """
+    jw = _mgmt_val(jw)
+    nt = _mgmt_val(nt)
+    if not nt:
+        return jw
+    if not jw:
+        return f"{nt}(N)"
+    if _MGMT_RANK.get(nt, -1) > _MGMT_RANK.get(jw, -1):
+        return f"{nt}(N)"
+    return jw
+
+
+def _mgmt_val(v) -> str:
+    """管理状況の1マスを文字列にする。空・nan・「?」は空文字にそろえる。"""
+    s = str(v or "").strip()
+    return "" if s in ("nan", "None", "?") else s
+
+
+def _apply_management_status(mgmt: dict, updates: dict,
+                             source: str = "J", row=None) -> int:
     """管理状況から「放送」「配信」を updates に入れる。入れた数を返す。
 
-    J-WID を1曲ずつ開いて見に行っていた欄なので、当たった時点で
-    書き取っておく。値は ○ / △ / × で、J-WID の表記のまま持つ。
-    「?」は取れなかったという意味なので入れない。
+    J-WID／NexTone を1曲ずつ開いて見に行っていた欄なので、当たった時点で
+    書き取っておく。生の値は出どころ別の欄（放送J・放送N…）に置き、表に
+    出す欄はもう片方の出どころも見て作る。
+
+    source は "J"（JASRAC／J-WID）か "N"（NexTone）。row には今の行を
+    渡す（Series でも dict でも可）。もう片方の出どころに何が入っている
+    かを見るために使う。updates に既に入っていればそちらを優先する。
     """
     if not mgmt:
         return 0
+    is_nt = str(source).upper().startswith("N")
     n = 0
     for col in JWID_MGMT_COLS:
-        val = str(mgmt.get(col, "") or "").strip()
-        if val and val != "?":
-            updates[col] = val
-            n += 1
+        val = _mgmt_val(mgmt.get(col, ""))
+        if not val:
+            continue
+        jw_col, nt_col = MGMT_SOURCE_COLS[col]
+        own_col, other_col = (nt_col, jw_col) if is_nt else (jw_col, nt_col)
+        updates[own_col] = val
+        other = updates.get(other_col)
+        if other is None and row is not None:
+            try:
+                other = row[other_col]
+            except (KeyError, IndexError, TypeError):
+                other = ""
+        other = _mgmt_val(other)
+        updates[col] = (_combine_mgmt(other, val) if is_nt
+                        else _combine_mgmt(val, other))
+        n += 1
+    return n
+
+
+def _write_mgmt_from_fetch(songs: pd.DataFrame, idx, mgmt: dict,
+                           source: str = "J") -> int:
+    """引いてきた管理状況を songs_df の1行に書き込む。書いた欄の数を返す。
+
+    同じ出どころの値が既に入っていれば引き直さない（同じ番号を引いた結果
+    なので上書きしても変わらない）。表に出す欄は、もう片方の出どころも
+    見て作り直す。
+    """
+    if not mgmt:
+        return 0
+    is_nt = str(source).upper().startswith("N")
+    keep = {}
+    for col in JWID_MGMT_COLS:
+        own_col = MGMT_SOURCE_COLS[col][1 if is_nt else 0]
+        if own_col in songs.columns and _mgmt_val(songs.at[idx, own_col]):
+            continue  # もう入っている
+        if _mgmt_val(mgmt.get(col, "")):
+            keep[col] = mgmt[col]
+    if not keep:
+        return 0
+    updates: dict = {}
+    _apply_management_status(keep, updates, source, songs.loc[idx])
+    n = 0
+    for col, val in updates.items():
+        if col not in songs.columns:
+            continue
+        if str(songs.at[idx, col]) != val:
+            songs.at[idx, col] = val
+            if col in _MGMT_RAW_COLS:   # 数えるのは中身の欄だけ
+                n += 1
     return n
 
 
@@ -2257,7 +2383,16 @@ with tabs[0]:
                         else:
                             st.write(f"{len(_nt.get('results') or [])} 件ヒット")
                             if _nt.get("results"):
-                                st.dataframe(_nt["results"], use_container_width=True)
+                                # 管理状況は入れ子の dict なのでそのままでは表に
+                                # ならない。見たいのは放送・配信なのでそこだけ開く
+                                _nt_view = pd.DataFrame(_nt["results"])
+                                if "管理状況" in _nt_view.columns:
+                                    for _nt_c in JWID_MGMT_COLS:
+                                        _nt_view[_nt_c] = [
+                                            (_m or {}).get(_nt_c, "")
+                                            for _m in _nt_view["管理状況"]]
+                                    _nt_view = _nt_view.drop(columns=["管理状況"])
+                                st.dataframe(_nt_view, use_container_width=True)
                         with st.expander("NexTone debug HTML（先頭2000字）"):
                             st.code(_nt.get("debug_html", "")[:2000])
                     else:
@@ -2396,7 +2531,8 @@ with tabs[0]:
                                     # 放送・配信。詳細ページはもう取ってある
                                     # ので、ここで書き取るのに追加の通信は要らない
                                     _apply_management_status(
-                                        _jwd_b.get("管理状況") or {}, updates)
+                                        _jwd_b.get("管理状況") or {},
+                                        updates, "J", row)
                             except Exception:
                                 pass
 
@@ -2408,6 +2544,10 @@ with tabs[0]:
                             updates["作詞者"] = r["作詞者"]
                         if r.get("管理番号"):
                             updates["NexTone管理番号"] = r["管理番号"]
+                        # 放送・配信。NexTone は検索結果の表に支分権が
+                        # そのまま出ているので、追加の通信は要らない
+                        _apply_management_status(
+                            r.get("管理状況") or {}, updates, "N", row)
                         if r.get("アーティスト") and not updates.get("アーティスト"):
                             updates["アーティスト"] = r["アーティスト"]
 
@@ -2902,6 +3042,10 @@ with tabs[0]:
                                 st.session_state.songs_df.at[_mb_idx, "作曲者"] = _rn["作曲者"]
                             if _rn.get("管理番号"):
                                 st.session_state.songs_df.at[_mb_idx, "NexTone管理番号"] = _rn["管理番号"]
+                            # 放送・配信は検索結果に出ているので通信は増えない
+                            _write_mgmt_from_fetch(
+                                st.session_state.songs_df, _mb_idx,
+                                _rn.get("管理状況") or {}, "N")
                             if st.session_state.songs_df.at[_mb_idx, "確認ステータス"] in ("未調査", "MP3補助確認"):
                                 st.session_state.songs_df.at[_mb_idx, "確認ステータス"] = "候補あり"
                         elif _nt_r:
@@ -2960,17 +3104,19 @@ with tabs[0]:
                 "原・訳詞区分":  st.column_config.TextColumn("原・訳詞区分", width="small"),
                 "確認ステータス": st.column_config.TextColumn("確認ステータス", width="medium"),
                 "委任者":        st.column_config.TextColumn("委任者", width="small"),
-                # 放送・配信は J-WID の管理状況をそのまま写した欄。人が
+                # 放送・配信は J-WID と NexTone の管理状況を写した欄。人が
                 # 書き換えるものではないので編集できないようにしてある
                 "放送": st.column_config.TextColumn(
                     "放送", width="small",
-                    help="J-WID の管理状況「放送」。○ 管理あり／"
-                         "△ 一部管理／× 管理なし。空欄はまだ引いていない",
+                    help="管理状況「放送」。○ 管理あり／△ 一部管理／× 管理なし。"
+                         "(N) は NexTone 側の値（JASRAC が × でも NexTone が"
+                         "管理していることがある）。空欄はまだ引いていない",
                 ),
                 "配信": st.column_config.TextColumn(
                     "配信", width="small",
-                    help="J-WID の管理状況「配信」。○ 管理あり／"
-                         "△ 一部管理／× 管理なし。空欄はまだ引いていない",
+                    help="管理状況「配信」。○ 管理あり／△ 一部管理／× 管理なし。"
+                         "(N) は NexTone 側の値（JASRAC が × でも NexTone が"
+                         "管理していることがある）。空欄はまだ引いていない",
                 ),
                 "CD名":          st.column_config.TextColumn("CD名", width="medium"),
             }
@@ -3069,7 +3215,7 @@ with tabs[0]:
                         )
                         st.rerun()
 
-            # 放送・配信を J-WID から引く。
+            # 放送・配信を引く。
             #
             # 表に空欄が見えている、その場で引けるようにする。同じことは
             # 「書き出し」タブの管理状況 CSV でもできるが、空欄に気づくのは
@@ -3078,11 +3224,13 @@ with tabs[0]:
             _mg_mask = _mgmt_missing_mask(_shinkok_songs)
             if _mg_mask is not None and int(_mg_mask.sum()):
                 _mg_n = int(_mg_mask.sum())
-                with st.expander(f"📡 放送・配信を J-WID から引く（{_mg_n} 曲）"):
+                with st.expander(f"📡 放送・配信を引く（{_mg_n} 曲）"):
                     st.caption(
-                        "JASRAC作品コードで J-WID を引いて、放送・配信の管理状況"
-                        "（○△×）を入れます。1曲あたり 1〜2 秒かかります。"
-                        "既に入っている欄は引き直しません。"
+                        "JASRAC作品コードで J-WID を、NexTone管理番号で NexTone を"
+                        "引いて、放送・配信の管理状況（○△×）を入れます。"
+                        "両方に番号がある曲は両方引き、どちらかが ○ なら ○ と出します"
+                        "（NexTone 側を採ったときは「○(N)」）。"
+                        "1曲あたり 1〜2 秒かかります。既に入っている欄は引き直しません。"
                         "　※管理状況は変わるものなので、共有楽曲データには貯めて"
                         "いません。最新を知りたいときはここから引き直してください。"
                     )
@@ -3090,53 +3238,60 @@ with tabs[0]:
                         _shinkok_songs.loc[
                             _mg_mask,
                             [c for c in ("No", "曲名", "JASRAC作品コード",
+                                         "NexTone管理番号",
                                          "確認ステータス", "放送", "配信")
                              if c in _shinkok_songs.columns]
                         ],
                         use_container_width=True, hide_index=True, height=200,
                     )
-                    if st.button(f"J-WID から引く（{_mg_n} 曲）",
+                    if st.button(f"引く（{_mg_n} 曲）",
                                  key="shinkok_fetch_mgmt", type="primary"):
                         from modules.scraper import (
-                            fetch_jwid_rights_by_code as _fetch_rights)
+                            fetch_jwid_rights_by_code as _fetch_rights,
+                            fetch_nextone_rights_by_code as _fetch_nrights)
                         _mg_songs = st.session_state.songs_df
                         _mg_idxs = list(_shinkok_songs.index[_mg_mask])
                         _mg_prog = st.progress(0)
                         _mg_stat = st.empty()
-                        _mg_cache: dict[str, dict] = {}
+                        _mg_cache: dict[tuple, dict] = {}
                         _mg_filled = _mg_err = 0
                         for _mg_i, _mg_idx in enumerate(_mg_idxs):
-                            _mg_code = str(
-                                _mg_songs.at[_mg_idx, "JASRAC作品コード"]).strip()
                             _mg_name = str(_mg_songs.at[_mg_idx, "曲名"]).strip()
-                            _mg_stat.text(
-                                f"取得中: {_mg_i + 1}/{_mg_n} — {_mg_name}（{_mg_code}）")
-                            # 同じ作品コードの曲が複数あっても引くのは1回
-                            if _mg_code not in _mg_cache:
-                                try:
-                                    _mg_cache[_mg_code] = _fetch_rights(_mg_code)
-                                except Exception as _e:
-                                    _mg_cache[_mg_code] = {"error": str(_e),
-                                                           "管理状況": {}}
-                            _mg_res = _mg_cache[_mg_code]
-                            if _mg_res.get("error"):
-                                _mg_err += 1
-                            _mg_u: dict = {}
-                            _apply_management_status(
-                                _mg_res.get("管理状況") or {}, _mg_u)
-                            for _mg_col, _mg_val in _mg_u.items():
-                                if _mg_col not in _mg_songs.columns:
+                            _mg_stat.text(f"取得中: {_mg_i + 1}/{_mg_n} — {_mg_name}")
+                            # JASRAC・NexTone の順に、番号がある方だけ引く
+                            for _mg_src, _mg_col_code, _mg_fn in (
+                                    ("J", "JASRAC作品コード", _fetch_rights),
+                                    ("N", "NexTone管理番号", _fetch_nrights)):
+                                if _mg_col_code not in _mg_songs.columns:
                                     continue
-                                # 既に入っている欄は触らない
-                                if str(_mg_songs.at[_mg_idx, _mg_col]).strip():
+                                _mg_code = _mgmt_val(
+                                    _mg_songs.at[_mg_idx, _mg_col_code])
+                                if not _mg_code:
                                     continue
-                                _mg_songs.at[_mg_idx, _mg_col] = _mg_val
-                                _mg_filled += 1
+                                # この行でその出どころが埋まっているなら引かない
+                                if all(_mgmt_val(_mg_songs.at[_mg_idx, _p[
+                                            1 if _mg_src == "N" else 0]])
+                                       for _p in MGMT_SOURCE_COLS.values()):
+                                    continue
+                                # 同じ番号の曲が複数あっても引くのは1回
+                                _mg_key = (_mg_src, _mg_code)
+                                if _mg_key not in _mg_cache:
+                                    try:
+                                        _mg_cache[_mg_key] = _mg_fn(_mg_code)
+                                    except Exception as _e:
+                                        _mg_cache[_mg_key] = {"error": str(_e),
+                                                              "管理状況": {}}
+                                _mg_res = _mg_cache[_mg_key]
+                                if _mg_res.get("error"):
+                                    _mg_err += 1
+                                _mg_filled += _write_mgmt_from_fetch(
+                                    _mg_songs, _mg_idx,
+                                    _mg_res.get("管理状況") or {}, _mg_src)
                             _mg_prog.progress((_mg_i + 1) / _mg_n)
                         _mg_prog.empty()
                         _mg_stat.empty()
                         if _mg_err:
-                            st.warning(f"⚠️ {_mg_err} 曲は取得できませんでした。")
+                            st.warning(f"⚠️ {_mg_err} 件は取得できませんでした。")
                         if not _mg_filled:
                             st.info("埋めるものはありませんでした。")
                         elif _autosave_to_db("（放送・配信の取り込み）"):
@@ -3891,7 +4046,8 @@ with tabs[0]:
                                     "確認ステータス":  "候補あり",
                                 }
                                 _apply_management_status(
-                                    _jw_d.get("管理状況") or {}, _mf_apply)
+                                    _jw_d.get("管理状況") or {}, _mf_apply,
+                                    "J", st.session_state.songs_df.loc[row_idx])
                                 _hy = _infer_houyo(_mf_jcd2)
                                 _cur_hy_mf = str(st.session_state.songs_df.at[row_idx, "邦洋区分"] if "邦洋区分" in st.session_state.songs_df.columns else "").strip()
                                 if _hy and not _cur_hy_mf:
@@ -4786,7 +4942,8 @@ with tabs[0]:
                                             "確認ステータス": "確定",
                                         }
                                         _apply_management_status(
-                                            _detail.get("管理状況") or {}, _pip_j_apply)
+                                            _detail.get("管理状況") or {}, _pip_j_apply,
+                                            "J", st.session_state.songs_df.loc[row_idx])
                                         _hy = _infer_houyo(_pip_j_jcd)
                                         _cur_hy = str(st.session_state.songs_df.at[row_idx, "邦洋区分"] if "邦洋区分" in st.session_state.songs_df.columns else "").strip()
                                         if _hy and not _cur_hy:
@@ -4842,6 +4999,10 @@ with tabs[0]:
                                         "アーティスト": item.get("アーティスト","") or (mb_best.get("artist","") if mb_best else ""),
                                         "確認ステータス": "候補あり",
                                     }
+                                    # 放送・配信は検索結果に出ているので通信は増えない
+                                    _apply_management_status(
+                                        item.get("管理状況") or {}, _pip_n_apply,
+                                        "N", st.session_state.songs_df.loc[row_idx])
                                     _apply_iv_from_credits(_pip_n_apply)
                                     for col, val in _pip_n_apply.items():
                                         if val and col in st.session_state.songs_df.columns:
@@ -5274,17 +5435,11 @@ with tabs[0]:
                     _rts_code = str(_rts_all.at[_rts_idx, "JASRAC作品コード"]).strip()
                     if not _rts_code:
                         continue
-                    _rts_u: dict = {}
-                    _apply_management_status(
+                    _rts_upd += _write_mgmt_from_fetch(
+                        _rts_all, _rts_idx,
                         (_rights_results.get(_rts_code) or {}).get("管理状況") or {},
-                        _rts_u,
+                        "J",
                     )
-                    for _rts_col, _rts_val in _rts_u.items():
-                        if _rts_col not in _rts_all.columns:
-                            continue
-                        if str(_rts_all.at[_rts_idx, _rts_col]).strip() != _rts_val:
-                            _rts_all.at[_rts_idx, _rts_col] = _rts_val
-                            _rts_upd += 1
 
                 st.success(f"✅ {_n} 件の取得完了")
                 if _rts_upd and _autosave_to_db("（放送・配信の取り込み）"):

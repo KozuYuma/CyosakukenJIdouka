@@ -616,12 +616,101 @@ def search_nextone(title: str) -> dict:
     return out
 
 
+def fetch_nextone_rights_by_code(mgmt_no: str) -> dict:
+    """NexTone管理番号から管理状況（放送・配信など）を取得する。
+
+    NexTone は支分権を検索結果の表にそのまま出しているので、番号で
+    検索してその行を読むだけで済む。作品ごとの詳細ページは要らない。
+
+    Returns: {"管理状況": {...}, "作品名": str, "error": str | None}
+    """
+    code = str(mgmt_no or "").strip()
+    if not code:
+        return {"管理状況": {}, "作品名": "", "error": "管理番号が空です"}
+
+    res = search_nextone(code)
+    if res.get("error") and not res.get("results"):
+        return {"管理状況": {}, "作品名": "", "error": res["error"]}
+
+    for item in res.get("results") or []:
+        if str(item.get("管理番号", "")).strip().upper() == code.upper():
+            return {
+                "管理状況": item.get("管理状況") or {},
+                "作品名": item.get("作品名", ""),
+                "error": None,
+            }
+    # 番号で引いて番号が返らないのは、消えたか綴りが違うか
+    return {"管理状況": {}, "作品名": "",
+            "error": f"管理番号 {code} の作品が見つかりません"}
+
+
 def _update_nextone_form_action(soup: BeautifulSoup) -> None:
     """検索レスポンスから次回用の Wicket フォームアクション URL を更新する。"""
     global _nextone_form_action
     new_form = soup.find("form", id=re.compile(r"id\d+"))
     if new_form and new_form.get("action"):
         _nextone_form_action = _NEXTONE_BASE + new_form["action"].lstrip("./")
+
+
+def _nextone_subright_labels(tbl) -> list[str]:
+    """支分権マスの見出しを、左から順の名前の並びとして返す。
+
+    見出しは2段組みになっている。上段に「複製」「配信」「放送」…が並び、
+    「複製」と「演奏」だけが colspan で下段に細目（ｵｰﾃﾞｨｵ・映画…）を持つ。
+    列の位置は増えうるので、番号を決め打ちせず見出しから組み立てる。
+
+    返すのは例えば
+      ['複製/ｵｰﾃﾞｨｵ', ..., '配信', '放送', '出版', '貸与', '通ｶﾗ', '演奏/…']
+    で、行の td.piece-table-col-subrights と同じ順・同じ数になる。
+    """
+    head = tbl.find("thead")
+    if head is None:
+        return []
+    rows = head.find_all("tr")
+    if not rows:
+        return []
+    lower = iter(
+        x.get_text(" ", strip=True)
+        for x in (rows[1].find_all("th") if len(rows) > 1 else [])
+    )
+    labels: list[str] = []
+    for th in rows[0].find_all("th"):
+        text = th.get_text(" ", strip=True)
+        try:
+            span = int(th.get("colspan", 1))
+        except (TypeError, ValueError):
+            span = 1
+        if span > 1:
+            for _ in range(span):
+                sub = next(lower, "")
+                labels.append(f"{text}/{sub}" if sub else text)
+        elif "piece-table-col-header-subrights" in (th.get("class") or []):
+            # 作品コード・作品名などの見出しは支分権ではないので入れない
+            labels.append(text)
+    return labels
+
+
+def _parse_nextone_subrights(row, labels: list[str]) -> dict:
+    """1行ぶんの支分権マスを {'放送': '○', '配信': '×', ...} にする。
+
+    マスは span.subright の class だけで表されていて、文字は入っていない。
+    subright-manage が管理あり、subright-unmanage が管理なし。NexTone は
+    JASRAC と違って △（一部管理）が無く、この2つしか出てこない。
+    """
+    cells = row.find_all("td", class_="piece-table-col-subrights")
+    out: dict = {}
+    for i, td in enumerate(cells):
+        if i >= len(labels):
+            break
+        span = td.find("span", class_="subright")
+        if span is None:
+            continue
+        cls = span.get("class") or []
+        if "subright-manage" in cls:
+            out[labels[i]] = "○"
+        elif "subright-unmanage" in cls:
+            out[labels[i]] = "×"
+    return out
 
 
 def _parse_nextone_table(soup: BeautifulSoup) -> list[dict]:
@@ -633,6 +722,7 @@ def _parse_nextone_table(soup: BeautifulSoup) -> list[dict]:
       td.piece-table-col [2]      → span.result-value          → 作品名
       td.piece-table-col [3]      → span.result-value          → 著作者名（作曲者）
       td.piece-table-col [4]      → span.result-value          → アーティスト名
+      td.piece-table-col-subrights × 13 → 支分権（放送・配信など）
     """
     results = []
 
@@ -643,6 +733,8 @@ def _parse_nextone_table(soup: BeautifulSoup) -> list[dict]:
     tbody = tbl.find("tbody")
     if tbody is None:
         return results
+
+    labels = _nextone_subright_labels(tbl)
 
     for row in tbody.find_all("tr"):
         # 管理番号
@@ -666,6 +758,8 @@ def _parse_nextone_table(soup: BeautifulSoup) -> list[dict]:
             "作曲者":       _col(1),
             "作詞者":       "",
             "アーティスト": _col(2),
+            # 検索結果の表にそのまま出ているので、追加の通信は要らない
+            "管理状況":     _parse_nextone_subrights(row, labels),
         }
         if any(v for v in item.values()):
             results.append(item)
