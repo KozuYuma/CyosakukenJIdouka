@@ -3185,46 +3185,6 @@ with tabs[0]:
                 "「確認ステータス」列に出ています。"
             )
 
-            # 台帳の当たりを書き直す。
-            #
-            # 台帳を引くのは CSV を読み込んだときの1回だけなので、それより
-            # 前に作った案件には「台帳一致」が入っていない。ここから引き
-            # 直せるようにしておく。埋めるのは空欄だけ・上書きするのは
-            # 「未調査」の確認ステータスだけなので、何度押しても害はない
-            with st.expander("🗃️ 台帳で空欄を埋める（🔴 を減らす。通信なし・一瞬）"):
-                st.caption(
-                    "共有楽曲データと自社CD台帳を管理番号で引き直し、レコード会社名・"
-                    "CD番号・作家名などの空欄を埋めます。台帳を見るだけなので"
-                    "一瞬で終わります。J-WID や MINC を引きに行く前に、まずここを"
-                    "押すのが早道です。"
-                    "　※台帳は読み込みのときに一度引いていますが、それより後に"
-                    "誰かが台帳に足した曲はここから取り込めます。"
-                    "　空いている欄だけを埋め、確認ステータスは「未調査」の行だけ"
-                    "「台帳一致」に変えます。人が入れた値は動きません。"
-                )
-                if st.button("台帳で埋め直す", key="shinkok_refill_ledger"):
-                    _rf_hits = _rf_filled = 0
-                    _rf_err = ""
-                    for _rf_fn, _rf_name in ((master_fill, "共有楽曲データ"),
-                                             (cd_fill, "自社CDの台帳")):
-                        try:
-                            _rf_df, _rf_h, _rf_f = _rf_fn(st.session_state.songs_df)
-                            if _rf_f:
-                                st.session_state.songs_df = _rf_df
-                                _rf_hits += _rf_h
-                                _rf_filled += _rf_f
-                        except Exception as _e:
-                            _rf_err = f"{_rf_name}の参照に失敗しました: {_e}"
-                    if _rf_err:
-                        st.warning(f"⚠️ {_rf_err}")
-                    elif not _rf_filled:
-                        st.info("埋めるものはありませんでした。")
-                    if _rf_filled and _autosave_to_db("（台帳で埋め直し）"):
-                        st.session_state["_autosave_msg"] = (
-                            f"台帳から {_rf_hits} 曲・{_rf_filled} 欄を埋めました"
-                        )
-                        st.rerun()
-
             # 放送・配信を引く。
             #
             # 表に空欄が見えている、その場で引けるようにする。同じことは
@@ -3308,6 +3268,44 @@ with tabs[0]:
                             st.session_state["_autosave_msg"] = (
                                 f"放送・配信を {_mg_filled} 欄ぶん入れました"
                             )
+                        st.rerun()
+
+            # データベース（共有楽曲データ・自社CDの台帳）の当たりを書き直す。
+            #
+            # 読み込みのときに一度引いているので、普段は押す必要がない。
+            # 押すのは、そのあとデータベースを更新したときだけ。だから
+            # 放送・配信より下に置いてある。埋めるのは空欄だけ・上書き
+            # するのは「未調査」の確認ステータスだけなので、何度押しても害はない
+            with st.expander("🗃️ データベースで空欄を埋める（通信なし・一瞬）"):
+                st.caption(
+                    "**CSV を読み込んだあとにデータベースを更新した場合だけ押してください。**"
+                    "　読み込みのときに一度引いているので、普段は押す必要がありません。"
+                    "　共有楽曲データと自社CDの台帳を管理番号で引き直し、"
+                    "レコード会社名・CD番号・作家名などの空欄を埋めます。"
+                    "空いている欄だけを埋め、確認ステータスは「未調査」の行だけ"
+                    "「台帳一致」に変えます。人が入れた値は動きません。"
+                )
+                if st.button("データベースで埋める", key="shinkok_refill_ledger"):
+                    _rf_hits = _rf_filled = 0
+                    _rf_err = ""
+                    for _rf_fn, _rf_name in ((master_fill, "共有楽曲データ"),
+                                             (cd_fill, "自社CDの台帳")):
+                        try:
+                            _rf_df, _rf_h, _rf_f = _rf_fn(st.session_state.songs_df)
+                            if _rf_f:
+                                st.session_state.songs_df = _rf_df
+                                _rf_hits += _rf_h
+                                _rf_filled += _rf_f
+                        except Exception as _e:
+                            _rf_err = f"{_rf_name}の参照に失敗しました: {_e}"
+                    if _rf_err:
+                        st.warning(f"⚠️ {_rf_err}")
+                    elif not _rf_filled:
+                        st.info("埋めるものはありませんでした。")
+                    if _rf_filled and _autosave_to_db("（データベースで埋め直し）"):
+                        st.session_state["_autosave_msg"] = (
+                            f"データベースから {_rf_hits} 曲・{_rf_filled} 欄を埋めました"
+                        )
                         st.rerun()
 
             # 昔の書き方で保存された行の付け直し。
