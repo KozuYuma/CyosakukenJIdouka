@@ -3205,6 +3205,45 @@ with tabs[0]:
                 disabled=["状態", *JWID_MGMT_COLS],
                 on_change=_sync_shinkok_to_songs,
             )
+
+            # チェックされた行のナビゲーションボタンを即表示。
+            # 表のすぐ下に置く（印の説明よりも先）。行き先を選ぶのは表を
+            # 見ながらなので、スクロールしないと両方見えない位置だと使えない
+            _sel_pos = st.session_state.get("_shinkok_sel")
+            _sel_rows = ([_sel_pos]
+                         if isinstance(_sel_pos, int) and 0 <= _sel_pos < len(_shinkok_df)
+                         else [])
+            if _sel_rows:
+                _sel_ev = str(_shinkok_df.iloc[_sel_rows[0]].get("イベント名", "")).strip()
+                _smatch2 = (
+                    _shinkok_songs[_shinkok_songs["イベント名"] == _sel_ev]
+                    if _sel_ev else pd.DataFrame()
+                )
+                if not _smatch2.empty:
+                    _sm2 = _smatch2.iloc[0]
+                    _no2 = int(_sm2["No"])
+                    _name2 = str(_sm2.get("曲名", _sel_ev) or _sel_ev).strip() or _sel_ev
+                    _status2 = str(_sm2.get("確認ステータス", "未調査") or "未調査").strip()
+                    _sel_label2 = f"{_no2}. [{_status2}] {_sel_ev}"
+                    _gbc1, _gbc2, _gbc3, _gbc4 = st.columns([2.5, 2.5, 2.5, 3.5])
+                    with _gbc1:
+                        if st.button("🌲 MINC で調査", key="shin_goto_minc", use_container_width=True):
+                            st.session_state["search_song_select"] = _sel_label2
+                            st.session_state["_scroll_target"] = "sec-minc-individual"
+                            st.rerun()
+                    with _gbc2:
+                        if st.button("🔄 パイプラインで調査", key="shin_goto_pip", use_container_width=True):
+                            st.session_state["search_song_select"] = _sel_label2
+                            st.session_state["_scroll_target"] = "sec-pipeline"
+                            st.rerun()
+                    with _gbc3:
+                        if st.button("💿 CD情報を検索", key="shin_goto_cds", use_container_width=True):
+                            st.session_state["search_song_select"] = _sel_label2
+                            st.session_state["_scroll_target"] = "sec-cd-search"
+                            st.rerun()
+                    with _gbc4:
+                        st.caption(f"📍 **{_name2}** [{_status2}]")
+
             st.caption(
                 f"状態の印: {ISSUE_MARK_LEGEND}"
                 "　🔴 は申告に要る欄が空いている行、🟡 は非委任者または"
@@ -3519,42 +3558,6 @@ with tabs[0]:
                                 f"{_stale_n} 曲を「複数候補あり」に付け直しました"
                             )
                         st.rerun()
-
-            # チェックされた行のナビゲーションボタンを即表示
-            _sel_pos = st.session_state.get("_shinkok_sel")
-            _sel_rows = ([_sel_pos]
-                         if isinstance(_sel_pos, int) and 0 <= _sel_pos < len(_shinkok_df)
-                         else [])
-            if _sel_rows:
-                _sel_ev = str(_shinkok_df.iloc[_sel_rows[0]].get("イベント名", "")).strip()
-                _smatch2 = (
-                    _shinkok_songs[_shinkok_songs["イベント名"] == _sel_ev]
-                    if _sel_ev else pd.DataFrame()
-                )
-                if not _smatch2.empty:
-                    _sm2 = _smatch2.iloc[0]
-                    _no2 = int(_sm2["No"])
-                    _name2 = str(_sm2.get("曲名", _sel_ev) or _sel_ev).strip() or _sel_ev
-                    _status2 = str(_sm2.get("確認ステータス", "未調査") or "未調査").strip()
-                    _sel_label2 = f"{_no2}. [{_status2}] {_sel_ev}"
-                    _gbc1, _gbc2, _gbc3, _gbc4 = st.columns([2.5, 2.5, 2.5, 3.5])
-                    with _gbc1:
-                        if st.button("🌲 MINC で調査", key="shin_goto_minc", use_container_width=True):
-                            st.session_state["search_song_select"] = _sel_label2
-                            st.session_state["_scroll_target"] = "sec-minc-individual"
-                            st.rerun()
-                    with _gbc2:
-                        if st.button("🔄 パイプラインで調査", key="shin_goto_pip", use_container_width=True):
-                            st.session_state["search_song_select"] = _sel_label2
-                            st.session_state["_scroll_target"] = "sec-pipeline"
-                            st.rerun()
-                    with _gbc3:
-                        if st.button("💿 CD情報を検索", key="shin_goto_cds", use_container_width=True):
-                            st.session_state["search_song_select"] = _sel_label2
-                            st.session_state["_scroll_target"] = "sec-cd-search"
-                            st.rerun()
-                    with _gbc4:
-                        st.caption(f"📍 **{_name2}** [{_status2}]")
 
             # CSV ダウンロード。「選択」「状態」は画面を操作するためだけの
             # 列なので、書き出す表からは外す
