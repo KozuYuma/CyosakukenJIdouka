@@ -72,11 +72,11 @@ from modules.scraper import search_all
 from modules.search_helper import JWID_BASE, generate_search_terms
 from modules.spotify import is_available as spotify_available, spotify_search_url
 from modules.ui import (
-    STATUS_MARK_LEGEND,
+    ISSUE_MARK_LEGEND,
     count_done,
     inject_css,
+    issue_mark,
     status_bar,
-    status_mark,
 )
 
 # =====================================================================
@@ -3142,9 +3142,10 @@ with tabs[0]:
             # HTML の要素になっていないため）。正確な言葉が要るときは、
             # 同じ表の「確認ステータス」列にそのまま出ている。
             _shinkok_src = _shinkok_df[_preview_cols].copy()
+            # 印は「どこまで調べたか」ではなく「このまま出せるか」で付ける。
+            # 調べ方の途中経過は隣の確認ステータス列にそのまま出ている
             _shinkok_src.insert(0, "状態", [
-                status_mark(v) for v in _shinkok_src.get(
-                    "確認ステータス", pd.Series([""] * len(_shinkok_src)))
+                issue_mark(r) for _, r in _shinkok_src.iterrows()
             ])
             _shinkok_src.insert(0, "選択", False)
             # 表示に使った DataFrame の位置で編集差分が返ってくるので、
@@ -3156,12 +3157,15 @@ with tabs[0]:
                 "選択": st.column_config.CheckboxColumn("選択", width="small"),
                 "状態": st.column_config.TextColumn(
                     "状態", width="small",
-                    help="人が見に行く必要がある行に印が付く。\n\n"
-                         + STATUS_MARK_LEGEND.replace("　", "\n\n")
-                         + "\n\n🔵 は手が要らない行。管理番号で自社の台帳に"
-                           "当たっていて、申告に足す情報がもう無い。\n\n"
-                           "（確定・作曲者一致・アーティスト一致・"
-                           "候補あり〔1件だけ当たった〕は印なし）",
+                    help="このまま申告に出せるかどうかの印。\n\n"
+                         "🔴 空欄あり … レコード会社名・レコード番号・"
+                         "邦洋・I/V・作曲・アーティストのどれかが空、"
+                         "ヴォーカルなのに作詞が空、JASRAC も NexTone も"
+                         "番号が無い、放送・配信をまだ引いていない\n\n"
+                         "🟡 権利状態注意 … 非委任者、または放送・配信が"
+                         "○ではない\n\n"
+                         "印なし … 空欄も無く、権利も○。そのまま出せる\n\n"
+                         "どこまで調べたかは隣の「確認ステータス」列に出ています",
                 ),
             }
             _edited_shinkok = st.data_editor(
@@ -3175,9 +3179,10 @@ with tabs[0]:
                 on_change=_sync_shinkok_to_songs,
             )
             st.caption(
-                f"状態の印: {STATUS_MARK_LEGEND}"
-                "　（🔵 は手が要らない行。確定・一致・1件だけ当たった"
-                "「候補あり」は印なし）"
+                f"状態の印: {ISSUE_MARK_LEGEND}"
+                "　🔴 は申告に要る欄が空いている行、🟡 は非委任者または"
+                "放送・配信が○でない行。どこまで調べたかは"
+                "「確認ステータス」列に出ています。"
             )
 
             # 台帳の当たりを書き直す。

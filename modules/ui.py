@@ -71,38 +71,71 @@ def status_tone(value) -> str:
     return _STATUS_TONE.get(str(value).strip(), _IDLE)
 
 
-# 段階を表す1文字。編集できる表（st.data_editor）には色を敷けないので、
-# 色の代わりにこの印を隣の列に置く。
-#
-# 印を出すのは、人が手を入れる必要がある段階だけ。当たりが1つだけ出て
-# そのまま入った行（候補あり）も、確定や一致と同じく無印にする。見るべき
-# なのは「どれか選ぶ必要がある行」なので、そこだけが目に入るようにする。
-#
-# 台帳一致（🔵）だけは例外で、手は要らないのに印を出す。申告フォーマット
-# に足す情報が無い＝もう調べなくてよい行だと分かるようにするため。
-_STATUS_MARK: dict[str, str] = {
-    _OK:     "",
-    _HIT:    "",
-    _MAYBE:  "",
-    _LEDGER: "🔵",
-    _MULTI:  "🟡",
-    _TODO:   "🟠",
-    _NONE:   "🔴",
-    _IDLE:   "・",
-}
-
-# 印の読み方。表の見出しに添えて出す
-STATUS_MARK_LEGEND = (
-    "🔵 台帳一致　🟡 複数候補あり　🟠 要確認　🔴 該当なし　・ 未調査"
+#: 状態欄の印の読み方。表の見出しと下に添えて出す
+ISSUE_MARK_LEGEND = (
+    "🔴 空欄あり　🟡 権利状態注意　（印なし＝そのまま出せる）"
 )
 
+#: 空とみなす値。DB を通ると空欄が nan や None の字で戻ってくる
+_ISSUE_BLANKS = ("", "nan", "none")
 
-def status_mark(value) -> str:
-    """確認ステータスを1文字の印に直す。色を敷けない表で色の代わりに使う。
 
-    手の要らない段階（確定・一致）は空文字。
+def _issue_val(row, *names) -> str:
+    """行から、名前の挙がっている欄のうち最初に見つかったものを文字列で返す。
+
+    申告フォーマットの表（レコード番号・作詞…）と楽曲まとめ（CD番号・
+    作詞者…）で欄の名前が違うので、どちらでも引けるようにしてある。
+    空とみなす値は空文字にそろえる。
     """
-    return _STATUS_MARK.get(status_tone(value), "・")
+    for name in names:
+        try:
+            v = row[name]
+        except (KeyError, IndexError, TypeError):
+            continue
+        s = str(v).strip() if v is not None else ""
+        return "" if s.lower() in _ISSUE_BLANKS else s
+    return ""
+
+
+def issue_mark(row) -> str:
+    """申告フォーマット1行の中身を見て、状態欄の印を返す。
+
+    🔴 空欄あり  … 申告に要る欄が埋まっていない。まだ手を入れる行。
+    🟡 権利状態注意 … 欄は埋まっているが、権利の状態に気をつける行。
+    印なし        … そのまま出せる行。
+
+    放送・配信がまだ空（引いていない）ときは、○かどうかが分からないので
+    黄ではなく赤（空欄あり）にする。分からないものを「注意」と書くと、
+    本当に注意が要る行が埋もれるため。表の下の「📡 放送・配信を引く」
+    から埋められる。
+    """
+    iv = _issue_val(row, "I/V区分")
+    holes = (
+        not _issue_val(row, "レコード会社名"),
+        not _issue_val(row, "レコード番号", "CD番号"),
+        not _issue_val(row, "邦・洋区分", "邦洋区分"),
+        not iv,
+        # ヴォーカルなら作詞者がいるはず。インストなら空でよい
+        iv.startswith(("ヴォーカル", "V", "v"))
+        and not _issue_val(row, "作詞", "作詞者"),
+        # どちらの管理団体にも番号が無い＝まだ突き止められていない
+        not _issue_val(row, "JASRACコード", "JASRAC作品コード")
+        and not _issue_val(row, "NexTone管理番号"),
+        not _issue_val(row, "作曲", "作曲者"),
+        not _issue_val(row, "アーティスト"),
+        not _issue_val(row, "放送"),
+        not _issue_val(row, "配信"),
+    )
+    if any(holes):
+        return "🔴"
+    cautions = (
+        _issue_val(row, "委任者") == "非委任者",
+        not _issue_val(row, "放送").startswith("○"),
+        not _issue_val(row, "配信").startswith("○"),
+    )
+    if any(cautions):
+        return "🟡"
+    return ""
 
 
 def inject_css() -> None:
