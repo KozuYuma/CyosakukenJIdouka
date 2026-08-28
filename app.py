@@ -300,6 +300,33 @@ def _mgmt_missing_mask(songs: pd.DataFrame | None):
     return need
 
 
+def _norm_hinban(s: str) -> str:
+    """品番（CD番号）を比べるための形にする。JASRACコードと同じ直し方でよい。"""
+    return _normalize_jcd(s)
+
+
+def _delegate_missing_mask(songs: pd.DataFrame | None):
+    """委任者がまだ入っていない行を選ぶ。作品の番号がある行だけ。
+
+    委任者は MINC の CD商品詳細にしか出ていない。そこへ辿り着くには
+    作品の番号（JASRAC作品コード か NexTone管理番号）が要るので、
+    番号の無い行は数に入れない。データベース（台帳）で当たった行は
+    MINC を引いていないので、ここに並ぶことになる。
+    """
+    if songs is None or songs.empty or "委任者" not in songs.columns:
+        return None
+    blank = ("", "nan", "None")
+    has_code = None
+    for col in ("JASRAC作品コード", "NexTone管理番号"):
+        if col not in songs.columns:
+            continue
+        part = ~songs[col].astype(str).str.strip().isin(blank)
+        has_code = part if has_code is None else (has_code | part)
+    if has_code is None:
+        return None
+    return has_code & songs["委任者"].astype(str).str.strip().isin(blank)
+
+
 def _pick_shinkok_row(state: dict) -> None:
     """申告フォーマットの「選択」欄を1行だけに保つ。
 
@@ -3269,6 +3296,158 @@ with tabs[0]:
                                 f"放送・配信を {_mg_filled} 欄ぶん入れました"
                             )
                         st.rerun()
+
+            # 委任者を MINC から引く。
+            #
+            # 委任者は MINC の CD商品詳細にしか出ていない。作品の番号で
+            # 収録CDの一覧を取り、その中からこの曲の CD を選んで詳細を
+            # 見る、という2手が要る。データベースで当たった行は MINC を
+            # 引いていないので、ここが委任者の入り口になる。
+            # 引く行があるときだけ出す
+            _dg_mask = _delegate_missing_mask(_shinkok_songs)
+            if _dg_mask is not None and int(_dg_mask.sum()):
+                _dg_n = int(_dg_mask.sum())
+                with st.expander(f"🧾 委任者を MINC から引く（{_dg_n} 曲）"):
+                    st.caption(
+                        "作品コードで MINC の収録CD一覧を引き、CD番号が同じ CD の"
+                        "商品詳細から委任者区分（委任者／非委任者）を入れます。"
+                        "同じ CD が見つからない曲は飛ばします（別の盤の委任者を"
+                        "入れてしまわないため）。ついでに空いていれば"
+                        "レコード会社名・CD名・I/V区分も同じ画面から入れます。"
+                        "　1曲につき MINC を3回引くので、1曲あたり 4〜6 秒"
+                        "かかります（20曲で2分ほど）。MINC にログインしている"
+                        "必要があります。"
+                    )
+                    st.dataframe(
+                        _shinkok_songs.loc[
+                            _dg_mask,
+                            [c for c in ("No", "曲名", "CD番号",
+                                         "JASRAC作品コード", "NexTone管理番号",
+                                         "確認ステータス")
+                             if c in _shinkok_songs.columns]
+                        ],
+                        use_container_width=True, hide_index=True, height=200,
+                    )
+                    if st.button(f"MINC から引く（{_dg_n} 曲）",
+                                 key="shinkok_fetch_delegate", type="primary"):
+                        _dg_c = _get_mf_client()
+                        _dg_ok, _dg_msg = check_session(_dg_c)
+                        if not _dg_ok:
+                            st.error(
+                                f"MINC のセッションが使えません（{_dg_msg}）。"
+                                "「検索補助」タブの 🔑 MINC ログインからつなぎ直して"
+                                "ください。"
+                            )
+                        else:
+                            _dg_songs = st.session_state.songs_df
+                            _dg_idxs = list(_shinkok_songs.index[_dg_mask])
+                            _dg_prog = st.progress(0)
+                            _dg_stat = st.empty()
+                            _dg_cds: dict[tuple, dict] = {}
+                            _dg_det: dict[tuple, dict] = {}
+                            _dg_filled = _dg_skip = _dg_err = 0
+                            for _dg_i, _dg_idx in enumerate(_dg_idxs):
+                                _dg_row = _dg_songs.loc[_dg_idx]
+                                _dg_title = str(_dg_row.get("曲名", "")).strip()
+                                _dg_jcd = _mgmt_val(_dg_row.get("JASRAC作品コード"))
+                                _dg_ncd = _mgmt_val(_dg_row.get("NexTone管理番号"))
+                                _dg_cdno = _mgmt_val(_dg_row.get("CD番号"))
+                                _dg_stat.text(
+                                    f"取得中: {_dg_i + 1}/{_dg_n} — {_dg_title}")
+                                try:
+                                    # 同じ作品の曲が複数あっても一覧を引くのは1回
+                                    _dg_key = (_dg_jcd, _dg_ncd, _dg_title)
+                                    if _dg_key not in _dg_cds:
+                                        _dg_cds[_dg_key] = _dg_c.search_cds_by_jasrac(
+                                            _dg_jcd, _dg_title, _dg_ncd)
+                                    _dg_list = _dg_cds[_dg_key].get("cds") or []
+                                    # この曲の CD を選ぶ。委任者は盤ごとの話なので、
+                                    # CD番号が合う盤が無ければ入れない
+                                    _dg_pick = None
+                                    if _dg_cdno:
+                                        _dg_want = _norm_hinban(_dg_cdno)
+                                        _dg_pick = next(
+                                            (c for c in _dg_list
+                                             if _norm_hinban(c.get("品番", "")) == _dg_want),
+                                            None)
+                                    elif len(_dg_list) == 1:
+                                        # CD番号がまだ無い曲。収録CDが1枚しか
+                                        # 無いなら、選びようがないので確定できる
+                                        _dg_pick = _dg_list[0]
+                                    if not _dg_pick or not _dg_pick.get("album_id"):
+                                        _dg_skip += 1
+                                        _dg_prog.progress((_dg_i + 1) / _dg_n)
+                                        continue
+                                    # CD商品リストの行には track_id が入って
+                                    # いない。fetch_track_list は曲名から
+                                    # track_id を探すところまでやってくれる
+                                    _dg_dkey = (_dg_pick["album_id"], _dg_title)
+                                    if _dg_dkey not in _dg_det:
+                                        _dg_det[_dg_dkey] = _dg_c.fetch_track_list(
+                                            _dg_pick["album_id"],
+                                            _dg_pick.get("track_id", ""),
+                                            _dg_title)
+                                    _dg_d = _dg_det[_dg_dkey]
+                                    if _dg_d.get("error"):
+                                        _dg_err += 1
+                                        _dg_prog.progress((_dg_i + 1) / _dg_n)
+                                        continue
+                                except Exception:
+                                    _dg_err += 1
+                                    _dg_prog.progress((_dg_i + 1) / _dg_n)
+                                    continue
+
+                                # 埋めるのは空いている欄だけ。人が入れた値は動かさない
+                                _dg_u: dict = {}
+                                if _dg_d.get("集中管理") in ("委任者", "非委任者"):
+                                    _dg_u["委任者"] = _dg_d["集中管理"]
+                                # 収録曲の中からこの曲を探して I/V を見る
+                                _dg_key2 = normalize_for_match(_dg_title)
+                                _dg_tr = next(
+                                    (t for t in (_dg_d.get("tracks") or [])
+                                     if normalize_for_match(t.get("曲名", "")) == _dg_key2),
+                                    None) if _dg_key2 else None
+                                if _dg_tr and _dg_tr.get("IV") == "I":
+                                    _dg_u["I/V区分"] = "インスト"
+                                elif _dg_tr and _dg_tr.get("IV") == "V":
+                                    _dg_u["I/V区分"] = "ヴォーカル"
+                                if _dg_tr and _dg_tr.get("アーティスト"):
+                                    _dg_u["アーティスト"] = _dg_tr["アーティスト"]
+                                _dg_u["CD番号"] = (_dg_d.get("品番")
+                                                   or _dg_pick.get("品番", ""))
+                                _dg_u["CD名"] = (_dg_d.get("CD商品タイトル")
+                                                 or _dg_pick.get("CD商品タイトル", ""))
+                                _dg_u["レコード会社名"] = (
+                                    _dg_d.get("レコード会社名")
+                                    or _dg_pick.get("レコード会社名", ""))
+                                _dg_u = {k: v for k, v in _dg_u.items() if v}
+                                if not _dg_u.get("委任者"):
+                                    _dg_skip += 1
+                                for _dg_col, _dg_val in _dg_u.items():
+                                    if _dg_col not in _dg_songs.columns:
+                                        continue
+                                    if _mgmt_val(_dg_songs.at[_dg_idx, _dg_col]):
+                                        continue
+                                    _dg_songs.at[_dg_idx, _dg_col] = _dg_val
+                                    _dg_filled += 1
+                                _dg_prog.progress((_dg_i + 1) / _dg_n)
+                            _dg_prog.empty()
+                            _dg_stat.empty()
+                            if _dg_err:
+                                st.warning(f"⚠️ {_dg_err} 曲は取得できませんでした。")
+                            if _dg_skip:
+                                st.info(
+                                    f"{_dg_skip} 曲は委任者を決められませんでした"
+                                    "（CD番号の合う盤が MINC に無い、または商品詳細に"
+                                    "委任者区分が出ていない）。"
+                                )
+                            if not _dg_filled:
+                                st.info("埋めるものはありませんでした。")
+                            elif _autosave_to_db("（委任者の取り込み）"):
+                                st.session_state["_autosave_msg"] = (
+                                    f"委任者ほかを {_dg_filled} 欄ぶん入れました"
+                                )
+                            st.rerun()
 
             # データベース（共有楽曲データ・自社CDの台帳）の当たりを書き直す。
             #
