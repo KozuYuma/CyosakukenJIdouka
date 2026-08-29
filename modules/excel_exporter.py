@@ -214,8 +214,9 @@ _SHINKOK_ORDER = [
     "I/V区分", "邦・洋区分", "原・訳詞区分",
     "JASRACコード", "NexTone管理番号", "作詞", "作曲", "アーティスト", "編曲", "訳詞",
     "自社楽曲ID",
-    # 参照列（申告書には不要だが確認用）
-    "トラック", "イベント名", "START TIME", "使用尺",
+    # 参照列（申告書には不要だが確認用）。
+    # トラック（M1-1 など）は NUENDO の作りの都合で、申告には使わないので出さない
+    "イベント名", "START TIME", "使用尺",
     # 補助列（申告書外・右端）。放送・配信は J-WID の管理状況の同名項目で、
     # 委任者と並べて権利まわりをひとまとまりに見せる
     "確認ステータス", "委任者", "放送", "配信", "CD名",
@@ -228,7 +229,7 @@ _SHINKOK_AUX_COLS = ("確認ステータス", "委任者", "放送", "配信", "
 _SHINKOK_INT_COLS = {"使用時間（分）", "使用時間（秒）"}
 
 # 参照列（申告シート内でグレー背景にする）
-_SHINKOK_REF_COLS = {"トラック", "イベント名", "START TIME", "使用尺", *_SHINKOK_AUX_COLS}
+_SHINKOK_REF_COLS = {"イベント名", "START TIME", "使用尺", *_SHINKOK_AUX_COLS}
 
 
 def build_shinkok_df(songs_df: pd.DataFrame, events_df: pd.DataFrame) -> pd.DataFrame:
@@ -243,7 +244,7 @@ def build_shinkok_df(songs_df: pd.DataFrame, events_df: pd.DataFrame) -> pd.Data
     songs_sub = songs_df[["イベント名"] + list(song_rename.keys()) + _extra_cols].copy()
     songs_sub.rename(columns=song_rename, inplace=True)
 
-    event_pick = ["イベント名", "トラック", "START TIME", "使用尺", "使用時間（分）", "使用時間（秒）"]
+    event_pick = ["イベント名", "START TIME", "使用尺", "使用時間（分）", "使用時間（秒）"]
     events_sub = events_df[[c for c in event_pick if c in events_df.columns]].copy()
 
     merged = events_sub.merge(songs_sub, on="イベント名", how="left")

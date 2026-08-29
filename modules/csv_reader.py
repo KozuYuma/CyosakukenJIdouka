@@ -210,6 +210,14 @@ def _parse_nuendo_multitrack(text: str, sep: str) -> pd.DataFrame | None:
         cols = ["トラック名"] + [c for c in df.columns if c != "トラック名"]
         df = df[cols]
 
+    # 番組の流れの順に並べ替える。
+    # ファイルはトラックごとに書かれているので、そのままだと M1-1 の曲が
+    # 全部並んだあとに M2-1 の曲が続く。実際の使われ方は時間順なので
+    # START TIME で並べ直し、M1-1 と M2-1 が交互に出るようにする。
+    # "00:00:10:00" の形は桁が揃っているので文字列のままで正しく並ぶ。
+    if "START TIME" in df.columns:
+        df = df.sort_values("START TIME", kind="stable")
+
     return df.reset_index(drop=True)
 
 
