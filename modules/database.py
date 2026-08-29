@@ -780,7 +780,13 @@ def minc_state_get(name: str) -> tuple[str, float] | None:
 
 
 def minc_state_put(name: str, state: str, updated_at: float) -> None:
-    """Cookie を保存する。同じ名前が既にあれば上書きする。
+    """Cookie を保存する。同じ名前が既にあれば新しい方を残す。
+
+    上書きは「今入っているものより新しいとき」だけにする。DB に入って
+    いる値を読んでから書くまでの間に、別の人が貼り直していることが
+    あるため。ここを素の上書きにすると、手元の古い Cookie が誰かの
+    新しい Cookie を潰してしまう。持ち回りの向きを、読む側
+    （musicforest._pull_state）と同じ「新しい方が勝つ」にそろえる。
 
     Cookie はログインの鍵そのものなので、失敗しても中身は例外に載せない。
     """
@@ -791,6 +797,7 @@ def minc_state_put(name: str, state: str, updated_at: float) -> None:
             text("INSERT INTO minc_state (name, state, updated_at) "
                  "VALUES (:n, :s, :u) "
                  "ON CONFLICT (name) DO UPDATE SET "
-                 "state = EXCLUDED.state, updated_at = EXCLUDED.updated_at"),
+                 "state = EXCLUDED.state, updated_at = EXCLUDED.updated_at "
+                 "WHERE minc_state.updated_at < EXCLUDED.updated_at"),
             {"n": name, "s": state, "u": float(updated_at)},
         )
