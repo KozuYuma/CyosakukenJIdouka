@@ -1304,8 +1304,25 @@ def _init_session() -> None:
             st.session_state[key] = val
 
 
+@st.cache_resource(show_spinner=False)
+def _init_db_once() -> bool:
+    """表を用意するのは、サーバーが立ち上がってから1回でよい。
+
+    この画面はボタンを押すたびに丸ごと動き直すので、素直に毎回呼ぶと
+    CREATE TABLE IF NOT EXISTS などの問い合わせを 1クリックごとに
+    16回もクラウドDBへ投げることになる（1往復あたり実測 175ミリ秒
+    なので、それだけで数秒待たされる）。中身は何度流しても同じ結果に
+    なる文だけなので、1回流したら覚えておいてよい。
+
+    cache_resource はサーバーの process ごとなので、入れ替えや再起動の
+    たびにきちんと流し直される。
+    """
+    init_db()
+    return True
+
+
 _init_session()
-init_db()
+_init_db_once()
 
 # =====================================================================
 # Chrome 拡張機能からの MINC セッション同期（クエリパラメータ受信）
@@ -1545,6 +1562,8 @@ def _remember_project(project_id: int, updated_at: str | None = None) -> None:
         updated_at if updated_at is not None
         else project_updated_at(project_id)
     )
+    # 一覧に出す更新時刻が変わるので、覚えている一覧は捨てる
+    _forget_count("projects")
 
 
 def _save_project_now(force: bool = False) -> str:
@@ -1606,9 +1625,41 @@ def _cached_count(key: str, fn, ttl: float = _COUNT_TTL) -> int:
     return n
 
 
+def _cached_call(key: str, fn, ttl: float = _COUNT_TTL):
+    """件数以外の問い合わせも、しばらく使い回す。
+
+    案件の一覧や共有楽曲データの検索は、見ているタブに関係なく毎回の
+    再実行で走る（Streamlit は隠れているタブの中身も動かすため）。
+    書き換えたときは _forget_count で捨てるので、自分の操作の結果は
+    すぐ反映される。他の人の書き換えが見えるまでは最大 ttl 秒かかる。
+
+    失敗したときは、前の値があればそれを返す。
+    """
+    box = st.session_state.setdefault("_count_cache", {})
+    hit = box.get(key)
+    now = time.monotonic()
+    if hit and (now - hit[1]) < ttl:
+        return hit[0]
+    try:
+        val = fn()
+    except Exception:
+        if hit:
+            return hit[0]
+        raise
+    box[key] = (val, now)
+    return val
+
+
 def _forget_count(key: str) -> None:
     """数え直しが要るときに、覚えている件数を捨てる。"""
     (st.session_state.get("_count_cache") or {}).pop(key, None)
+
+
+def _forget_count_prefix(prefix: str) -> None:
+    """検索語ごとに覚えているものを、まとめて捨てる。"""
+    box = st.session_state.get("_count_cache") or {}
+    for _k in [k for k in box if k.startswith(prefix)]:
+        box.pop(_k, None)
 
 
 def _master_learn() -> int:
@@ -1625,6 +1676,7 @@ def _master_learn() -> int:
         _n = master_learn(_df, CURRENT_USER)
         if _n:
             _forget_count("master")   # 増えた分をすぐ出す
+            _forget_count_prefix("master_rows")
         return _n
     except Exception as _e:
         st.warning(f"⚠️ 共有楽曲データへの保存に失敗しました: {_e}")
@@ -1718,8 +1770,10 @@ with tabs[0]:
         # 未選択のときは下に警告を出すので、開きっぱなしにしなくてよい。
         expanded=False,
     ):
-        # 自分の案件 ＋ 所有者が空の案件（分ける前に作られたもの）だけ出す
-        _projects = list_projects(CURRENT_USER)
+        # 自分の案件 ＋ 所有者が空の案件（分ける前に作られたもの）だけ出す。
+        # 畳んであっても中身は毎回動くので、しばらく使い回す
+        _projects = _cached_call(
+            "projects", lambda: list_projects(CURRENT_USER))
 
         _pm_col1, _pm_col2 = st.columns(2)
 
@@ -1784,6 +1838,7 @@ with tabs[0]:
                             # 移行用のスクリプトを別に用意しなくて済む。
                             if not _sel_proj.get("owner"):
                                 set_project_owner(_pid, CURRENT_USER)
+                                _forget_count("projects")
                             st.success(
                                 f"✅ 「{_sel_proj['name']}」を読み込みました"
                                 f"（楽曲 {len(_loaded_songs)} 件）"
@@ -1794,6 +1849,7 @@ with tabs[0]:
                 with _del_col:
                     if st.button("🗑️", key="btn_del_project", help="プロジェクトを削除", use_container_width=True):
                         delete_project(_sel_proj["id"])
+                        _forget_count("projects")
                         if st.session_state.project_id == _sel_proj["id"]:
                             st.session_state.project_id = None
                             st.session_state.project_name = ""
@@ -2224,6 +2280,7 @@ with tabs[0]:
                     _auto_name, "照合実行時に自動作成", owner=CURRENT_USER
                 )
                 st.session_state.project_name = _auto_name
+                _forget_count("projects")
                 st.info(f"🗄️ 案件「{_auto_name}」を自動で作成しました。")
             except Exception as _e:
                 st.warning(
@@ -6003,7 +6060,10 @@ with tabs[2]:
             st.markdown(f"全 **{_total}** 曲")
 
         _LIMIT = 300
-        _recs = master_search(_kw, limit=_LIMIT)
+        # このタブを見ていなくても毎回動くところなので、検索語ごとに
+        # しばらく使い回す。直したり消したりしたときは捨てて引き直す
+        _recs = _cached_call(
+            f"master_rows|{_kw}", lambda: master_search(_kw, limit=_LIMIT))
 
         if not _recs:
             st.warning("見つかりませんでした。別の言葉で探してください。")
@@ -6092,6 +6152,7 @@ with tabs[2]:
                                              key=f"me_reload_{_ids[0]}"):
                                     st.rerun()
                             elif _n:
+                                _forget_count_prefix("master_rows")
                                 st.success("✅ 保存しました。")
                                 st.rerun()
                             else:
@@ -6109,6 +6170,7 @@ with tabs[2]:
                     _n = master_delete(_ids)
                     if _n:
                         _forget_count("master")   # 減った分をすぐ出す
+                        _forget_count_prefix("master_rows")
                         st.success(f"🗑️ {_n} 曲を消しました。")
                         # 選択が残っていると消えた行を指したままになる。
                         # 代入ではなく削除にすること。ウィジェットを作った
