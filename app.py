@@ -40,8 +40,9 @@ from modules.database import (
     master_count,
     master_delete,
     master_search,
-    save_events,
-    save_songs,
+    ProjectChanged,
+    project_updated_at,
+    save_project,
     set_project_owner,
 )
 from modules.cd_master import fill as cd_fill
@@ -1427,16 +1428,68 @@ def _autosave_to_db(note: str = "") -> bool:
     if not _pid or st.session_state.get("songs_df") is None:
         return False
     try:
-        save_songs(_pid, st.session_state.songs_df)
-        if st.session_state.get("events_df") is not None:
-            save_events(_pid, st.session_state.events_df)
+        _remember_project(_pid, save_project(
+            _pid, st.session_state.songs_df,
+            st.session_state.get("events_df"),
+            seen_at=st.session_state.get("project_seen_at"),
+        ))
         st.session_state["_autosave_msg"] = (
             f"💾 「{st.session_state.get('project_name', '')}」に保存しました{note}"
         )
         return True
+    except ProjectChanged:
+        # 他の人が先に保存していた。全置換なので、そのまま書くと相手の
+        # 行ごと消える。自動保存では黙って見送り、💾ボタンの方で人に
+        # 選ばせる
+        st.session_state["_autosave_msg"] = (
+            "⚠️ 他の人がこの案件を先に保存したため、自動保存を見送りました。"
+            "「⚙️ ファイル読み込み・設定」の💾ボタンから保存してください。"
+        )
+        return False
     except Exception as _e:
         st.session_state["_autosave_msg"] = f"⚠️ 自動保存に失敗しました: {_e}"
         return False
+
+
+def _remember_project(project_id: int, updated_at: str | None = None) -> None:
+    """案件を「いつの状態で開いているか」を覚える。
+
+    保存するときに、この時刻から変わっていないかを確かめる。変わって
+    いれば、他の人が同じ案件を保存したということ。
+    """
+    st.session_state["project_seen_at"] = (
+        updated_at if updated_at is not None
+        else project_updated_at(project_id)
+    )
+
+
+def _save_project_now(force: bool = False) -> str:
+    """💾ボタンの中身。保存して、共有楽曲データにも貯める。
+
+    うまくいったら知らせる文言を返す。他の人が先に保存していたときは
+    何も書かずに空文字を返し、画面に選ばせる印を立てる。
+
+    force=True のときは、先に保存されていても上書きする。人が画面で
+    「それでも上書きする」を選んだときだけ渡すこと。
+    """
+    _pid = st.session_state.project_id
+    _songs = st.session_state.songs_df
+    try:
+        _remember_project(_pid, save_project(
+            _pid, _songs, st.session_state.get("events_df"),
+            seen_at=None if force else st.session_state.get("project_seen_at"),
+        ))
+    except ProjectChanged:
+        st.session_state["_project_conflict"] = True
+        return ""
+    st.session_state.pop("_project_conflict", None)
+    _msg = f"✅ {len(_songs)} 件を保存しました。"
+    # 手で直して「確定」にしたものが一番強い出典なので、
+    # ここで貯めるのが共有データにとって一番価値が高い
+    _learned = _master_learn()
+    if _learned:
+        _msg += f" 🗃️ 共有楽曲データにも {_learned} 曲を貯めました。"
+    return _msg
 
 
 # 件数を数えるだけの問い合わせを、しばらく使い回す間隔（秒）
@@ -1605,6 +1658,7 @@ with tabs[0]:
                                           owner=CURRENT_USER)
                     st.session_state.project_id = _pid
                     st.session_state.project_name = _new_name.strip()
+                    _remember_project(_pid)
                     st.success(f"✅ プロジェクト「{_new_name.strip()}」を作成しました（ID: {_pid}）")
                     st.rerun()
                 else:
@@ -1638,6 +1692,9 @@ with tabs[0]:
                             st.session_state.events_df = _loaded_events
                             st.session_state.project_id = _pid
                             st.session_state.project_name = _sel_proj["name"]
+                            # 読み込んだ時点の状態を覚えておく。保存する
+                            # ときに、他の人が先に保存していないか見る
+                            _remember_project(_pid, _sel_proj.get("updated_at"))
                             # 所有者が空のものは、読み込んだ人のものにする。
                             # これで所有者を分ける前の案件が自然に片付き、
                             # 移行用のスクリプトを別に用意しなくて済む。
@@ -1678,18 +1735,42 @@ with tabs[0]:
                     use_container_width=True,
                     disabled=st.session_state.songs_df is None,
                 ):
-                    save_songs(st.session_state.project_id, st.session_state.songs_df)
-                    if st.session_state.events_df is not None:
-                        save_events(st.session_state.project_id, st.session_state.events_df)
-                    n = len(st.session_state.songs_df)
-                    st.success(f"✅ {n} 件を保存しました。")
-                    # 手で直して「確定」にしたものが一番強い出典なので、
-                    # ここで貯めるのが共有データにとって一番価値が高い
-                    _learned = _master_learn()
-                    if _learned:
-                        st.info(
-                            f"🗃️ 共有楽曲データに {_learned} 曲を貯めました。"
-                        )
+                    _done = _save_project_now()
+                    if _done:
+                        st.success(_done)
+
+            # 他の人が先に保存していたとき。上のボタンの中で出すと、
+            # 「それでも上書きする」を押した瞬間に消えてしまうので、
+            # 伝言を session_state に置いてここで出す
+            if st.session_state.get("_project_conflict"):
+                st.warning(
+                    "⚠️ 他の人がこの案件を先に保存しました。上書きしていません。\n\n"
+                    "この画面の内容はそのまま残っています。相手の入れた内容を"
+                    "確かめてから、下のどちらかを選んでください。"
+                )
+                _c_over, _c_reload = st.columns(2)
+                with _c_over:
+                    if st.button("⚠️ それでも今の内容で上書きする",
+                                 key="btn_save_force",
+                                 use_container_width=True):
+                        # 知らせは伝言にして出し直す。ここで出しても、
+                        # 上の警告が残ったままになって紛らわしいため
+                        _done = _save_project_now(force=True)
+                        if _done:
+                            st.session_state["_autosave_msg"] = _done
+                            st.rerun()
+                with _c_reload:
+                    if st.button("📂 相手の内容を読み込み直す（今の画面は消えます）",
+                                 key="btn_reload_project",
+                                 use_container_width=True):
+                        _pid = st.session_state.project_id
+                        _again = load_songs(_pid)
+                        if _again is not None:
+                            st.session_state.songs_df = _ensure_song_defaults(_again)
+                            st.session_state.events_df = load_events(_pid)
+                        _remember_project(_pid)
+                        st.session_state.pop("_project_conflict", None)
+                        st.rerun()
         else:
             st.info("プロジェクトを作成または読み込むと、DBへの保存が有効になります。")
 
@@ -2108,9 +2189,20 @@ with tabs[0]:
         # 保存はここまで全部終えてから。以前は照合直後に保存していたので、
         # ID3 の補完結果が保存されずに消えていた
         if st.session_state.project_id:
-            save_songs(st.session_state.project_id, st.session_state.songs_df)
-            save_events(st.session_state.project_id, st.session_state.events_df)
-            st.info(f"💾 プロジェクト「{st.session_state.project_name}」に自動保存しました。")
+            try:
+                _remember_project(st.session_state.project_id, save_project(
+                    st.session_state.project_id,
+                    st.session_state.songs_df,
+                    st.session_state.events_df,
+                    seen_at=st.session_state.get("project_seen_at"),
+                ))
+                st.info(f"💾 プロジェクト「{st.session_state.project_name}」に自動保存しました。")
+            except ProjectChanged:
+                st.warning(
+                    "⚠️ 他の人がこの案件を先に保存したため、自動保存を見送りました。"
+                    "照合の結果はこの画面に残っています。上の💾ボタンから"
+                    "保存するか読み込み直すかを選んでください。"
+                )
 
 
     # =================================================================

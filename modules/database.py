@@ -380,8 +380,9 @@ def _rows_to_df(records: list) -> pd.DataFrame | None:
     return pd.DataFrame(dicts)
 
 
-def _replace_rows(table: str, project_id: int, df: pd.DataFrame) -> None:
-    """プロジェクト単位で全置換する。"""
+def _replace_rows_conn(conn, table: str, project_id: int,
+                       df: pd.DataFrame) -> None:
+    """プロジェクト単位で全置換する（渡された接続を使う）。"""
     rows = _df_to_rows(df, project_id)
     ins = text(f"INSERT INTO {table} (project_id, row_no, data) "
                f"VALUES (:project_id, :row_no, :data)")
@@ -389,11 +390,16 @@ def _replace_rows(table: str, project_id: int, df: pd.DataFrame) -> None:
         # JSONB 列に文字列を入れるとエラーになるのでキャストする
         ins = text(f"INSERT INTO {table} (project_id, row_no, data) "
                    f"VALUES (:project_id, :row_no, CAST(:data AS JSONB))")
+    conn.execute(text(f"DELETE FROM {table} WHERE project_id = :pid"),
+                 {"pid": project_id})
+    if rows:
+        conn.execute(ins, rows)
+
+
+def _replace_rows(table: str, project_id: int, df: pd.DataFrame) -> None:
+    """プロジェクト単位で全置換する。"""
     with get_engine().begin() as conn:
-        conn.execute(text(f"DELETE FROM {table} WHERE project_id = :pid"),
-                     {"pid": project_id})
-        if rows:
-            conn.execute(ins, rows)
+        _replace_rows_conn(conn, table, project_id, df)
 
 
 def _load_rows(table: str, project_id: int) -> pd.DataFrame | None:
@@ -488,18 +494,65 @@ def delete_project(project_id: int) -> None:
                      {"pid": project_id})
 
 
-def _touch_project(project_id: int) -> None:
-    with get_engine().begin() as conn:
-        conn.execute(text(f"UPDATE projects SET updated_at = {_now_sql()} "
-                          f"WHERE id = :pid"), {"pid": project_id})
+class ProjectChanged(Exception):
+    """開いている間に、他の人が同じ案件を保存していた。
+
+    案件の保存は行の全置換なので、そのまま書くと相手の入れた行ごと
+    消してしまう。呼ぶ側で受け止めて、人に知らせること。
+    """
+
+
+def project_updated_at(project_id: int) -> str:
+    """案件の更新時刻。案件が無ければ空。開いた時刻を覚えるのに使う。"""
+    try:
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                text("SELECT updated_at FROM projects WHERE id = :pid"),
+                {"pid": project_id},
+            ).first()
+        return _as_text(row[0]) if row else ""
+    except Exception:
+        return ""
+
+
+def _touch_project(conn, project_id: int) -> str:
+    """更新時刻を今にして、その時刻を返す。"""
+    conn.execute(text(f"UPDATE projects SET updated_at = {_now_sql()} "
+                      f"WHERE id = :pid"), {"pid": project_id})
+    row = conn.execute(text("SELECT updated_at FROM projects WHERE id = :pid"),
+                       {"pid": project_id}).first()
+    return _as_text(row[0]) if row else ""
+
+
+def _check_seen(conn, project_id: int, seen_at: str) -> None:
+    """開いたときから案件が変わっていないか確かめる。"""
+    sql = text("SELECT updated_at FROM projects WHERE id = :pid"
+               + (" FOR UPDATE" if is_postgres() else ""))
+    row = conn.execute(sql, {"pid": project_id}).first()
+    if row is None:
+        raise ProjectChanged("案件が消えています")
+    if _as_text(row[0]) != _as_text(seen_at):
+        raise ProjectChanged("他の人が先に保存しています")
 
 
 # ─── 楽曲まとめ ─────────────────────────────────────────
 
-def save_songs(project_id: int, songs_df: pd.DataFrame) -> None:
-    """songs_df をDBに保存する（プロジェクト単位で全置換）。"""
-    _replace_rows("song_rows", project_id, songs_df)
-    _touch_project(project_id)
+def save_songs(project_id: int, songs_df: pd.DataFrame,
+               seen_at: str | None = None) -> str:
+    """songs_df をDBに保存する（プロジェクト単位で全置換）。
+
+    保存後の更新時刻を返す。呼ぶ側はそれを「開いたときの時刻」として
+    持ち直すこと。
+
+    seen_at を渡すと、その時刻から案件が変わっていないか確かめてから
+    書く。変わっていたら何も書かずに ProjectChanged を出す。確かめる
+    ところから書き終わるまでは1つのトランザクションで通す。
+    """
+    with get_engine().begin() as conn:
+        if seen_at is not None:
+            _check_seen(conn, project_id, seen_at)
+        _replace_rows_conn(conn, "song_rows", project_id, songs_df)
+        return _touch_project(conn, project_id)
 
 
 def load_songs(project_id: int) -> pd.DataFrame | None:
@@ -517,6 +570,24 @@ def save_events(project_id: int, events_df: pd.DataFrame) -> None:
 def load_events(project_id: int) -> pd.DataFrame | None:
     """DBから events_df を復元する。"""
     return _load_rows("event_rows", project_id)
+
+
+def save_project(project_id: int, songs_df: pd.DataFrame,
+                 events_df: pd.DataFrame | None = None,
+                 seen_at: str | None = None) -> str:
+    """楽曲まとめとイベントを、まとめて1回で保存する。
+
+    保存後の更新時刻を返す。seen_at の扱いは save_songs と同じ。
+    片方だけ書けて片方が書けない、という中途半端な状態にならないよう、
+    2つの表を1つのトランザクションで置き換える。
+    """
+    with get_engine().begin() as conn:
+        if seen_at is not None:
+            _check_seen(conn, project_id, seen_at)
+        _replace_rows_conn(conn, "song_rows", project_id, songs_df)
+        if events_df is not None:
+            _replace_rows_conn(conn, "event_rows", project_id, events_df)
+        return _touch_project(conn, project_id)
 
 
 # ─── 共有楽曲データ ──────────────────────────────────────
