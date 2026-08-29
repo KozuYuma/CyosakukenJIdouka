@@ -336,8 +336,11 @@ def _pick_shinkok_row(state: dict) -> None:
     自前で1列持っている。ただの列なので何行でもチェックできてしまう。
     そこで新しくチェックされた行だけを残し、他の印は消す。
 
-    消すのは表示用の DataFrame ではなく data_editor が覚えている編集差分の
-    方。ここを直さないと、次に描き直しても前の印が復活してしまう。
+    覚えている編集差分（edited_rows）から他の印を消すだけでは、表側が
+    自前で持っている編集中の状態が残ってしまい、前の印が付いたままに
+    見える。そこで選ばれた行を控えたうえで、表の key を変えて作り直す。
+    作り直す前に押した内容は _sync_shinkok_to_songs が songs_df へ
+    書き込み済みなので、消えるのは印だけ。
     """
     edited = state.get("edited_rows") or {}
     checked = [int(p) for p, ch in edited.items()
@@ -355,6 +358,8 @@ def _pick_shinkok_row(state: dict) -> None:
         if isinstance(ch, dict) and "選択" in ch and int(p) != keep:
             ch["選択"] = False
     st.session_state["_shinkok_sel"] = keep
+    # 表を作り直させる。次の描画では選ばれた行だけに印が付く
+    st.session_state["_shinkok_ver"] = st.session_state.get("_shinkok_ver", 0) + 1
 
 
 def _sync_shinkok_to_songs() -> None:
@@ -365,7 +370,9 @@ def _sync_shinkok_to_songs() -> None:
     行番号は表示に使った DataFrame の位置なので、その DataFrame（_shinkok_src）と
     突き合わせてイベント名を引き、songs_df の該当行を特定する。
     """
-    state = st.session_state.get("shinkok_editor")
+    state = st.session_state.get(
+        st.session_state.get("_shinkok_key", "shinkok_editor")
+    )
     src: pd.DataFrame | None = st.session_state.get("_shinkok_src")
     songs: pd.DataFrame | None = st.session_state.get("songs_df")
     if not isinstance(state, dict) or src is None or songs is None:
@@ -3441,7 +3448,11 @@ with tabs[0]:
             _shinkok_src.insert(0, "状態", [
                 issue_mark(r) for _, r in _shinkok_src.iterrows()
             ])
-            _shinkok_src.insert(0, "選択", False)
+            # 印は「常に1つか0個」。控えてある行だけを付けた状態で描く
+            _sel_keep = st.session_state.get("_shinkok_sel")
+            _shinkok_src.insert(0, "選択", [
+                i == _sel_keep for i in range(len(_shinkok_src))
+            ])
             # 表示に使った DataFrame の位置で編集差分が返ってくるので、
             # 行番号→イベント名 を引けるように控えておく
             st.session_state["_shinkok_src"] = _shinkok_src
@@ -3462,12 +3473,20 @@ with tabs[0]:
                          "どこまで調べたかは隣の「確認ステータス」列に出ています",
                 ),
             }
+            # 印を付け替えたときは版が上がり、表が作り直されて前の印が消える。
+            # 古い版の覚え書きは残しても使わないので捨てる
+            _shinkok_key = f"shinkok_editor_{st.session_state.get('_shinkok_ver', 0)}"
+            _prev_key = st.session_state.get("_shinkok_key")
+            if _prev_key and _prev_key != _shinkok_key:
+                st.session_state.pop(_prev_key, None)
+            st.session_state["_shinkok_key"] = _shinkok_key
+
             _edited_shinkok = st.data_editor(
                 _shinkok_src,
                 use_container_width=True,
                 hide_index=True,
                 height=460,
-                key="shinkok_editor",
+                key=_shinkok_key,
                 column_config=_SHINKOK_COL_CFG,
                 disabled=["状態", *JWID_MGMT_COLS],
                 on_change=_sync_shinkok_to_songs,
