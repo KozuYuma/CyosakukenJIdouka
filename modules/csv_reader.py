@@ -173,8 +173,13 @@ def _parse_nuendo_multitrack(text: str, sep: str) -> pd.DataFrame | None:
             continue
 
         # --- データ行の処理 ---
-        # ヘッダーが出る前の行（"構成,2" など）はここに来ない
-        if current_headers and stripped and "," in stripped:
+        # ヘッダーが出る前の行（"構成,2" など）はここに来ない。
+        # 区切り文字はファイルごとに違う（NUENDO はタブで書き出すことがある）。
+        # ここをカンマ決め打ちにすると、タブ区切りのときに1行も拾えず、
+        # 「ふつうのCSV」として最後まで読まれてしまい、2本目以降の
+        # 見出し行（トラック - M2-1 / 構成 / ノートパッド / 2回目の
+        # イベント名 / 末尾のセクション見出し）が曲として並んでしまう
+        if current_headers and stripped and sep in stripped:
             # n_expected 列に合わせて分割（最後の列にカンマが含まれても壊れないよう maxsplit 指定）
             fields = [f.strip() for f in stripped.split(sep, n_expected - 1)]
 
