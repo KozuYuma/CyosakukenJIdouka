@@ -2112,10 +2112,9 @@ with tabs[0]:
             st.info(f"💾 プロジェクト「{st.session_state.project_name}」に自動保存しました。")
 
 
-# =====================================================================
-# 申告フォーマット + 楽曲まとめ（tabs[0] 2ブロック目）
-# =====================================================================
-with tabs[0]:
+    # =================================================================
+    # 申告フォーマット + 楽曲まとめ
+    # =================================================================
     st.divider()
 
     if st.session_state.songs_df is None:
@@ -3580,216 +3579,9 @@ with tabs[0]:
                 )
 
 
-# =====================================================================
-# タブ 2: イベント一覧
-# =====================================================================
-with tabs[1]:
-    st.header("イベント一覧（NUENDO イベント単位）")
-
-    if st.session_state.events_df is None:
-        st.info("「📋 申告フォーム作成」タブの設定セクションで照合を実行してください。")
-    else:
-        events_df: pd.DataFrame = st.session_state.events_df
-
-        status_opts_e = sorted(events_df["照合ステータス"].dropna().unique().tolist())
-        ev_filter = st.multiselect(
-            "照合ステータスで絞り込み",
-            options=status_opts_e,
-            default=status_opts_e,
-            key="event_status_filter",
-        )
-
-        filtered_ev = events_df[events_df["照合ステータス"].isin(ev_filter)]
-        st.caption(f"表示: {len(filtered_ev)} 件 ／ 全 {len(events_df)} 件")
-
-        # 使用時間（分・秒）が events_df にない旧データを補完
-        def _dur_to_min_sec(s):
-            s = str(s).strip()
-            if not s or s.lower() == "nan":
-                return 0, 0
-            try:
-                parts = s.split(":")
-                if len(parts) == 3:
-                    t = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-                elif len(parts) == 2:
-                    t = int(parts[0]) * 60 + float(parts[1])
-                else:
-                    t = float(parts[0])
-                t = int(t)
-                return t // 60, t % 60
-            except (ValueError, TypeError):
-                return 0, 0
-
-        if "使用時間（分）" not in filtered_ev.columns:
-            if "使用尺" in filtered_ev.columns:
-                filtered_ev = filtered_ev.copy()
-                filtered_ev[["使用時間（分）", "使用時間（秒）"]] = (
-                    filtered_ev["使用尺"]
-                    .apply(lambda x: pd.Series(_dur_to_min_sec(x), index=["使用時間（分）", "使用時間（秒）"]))
-                )
-
-        st.dataframe(
-            filtered_ev,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "使用尺":       st.column_config.TextColumn("使用尺", width="small"),
-                "使用時間（分）": st.column_config.NumberColumn("分", width="small", format="%d"),
-                "使用時間（秒）": st.column_config.NumberColumn("秒", width="small", format="%d"),
-                "START TIME":  st.column_config.TextColumn("START TIME", width="small"),
-                "終了時間":     st.column_config.TextColumn("終了時間",   width="small"),
-                "イン時間":     st.column_config.TextColumn("イン時間",   width="small"),
-                "アウト時間":   st.column_config.TextColumn("アウト時間", width="small"),
-            },
-        )
-
-
-# =====================================================================
-# 🗃️ 共有楽曲データ（ステップ3）
-# =====================================================================
-with tabs[2]:
-    st.header("🗃️ 共有楽曲データ")
-    st.caption(
-        "案件をまたいで貯めている楽曲データです。ここで直した値は"
-        "「手入力」として残るので、あとから機械が調べ直しても"
-        "上書きされません。"
-    )
-
-    # 自社CDの台帳（TSP）はここでは直せない読み取り専用の資料。
-    # 入っているかどうかだけ分かるようにしておく
-    _cd_total = _cached_count("cd", cd_count, _CD_COUNT_TTL)
-    if _cd_total:
-        st.caption(
-            f"💿 自社CDの台帳: {_cd_total:,} 曲（読み取り専用）。"
-            "照合のとき、管理番号が一致した曲の空欄をここから埋めます。"
-        )
-
-    _total = _cached_count("master", master_count)
-    if not _total:
-        st.info(
-            "まだ何も貯まっていません。照合して「確定」「作曲者一致」"
-            "「アーティスト一致」になった曲が、保存のときに貯まります。"
-        )
-    else:
-        _c_kw, _c_n = st.columns([4, 1])
-        with _c_kw:
-            _kw = st.text_input(
-                "検索",
-                key="master_kw",
-                placeholder="曲名 / 管理番号 / 作曲者 / アーティスト …",
-                label_visibility="collapsed",
-            )
-        with _c_n:
-            st.markdown(f"全 **{_total}** 曲")
-
-        _LIMIT = 300
-        _recs = master_search(_kw, limit=_LIMIT)
-
-        if not _recs:
-            st.warning("見つかりませんでした。別の言葉で探してください。")
-        else:
-            _view = master_frame(_recs)
-            if len(_recs) >= _LIMIT:
-                # 黙って切らない。全部出ていると思われると困るため
-                st.caption(
-                    f"多いので新しい順に {_LIMIT} 件まで出しています。"
-                    "検索で絞ってください。"
-                )
-
-            _sel = st.dataframe(
-                _view.drop(columns=["id"]),
-                use_container_width=True,
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="multi-row",
-                key="master_table",
-                column_config={
-                    "曲名":         st.column_config.TextColumn("曲名", width="medium"),
-                    "管理番号キー":  st.column_config.TextColumn("管理番号キー", width="small"),
-                    "トラックキー":  st.column_config.TextColumn("トラックキー", width="small"),
-                    "更新":         st.column_config.TextColumn("更新", width="small"),
-                },
-            )
-
-            _rows = list(_sel.selection.rows) if _sel and _sel.selection else []
-            _ids = [int(_view.iloc[i]["id"]) for i in _rows]
-
-            if not _ids:
-                st.caption("左端をクリックして選ぶと、直したり消したりできます。")
-            else:
-                _by_id = {int(r["id"]): r for r in _recs}
-
-                # ── 直す（1件だけ選んだとき）──────────────────
-                if len(_ids) == 1:
-                    _rec = _by_id[_ids[0]]
-                    _src_line = master_sources(_rec)
-                    with st.expander(
-                        f"✏️ 「{_rec.get('title') or '（曲名なし）'}」を直す",
-                        expanded=True,
-                    ):
-                        st.caption(
-                            f"最終更新: {_rec.get('updated_at') or '—'}"
-                            + (f" ／ 出典: {_src_line}" if _src_line else "")
-                        )
-                        with st.form(f"master_edit_{_ids[0]}"):
-                            _vals = {
-                                "曲名": st.text_input(
-                                    "曲名", value=_rec.get("title") or "",
-                                    key=f"me_title_{_ids[0]}",
-                                )
-                            }
-                            _cols = st.columns(2)
-                            for _i, _f in enumerate(MASTER_FIELDS):
-                                _c = master_cell(_rec, _f)
-                                _help = "まだ何も入っていません"
-                                if _c["v"]:
-                                    _help = f"出典: {_c['src'] or '不明'}"
-                                    if _c["by"]:
-                                        _help += f" ／ 入れた人: {_c['by']}"
-                                with _cols[_i % 2]:
-                                    _vals[_f] = st.text_input(
-                                        _f, value=_c["v"], help=_help,
-                                        key=f"me_{_f}_{_ids[0]}",
-                                    )
-                            _save = st.form_submit_button(
-                                "💾 この曲を保存", type="primary",
-                                use_container_width=True,
-                            )
-                        if _save:
-                            _n = master_edit(_rec, _vals, CURRENT_USER)
-                            if _n:
-                                st.success("✅ 保存しました。")
-                                st.rerun()
-                            else:
-                                st.info("変わったところがありません。")
-
-                # ── 消す ────────────────────────────────────
-                st.divider()
-                st.markdown(f"🗑️ **{len(_ids)} 曲**を選んでいます")
-                _ok = st.checkbox(
-                    "消すと元に戻せません。全員の共有データから消えます。",
-                    key="master_del_ok",
-                )
-                if st.button("🗑️ 選んだ曲を消す", disabled=not _ok,
-                             key="master_del_btn"):
-                    _n = master_delete(_ids)
-                    if _n:
-                        _forget_count("master")   # 減った分をすぐ出す
-                        st.success(f"🗑️ {_n} 曲を消しました。")
-                        # 選択が残っていると消えた行を指したままになる。
-                        # 代入ではなく削除にすること。ウィジェットを作った
-                        # あとで代入すると Streamlit が例外を出す
-                        st.session_state.pop("master_table", None)
-                        st.session_state.pop("master_del_ok", None)
-                        st.rerun()
-                    else:
-                        st.error("❌ 消せませんでした。")
-
-
-# =====================================================================
-# タブ 4: 検索補助
-# =====================================================================
-with tabs[0]:
+    # =================================================================
+    # 検索補助
+    # =================================================================
     st.divider()
     st.subheader("🔍 補完検索（J-WID / MINC / NexTone）")
 
@@ -5592,10 +5384,9 @@ with tabs[0]:
             st.info("照合実行後に表示されます。")
 
 
-# =====================================================================
-# Excel 出力 + J-WID CSV（tabs[0] 末尾）
-# =====================================================================
-with tabs[0]:
+    # =================================================================
+    # Excel 出力 + J-WID CSV
+    # =================================================================
     st.divider()
     st.subheader("📊 Excel 出力")
 
@@ -5766,3 +5557,209 @@ with tabs[0]:
                     use_container_width=True,
                     type="primary",
                 )
+
+
+# =====================================================================
+# タブ 2: イベント一覧
+# =====================================================================
+with tabs[1]:
+    st.header("イベント一覧（NUENDO イベント単位）")
+
+    if st.session_state.events_df is None:
+        st.info("「📋 申告フォーム作成」タブの設定セクションで照合を実行してください。")
+    else:
+        events_df: pd.DataFrame = st.session_state.events_df
+
+        status_opts_e = sorted(events_df["照合ステータス"].dropna().unique().tolist())
+        ev_filter = st.multiselect(
+            "照合ステータスで絞り込み",
+            options=status_opts_e,
+            default=status_opts_e,
+            key="event_status_filter",
+        )
+
+        filtered_ev = events_df[events_df["照合ステータス"].isin(ev_filter)]
+        st.caption(f"表示: {len(filtered_ev)} 件 ／ 全 {len(events_df)} 件")
+
+        # 使用時間（分・秒）が events_df にない旧データを補完
+        def _dur_to_min_sec(s):
+            s = str(s).strip()
+            if not s or s.lower() == "nan":
+                return 0, 0
+            try:
+                parts = s.split(":")
+                if len(parts) == 3:
+                    t = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                elif len(parts) == 2:
+                    t = int(parts[0]) * 60 + float(parts[1])
+                else:
+                    t = float(parts[0])
+                t = int(t)
+                return t // 60, t % 60
+            except (ValueError, TypeError):
+                return 0, 0
+
+        if "使用時間（分）" not in filtered_ev.columns:
+            if "使用尺" in filtered_ev.columns:
+                filtered_ev = filtered_ev.copy()
+                filtered_ev[["使用時間（分）", "使用時間（秒）"]] = (
+                    filtered_ev["使用尺"]
+                    .apply(lambda x: pd.Series(_dur_to_min_sec(x), index=["使用時間（分）", "使用時間（秒）"]))
+                )
+
+        st.dataframe(
+            filtered_ev,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "使用尺":       st.column_config.TextColumn("使用尺", width="small"),
+                "使用時間（分）": st.column_config.NumberColumn("分", width="small", format="%d"),
+                "使用時間（秒）": st.column_config.NumberColumn("秒", width="small", format="%d"),
+                "START TIME":  st.column_config.TextColumn("START TIME", width="small"),
+                "終了時間":     st.column_config.TextColumn("終了時間",   width="small"),
+                "イン時間":     st.column_config.TextColumn("イン時間",   width="small"),
+                "アウト時間":   st.column_config.TextColumn("アウト時間", width="small"),
+            },
+        )
+
+
+# =====================================================================
+# 🗃️ 共有楽曲データ（ステップ3）
+# =====================================================================
+with tabs[2]:
+    st.header("🗃️ 共有楽曲データ")
+    st.caption(
+        "案件をまたいで貯めている楽曲データです。ここで直した値は"
+        "「手入力」として残るので、あとから機械が調べ直しても"
+        "上書きされません。"
+    )
+
+    # 自社CDの台帳（TSP）はここでは直せない読み取り専用の資料。
+    # 入っているかどうかだけ分かるようにしておく
+    _cd_total = _cached_count("cd", cd_count, _CD_COUNT_TTL)
+    if _cd_total:
+        st.caption(
+            f"💿 自社CDの台帳: {_cd_total:,} 曲（読み取り専用）。"
+            "照合のとき、管理番号が一致した曲の空欄をここから埋めます。"
+        )
+
+    _total = _cached_count("master", master_count)
+    if not _total:
+        st.info(
+            "まだ何も貯まっていません。照合して「確定」「作曲者一致」"
+            "「アーティスト一致」になった曲が、保存のときに貯まります。"
+        )
+    else:
+        _c_kw, _c_n = st.columns([4, 1])
+        with _c_kw:
+            _kw = st.text_input(
+                "検索",
+                key="master_kw",
+                placeholder="曲名 / 管理番号 / 作曲者 / アーティスト …",
+                label_visibility="collapsed",
+            )
+        with _c_n:
+            st.markdown(f"全 **{_total}** 曲")
+
+        _LIMIT = 300
+        _recs = master_search(_kw, limit=_LIMIT)
+
+        if not _recs:
+            st.warning("見つかりませんでした。別の言葉で探してください。")
+        else:
+            _view = master_frame(_recs)
+            if len(_recs) >= _LIMIT:
+                # 黙って切らない。全部出ていると思われると困るため
+                st.caption(
+                    f"多いので新しい順に {_LIMIT} 件まで出しています。"
+                    "検索で絞ってください。"
+                )
+
+            _sel = st.dataframe(
+                _view.drop(columns=["id"]),
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="multi-row",
+                key="master_table",
+                column_config={
+                    "曲名":         st.column_config.TextColumn("曲名", width="medium"),
+                    "管理番号キー":  st.column_config.TextColumn("管理番号キー", width="small"),
+                    "トラックキー":  st.column_config.TextColumn("トラックキー", width="small"),
+                    "更新":         st.column_config.TextColumn("更新", width="small"),
+                },
+            )
+
+            _rows = list(_sel.selection.rows) if _sel and _sel.selection else []
+            _ids = [int(_view.iloc[i]["id"]) for i in _rows]
+
+            if not _ids:
+                st.caption("左端をクリックして選ぶと、直したり消したりできます。")
+            else:
+                _by_id = {int(r["id"]): r for r in _recs}
+
+                # ── 直す（1件だけ選んだとき）──────────────────
+                if len(_ids) == 1:
+                    _rec = _by_id[_ids[0]]
+                    _src_line = master_sources(_rec)
+                    with st.expander(
+                        f"✏️ 「{_rec.get('title') or '（曲名なし）'}」を直す",
+                        expanded=True,
+                    ):
+                        st.caption(
+                            f"最終更新: {_rec.get('updated_at') or '—'}"
+                            + (f" ／ 出典: {_src_line}" if _src_line else "")
+                        )
+                        with st.form(f"master_edit_{_ids[0]}"):
+                            _vals = {
+                                "曲名": st.text_input(
+                                    "曲名", value=_rec.get("title") or "",
+                                    key=f"me_title_{_ids[0]}",
+                                )
+                            }
+                            _cols = st.columns(2)
+                            for _i, _f in enumerate(MASTER_FIELDS):
+                                _c = master_cell(_rec, _f)
+                                _help = "まだ何も入っていません"
+                                if _c["v"]:
+                                    _help = f"出典: {_c['src'] or '不明'}"
+                                    if _c["by"]:
+                                        _help += f" ／ 入れた人: {_c['by']}"
+                                with _cols[_i % 2]:
+                                    _vals[_f] = st.text_input(
+                                        _f, value=_c["v"], help=_help,
+                                        key=f"me_{_f}_{_ids[0]}",
+                                    )
+                            _save = st.form_submit_button(
+                                "💾 この曲を保存", type="primary",
+                                use_container_width=True,
+                            )
+                        if _save:
+                            _n = master_edit(_rec, _vals, CURRENT_USER)
+                            if _n:
+                                st.success("✅ 保存しました。")
+                                st.rerun()
+                            else:
+                                st.info("変わったところがありません。")
+
+                # ── 消す ────────────────────────────────────
+                st.divider()
+                st.markdown(f"🗑️ **{len(_ids)} 曲**を選んでいます")
+                _ok = st.checkbox(
+                    "消すと元に戻せません。全員の共有データから消えます。",
+                    key="master_del_ok",
+                )
+                if st.button("🗑️ 選んだ曲を消す", disabled=not _ok,
+                             key="master_del_btn"):
+                    _n = master_delete(_ids)
+                    if _n:
+                        _forget_count("master")   # 減った分をすぐ出す
+                        st.success(f"🗑️ {_n} 曲を消しました。")
+                        # 選択が残っていると消えた行を指したままになる。
+                        # 代入ではなく削除にすること。ウィジェットを作った
+                        # あとで代入すると Streamlit が例外を出す
+                        st.session_state.pop("master_table", None)
+                        st.session_state.pop("master_del_ok", None)
+                        st.rerun()
+                    else:
+                        st.error("❌ 消せませんでした。")
