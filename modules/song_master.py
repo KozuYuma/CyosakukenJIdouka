@@ -111,19 +111,102 @@ def norm_title(value) -> str:
     return "".join(s.split())
 
 
-def make_keys(row) -> tuple[str, str]:
-    """(管理番号キー, トラック番号＋曲名キー)。使えない方は空文字。"""
+def norm_track(value) -> str:
+    """トラック番号を比べる形にする。数字なら2桁にそろえる。
+
+    同じ曲が「1」と「01」で書かれていることがある。桁をそろえないと
+    別の曲になってしまう。数字でないもの（"A" など）はそのまま。
+    """
+    t = norm_id(value)
+    return t.zfill(2) if t.isdigit() and len(t) < 2 else t
+
+
+# 管理番号キーの中で「ここから先はトラック番号」を表す区切り。
+# norm_id は英数字だけを残すので、ハイフンが元の番号から出てくることは
+# ない。つまりこの区切りは盤番号とトラック番号の境目としか読めない
+MGMT_SEP = "-"
+
+
+def mgmt_candidates(row) -> list[str]:
+    """1行から、管理番号キーの候補を作る。先頭が新しく作るときの形。
+
+    キーにしたいのは「盤番号＋トラック番号」。曲ごとに固有の番号なので、
+    これが当たれば曲が決まる。
+
+    盤番号は、あればそれ（ライブラリ盤番号）を使う。番号を読み取った行
+    には必ず入っており、元管理番号がどう書かれていても同じキーになる。
+
+    盤番号が無いのは、人が手で番号を入れた行。元管理番号がトラック番号
+    まで入った形（1AN-001-01）なのか、盤番号だけ（57A-0023）なのかを
+    見分ける手立てが無い。以前は「末尾がトラック番号と同じなら入って
+    いる」と決めていたが、57A-0023 のトラック23 のように末尾がたまたま
+    一致すると、盤番号だけのキーになって同じ盤の他の曲と混ざってしまう。
+    そこで、新しく作るときは区切り（-）を入れた形にする。norm_id は
+    英数字しか残さないので、この区切りは境目としか読めない。
+    昔の形も候補には残すので、既にある行は今までどおり見つかる。
+    """
     mgmt = norm_id(row.get("元管理番号"))
+    disc = norm_id(row.get("ライブラリ盤番号"))
+    if not mgmt and not disc:
+        return []
+
     track = norm_id(row.get("トラック番号"))
+    t2 = norm_track(track)
+    if not t2:
+        return [mgmt or disc]
 
-    # 旧形式は盤番号だけで終わることがある（57A-0023）。そのままだと
-    # 同じ盤の別の曲が全部ひとつになってしまうので、トラック番号を足す。
-    if mgmt and track and not mgmt.endswith(track):
-        mgmt = f"{mgmt}{track}"
+    if disc:
+        # 盤番号が分かっているので迷いは無い。今まで貯めてきたのと
+        # 同じ形（盤番号＋2桁トラック）をそのまま使う
+        out = [f"{disc}{t2}", f"{disc}{track}"]
+        # 元管理番号がそれと違う形で書かれていたときのための候補。
+        # 盤番号そのもの（トラックの付かない形）は入れない。それを
+        # 入れると、同じ盤の曲が全部ひとつになってしまう
+        if mgmt and mgmt != disc:
+            out.append(mgmt)
+    else:
+        out = [f"{mgmt}{MGMT_SEP}{t2}", f"{mgmt}{t2}", f"{mgmt}{track}"]
+        if mgmt.endswith(t2) or (track and mgmt.endswith(track)):
+            # 元管理番号にトラック番号まで入っていた場合の昔のキー。
+            # 盤番号だけの行とぶつかることはあるが、それは以前から
+            # 同じで、ここを外すと昔の行が見つからなくなる
+            out.append(mgmt)
 
+    seen: list[str] = []
+    for cand in out:
+        if cand and cand not in seen:
+            seen.append(cand)
+    return seen
+
+
+def track_candidates(row) -> list[str]:
+    """トラック番号＋曲名キーの候補。先頭が新しく作るときの形。
+
+    桁をそろえる前（"1|曲名"）で貯めた行が既にあるので、そちらも候補に
+    残す。貯め直さずに、当たった方へ合流させる。
+    """
     title = norm_title(row.get("曲名"))
-    track_key = f"{track}|{title}" if track and title else ""
-    return mgmt, track_key
+    if not title:
+        return []
+    track = norm_id(row.get("トラック番号"))
+    t2 = norm_track(track)
+    if not t2:
+        return []
+    out = [f"{t2}|{title}"]
+    if track and track != t2:
+        out.append(f"{track}|{title}")
+    return out
+
+
+def make_keys(row) -> tuple[str, str]:
+    """(管理番号キー, トラック番号＋曲名キー)。使えない方は空文字。
+
+    どちらも新しく作るときの形。既にある行を探すときは
+    mgmt_candidates / track_candidates の候補を全部使う。
+    """
+    mgmt = mgmt_candidates(row)
+    track = track_candidates(row)
+    return (mgmt[0] if mgmt else ""), (track[0] if track else "")
 
 
 # ─── 貯める ────────────────────────────────────────────
@@ -151,8 +234,9 @@ def collect(songs_df: pd.DataFrame, user: str = "") -> list[dict]:
         if src is None:
             continue
 
-        mgmt_key, track_key = make_keys(row)
-        if not mgmt_key and not track_key:
+        mgmt_cands = mgmt_candidates(row)
+        track_cands = track_candidates(row)
+        if not mgmt_cands and not track_cands:
             continue
 
         data: dict[str, dict] = {}
@@ -166,8 +250,12 @@ def collect(songs_df: pd.DataFrame, user: str = "") -> list[dict]:
             continue
 
         out.append({
-            "mgmt_key": mgmt_key,
-            "track_key": track_key,
+            # 新しく作るときの形
+            "mgmt_key": mgmt_cands[0] if mgmt_cands else "",
+            "track_key": track_cands[0] if track_cands else "",
+            # 既にある行を探すときの候補（書き方の揺れを吸収する）
+            "mgmt_cands": mgmt_cands,
+            "track_cands": track_cands,
             "title": _cell(row.get("曲名")),
             "data": data,
         })
@@ -199,6 +287,15 @@ def merge_data(old: dict, new: dict) -> tuple[dict, bool]:
     return merged, changed
 
 
+def _first_hit(index: dict, keys) -> dict | None:
+    """候補を先頭から見て、最初に当たった行を返す。"""
+    for k in keys or []:
+        got = index.get(k)
+        if got is not None:
+            return got
+    return None
+
+
 def save(songs_df: pd.DataFrame, user: str = "") -> int:
     """songs_df の確定・一致行を song_master に貯める。入れた曲数を返す。"""
     records = collect(songs_df, user)
@@ -206,34 +303,51 @@ def save(songs_df: pd.DataFrame, user: str = "") -> int:
         return 0
 
     existing = master_fetch(
-        {r["mgmt_key"] for r in records if r["mgmt_key"]},
-        {r["track_key"] for r in records if r["track_key"]},
+        {k for r in records for k in r["mgmt_cands"]},
+        {k for r in records for k in r["track_cands"]},
     )
     by_mgmt = {e["mgmt_key"]: e for e in existing if e["mgmt_key"]}
     by_track = {e["track_key"]: e for e in existing if e["track_key"]}
 
     writes: list[dict] = []
     for rec in records:
-        hit = by_mgmt.get(rec["mgmt_key"]) or by_track.get(rec["track_key"])
+        hit = (_first_hit(by_mgmt, rec["mgmt_cands"])
+               or _first_hit(by_track, rec["track_cands"]))
         if hit is None:
-            writes.append({**rec, "id": None})
-            # 同じ実行の中で同じ曲が二度出てきても、二重に作らない
-            if rec["mgmt_key"]:
-                by_mgmt[rec["mgmt_key"]] = {**rec, "id": None}
-            if rec["track_key"]:
-                by_track[rec["track_key"]] = {**rec, "id": None}
+            # 同じ実行の中で同じ曲が二度出てきても、二重に作らない。
+            # 書き方が違うだけの行も拾えるよう、候補を全部登録する。
+            # 登録するのは writes に積んだのと同じ dict。あとで中身を
+            # 足しても、積んである方に反映される
+            new = {
+                "id": None,
+                "mgmt_key": rec["mgmt_key"],
+                "track_key": rec["track_key"],
+                "title": rec["title"],
+                "data": dict(rec["data"]),
+            }
+            writes.append(new)
+            for k in rec["mgmt_cands"]:
+                by_mgmt.setdefault(k, new)
+            for k in rec["track_cands"]:
+                by_track.setdefault(k, new)
             continue
 
         merged, changed = merge_data(hit.get("data") or {}, rec["data"])
         if not changed:
             continue
         hit["data"] = merged
+        # 片方しかキーが無かった行に、もう片方のキーを足していく
+        hit["mgmt_key"] = hit.get("mgmt_key") or rec["mgmt_key"]
+        hit["track_key"] = hit.get("track_key") or rec["track_key"]
+        hit["title"] = hit.get("title") or rec["title"]
+        # この実行で作ったばかりの行なら、既に積んである
+        if any(hit is w for w in writes):
+            continue
         writes.append({
             "id": hit.get("id"),
-            # 片方しかキーが無かった行に、もう片方のキーを足していく
-            "mgmt_key": hit.get("mgmt_key") or rec["mgmt_key"],
-            "track_key": hit.get("track_key") or rec["track_key"],
-            "title": hit.get("title") or rec["title"],
+            "mgmt_key": hit["mgmt_key"],
+            "track_key": hit["track_key"],
+            "title": hit["title"],
             "data": merged,
         })
 
@@ -269,10 +383,11 @@ def fill(songs_df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
     if songs_df is None or songs_df.empty:
         return songs_df, 0, 0
 
-    keys = [make_keys(row) for _, row in songs_df.iterrows()]
+    keys = [(mgmt_candidates(row), track_candidates(row))
+            for _, row in songs_df.iterrows()]
     found = master_fetch(
-        {k[0] for k in keys if k[0]},
-        {k[1] for k in keys if k[1]},
+        {k for cands, _ in keys for k in cands},
+        {k for _, cands in keys for k in cands},
     )
     if not found:
         return songs_df, 0, 0
@@ -283,9 +398,10 @@ def fill(songs_df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
     df = songs_df.copy()
     hit_rows = 0
     filled = 0
-    for pos, (mgmt_key, track_key) in enumerate(keys):
-        by_number = bool(mgmt_key) and mgmt_key in by_mgmt
-        hit = by_mgmt.get(mgmt_key) or by_track.get(track_key)
+    for pos, (mgmt_cands, track_cands) in enumerate(keys):
+        hit = _first_hit(by_mgmt, mgmt_cands)
+        by_number = hit is not None
+        hit = hit or _first_hit(by_track, track_cands)
         if hit is None:
             continue
         idx = df.index[pos]
