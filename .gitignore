@@ -25,6 +25,8 @@ output/
 *.xlsx
 data/
 debug_output.txt
+# 提出用の文書。スクリーンショットやログイン情報が入ることがあるので出さない
+*.docx
 recovered_claude_session*
 
 # OS
