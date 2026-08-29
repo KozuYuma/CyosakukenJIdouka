@@ -1686,6 +1686,517 @@ def _master_learn() -> int:
 # =====================================================================
 # ヘッダー
 # =====================================================================
+def _run_bulk_search() -> None:
+    """一括検索の中身。画面を全部描き終えてから、いちばん最後に回す。
+
+    何分もかかる処理をタブの途中で回すと、その間ずっと「描きかけ」の
+    ままになり、前の描画が下に残って一括検索欄と申告フォーマットが
+    二重に出て見える。そこでボタンは印を立てて描き直すだけにして、
+    実際の検索は画面をひととおり描き終えたあとに回す。進み具合は
+    一括検索の欄に用意しておいた場所（_bulk_ph）へ出すので、
+    見た目の位置は今までと同じ。
+    """
+    _songs = st.session_state.get("songs_df")
+    if _songs is None or _songs.empty:
+        return
+    # 対象はボタンを押した時と同じ決め方で出し直す
+    target_mask = (
+        _songs["確認ステータス"].isin(["未調査", "MP3補助確認"])
+        if st.session_state.get("bulk_search_target") == "未調査のみ"
+        else pd.Series([True] * len(_songs), index=_songs.index)
+    )
+    target_indices = st.session_state.songs_df[target_mask].index.tolist()
+    total = len(target_indices)
+    # 進み具合は、一括検索の欄に用意しておいた場所へ出す。
+    # 新しく置くと、その回に描いたものが下に積まれてしまう。
+    # 楽曲タブを描かずにここへ来ることはないはずだが、
+    # 念のため場所がないときは、その場に出す
+    _ph = globals().get("_bulk_ph") or st.empty()
+    _box = _ph.container()
+    progress_bar = _box.progress(0)
+    status_ph = _box.empty()
+    stats: dict[str, int] = {
+        "自動入力": 0, "作曲者一致": 0, "アーティスト一致": 0,
+        "作曲者アーティスト一致": 0, "複数候補": 0,
+        "ヒットなし": 0, "エラー": 0, "MINCエラー": 0,
+        "台帳CD": 0, "MINC引き直しCD": 0,
+    }
+    # 自社CD台帳の引き当て結果。同じ作品コードが何度も出て
+    # くるので、1回の実行の中では覚えておいて DB への往復を
+    # 減らす（Supabase は1往復 0.2秒ほどかかる）
+    _cd_ledger_cache: dict[str, list[dict]] = {}
+    # 台帳で埋まらず MINC に聞き直した分。同じ作品コードを
+    # 二度引かないために覚えておく（1回が最大12秒かかる）
+    _cd_minc_cache: dict[str, list[dict]] = {}
+
+    for i, idx in enumerate(target_indices):
+        row = st.session_state.songs_df.loc[idx]
+        event_name = str(row.get("イベント名", ""))
+
+        # 検索語: 曲名 → WAV検出タイトル → イベント名（管理番号は使わない）
+        search_term = (
+            str(row.get("曲名", "")).strip()
+            or str(row.get("WAV検出タイトル", "")).strip()
+            or event_name
+        )
+        if search_term.lower() == "nan":
+            search_term = event_name
+
+        # 作曲者ヒント（空の場合はアーティスト名でフォールバック）
+        composer_hint = str(row.get("作曲者", "")).strip()
+        if not composer_hint or composer_hint.lower() == "nan":
+            composer_hint = str(row.get("アーティスト", "")).strip()
+        if composer_hint.lower() == "nan":
+            composer_hint = ""
+
+        # 候補の絞り込み用。MP3のID3タグ等で既に入っている作曲者名だけを使う
+        # （アーティスト名で代用すると別人の同名曲を掴むため）
+        _comp_known = str(row.get("作曲者", "")).strip()
+        if _comp_known.lower() == "nan":
+            _comp_known = ""
+        # 同上。MP3のID3タグは作曲者が空でもアーティストは入っていることが多い
+        _art_known = str(row.get("アーティスト", "")).strip()
+        if _art_known.lower() == "nan":
+            _art_known = ""
+
+        status_ph.caption(f"({i + 1}/{total}) 検索中: {search_term[:50]}")
+        progress_bar.progress((i + 1) / total)
+
+        # ---- MINC は先に投げておく ----
+        #
+        # MINC は J-WID / NexTone とは別のサイトなので、順番に
+        # 待つ理由がない。ここで投げておいて、J-WID を調べ終えた
+        # 下の方で受け取る。1曲あたりの待ち時間が「合計」から
+        # 「一番遅い1つ」に縮む。
+        # 相手の1台から見た間隔は変わらない（待ち時間の管理は
+        # サイトごとに別勘定のため）。
+        # 別スレッドから st.session_state は触れないので、
+        # client はここ（本体側）で取っておいて渡す。
+        _mf_ok_bulk, _ = st.session_state.get("mf_auth_state", (False, ""))
+        _mf_box: dict = {}
+        _mf_th = None
+        if _mf_ok_bulk:
+            try:
+                _mf_c = _get_mf_client()
+            except Exception as _e:
+                _mf_c = None
+                _mf_box["e"] = _e
+            if _mf_c is not None:
+                def _mf_run(_c=_mf_c, _t=search_term, _box=_mf_box):
+                    try:
+                        _box["r"] = _c.search(_t, match=3)
+                    except Exception as _e2:
+                        _box["e"] = _e2
+                _mf_th = threading.Thread(target=_mf_run, daemon=True)
+                _mf_th.start()
+
+        try:
+            result = search_all(search_term, composer=composer_hint)
+        except Exception as _e:
+            stats["エラー"] += 1
+            stats.setdefault("_last_error", str(_e))
+            # 投げっぱなしにすると次の曲の検索と重なるので待つ
+            if _mf_th is not None:
+                _mf_th.join()
+            continue
+
+        _jwid_err = result.get("jwid", {}).get("error")
+        if _jwid_err:
+            stats["エラー"] += 1
+            stats.setdefault("_last_error", f"J-WID: {_jwid_err}")
+
+        jwid_r      = result.get("jwid", {}).get("results", []) or []
+        jwid_comp_n = result.get("jwid", {}).get("composer_matched_count", 0)
+        nt_r        = result.get("nextone", {}).get("results", []) or []
+        nt_comp_n   = result.get("nextone", {}).get("composer_matched_count", 0)
+
+        # 自動適用条件: 1件のみ OR 作曲者一致が1件（results は一致順にソート済み）
+        def _auto_apply(results, comp_n):
+            return bool(results) and (len(results) == 1 or comp_n == 1)
+
+        updates: dict = {}
+        _jwid_detail_ok = False  # I/V区分「インスト」判定用
+        _minc_iv = ""            # MINC から取得した IV 値（"I" or "V"）
+
+        if _auto_apply(jwid_r, jwid_comp_n):
+            r = jwid_r[0]
+            if r.get("作品コード"):
+                updates["JASRAC作品コード"] = r["作品コード"]
+            # J-WID 検索結果には著作者名しかなく、作曲者/作詞者は詳細ページから取得
+            _jw_durl = r.get("_detail_url", "")
+            if _jw_durl:
+                try:
+                    from modules.scraper import fetch_jwid_detail as _fetch_jwd_b
+                    _jwd_b = _fetch_jwd_b(_jw_durl)
+                    if not _jwd_b.get("error"):
+                        _jwid_detail_ok = True
+                        if _jwd_b.get("作曲者"): updates["作曲者"] = _jwd_b["作曲者"]
+                        if _jwd_b.get("作詞者"): updates["作詞者"] = _jwd_b["作詞者"]
+                        if _jwd_b.get("編曲者"): updates["編曲者"] = _jwd_b["編曲者"]
+                        if _jwd_b.get("訳詞者"): updates["訳詞者"] = _jwd_b["訳詞者"]
+                        # 放送・配信。詳細ページはもう取ってある
+                        # ので、ここで書き取るのに追加の通信は要らない
+                        _apply_management_status(
+                            _jwd_b.get("管理状況") or {},
+                            updates, "J", row)
+                except Exception:
+                    pass
+
+        if _auto_apply(nt_r, nt_comp_n):
+            r = nt_r[0]
+            if r.get("作曲者") and not updates.get("作曲者"):
+                updates["作曲者"] = r["作曲者"]
+            if r.get("作詞者") and not updates.get("作詞者"):
+                updates["作詞者"] = r["作詞者"]
+            if r.get("管理番号"):
+                updates["NexTone管理番号"] = r["管理番号"]
+            # 放送・配信。NexTone は検索結果の表に支分権が
+            # そのまま出ているので、追加の通信は要らない
+            _apply_management_status(
+                r.get("管理状況") or {}, updates, "N", row)
+            if r.get("アーティスト") and not updates.get("アーティスト"):
+                updates["アーティスト"] = r["アーティスト"]
+
+        # MINC 検索（セッション有効時のみ）。上で先に投げてある
+        # ので、ここでは結果を受け取るだけ
+        _mf_multi_match = False
+        _mf_comp_matched = False   # 作曲者まで一致した候補を採用したか
+        _mf_art_matched  = False   # アーティストまで一致した候補を採用したか
+        if _mf_ok_bulk:
+            try:
+                if _mf_th is not None:
+                    _mf_th.join()
+                if _mf_box.get("e") is not None:
+                    raise _mf_box["e"]
+                _mf_bulk = _mf_box.get("r") or {}
+                _mf_bulk_items = _mf_bulk.get("results", []) or []
+                # 候補の絞り込み:
+                #   ① 作品名が曲名と完全一致する候補に限定（1件だけなら無条件採用）
+                #   ② その中で作曲者が一致する候補を優先（＝どの作品か）
+                #   ③ さらにアーティストも一致する行を優先（＝どのCD／音源か）
+                # MINCの検索結果には「作詞／作曲」列も「アーティスト」列も
+                # 含まれるので、②③の照合に追加の通信は発生しない。
+                # 作曲者は作品ごとに一意だが、アーティストは同じ作品でも
+                # 音源（カバー等）ごとに変わるため、②より弱い決め手として扱う。
+                _mfr = None
+                if len(_mf_bulk_items) == 1:
+                    _mf_named = _mf_bulk_items
+                else:
+                    _song_n = normalize_for_match(search_term)
+                    _mf_named = [
+                        _mi for _mi in _mf_bulk_items
+                        if normalize_for_match(_mi.get("作品名", "")) == _song_n
+                    ]
+                _mf_by_comp = [
+                    _mi for _mi in _mf_named
+                    if _composer_matches(_comp_known, _mi.get("作曲者", ""))
+                ]
+                _mf_by_art = [
+                    _mi for _mi in _mf_named
+                    if _artist_matches(_art_known, _mi.get("アーティスト", ""))
+                ]
+                _mf_art_ids = {id(_mi) for _mi in _mf_by_art}
+
+                # 同じ作品で複数行あるとき、どの行を採るか。
+                #
+                # 欲しいのは CD の情報なので、まず「品番のある行
+                # ＝CD の行」を見る。MINC では CD を持つ収録曲の行
+                # はアーティスト欄が空のことが多く、アーティスト
+                # 一致だけで選ぶと、CD を持たない配信曲の行が勝っ
+                # てしまう（「ゾートロープの光の小人」）。空欄は
+                # 「不一致」ではなく「不明」として扱う。
+                #
+                # ただしアーティストが食い違う行の CD は別の盤な
+                # ので、それよりは「CD は無いがアーティストが合う
+                # 行」を採る。間違った盤を書くより空の方がまし。
+                def _mf_pick_rank(_mi: dict) -> int:
+                    _has_cd = not _is_blank(_mi.get("品番", ""))
+                    _art_ok = id(_mi) in _mf_art_ids
+                    _art_blank = _is_blank(_mi.get("アーティスト", ""))
+                    if _has_cd and _art_ok:
+                        return 0
+                    if _has_cd and _art_blank:
+                        return 1
+                    if _art_ok:
+                        return 2
+                    if _has_cd:
+                        return 3
+                    return 4
+
+                def _mf_pick(_cands: list) -> dict | None:
+                    # min は同点なら先に出てきた方を残す（＝元の順）
+                    return min(_cands, key=_mf_pick_rank) if _cands else None
+
+                if _mf_by_comp:
+                    # 作曲者まで一致 → 同名異曲ではないと確認できたので確信度が高い。
+                    _mfr = _mf_pick(_mf_by_comp)
+                    _mf_comp_matched = True
+                    _mf_art_matched = id(_mfr) in _mf_art_ids
+                elif _mf_by_art:
+                    # 作曲者が空（ID3タグに無い等）でもアーティストで絞れた場合。
+                    # カバー音源を掴む可能性が残るので作曲者一致より一段弱い扱い。
+                    #
+                    # 選ぶ相手はアーティストが当たった行だけでなく、曲名が
+                    # 一致する行すべてにする。アーティスト欄が空の行は「別人」
+                    # ではなく「不明」で、CD が付いているのはたいていその行
+                    # だからで、当たった行だけを見ると CD を拾えない
+                    _mfr = _mf_pick(_mf_named)
+                    _mf_art_matched = id(_mfr) in _mf_art_ids
+                    if not _mf_art_matched:
+                        # アーティストで当てた行ではない＝決め手は曲名だけ
+                        _mf_multi_match = len(_mf_bulk_items) > 1
+                elif _mf_named:
+                    _mfr = _mf_pick(_mf_named)
+                    # 曲名一致だけで複数候補から選んだ場合は要確認
+                    _mf_multi_match = len(_mf_bulk_items) > 1
+                if _mfr:
+                    if _mfr.get("JASRAC作品コード") and not updates.get("JASRAC作品コード"):
+                        updates["JASRAC作品コード"] = _mfr["JASRAC作品コード"]
+                    if _mfr.get("NexTone管理番号") and not updates.get("NexTone管理番号"):
+                        updates["NexTone管理番号"] = _mfr["NexTone管理番号"]
+                    if _mfr.get("アーティスト") and not updates.get("アーティスト"):
+                        updates["アーティスト"] = _mfr["アーティスト"]
+                    if _mfr.get("品番") and not updates.get("CD番号"):
+                        updates["CD番号"] = _mfr["品番"]
+                    if _mfr.get("CD商品タイトル") and not updates.get("CD名"):
+                        updates["CD名"] = _mfr["CD商品タイトル"]
+                    if _mfr.get("レコード会社名") and not updates.get("レコード会社名"):
+                        updates["レコード会社名"] = _mfr["レコード会社名"]
+                    # 委任者（MINC CD詳細から取得）
+                    _m_alb = _mfr.get("_album_id", "")
+                    _m_trk = _mfr.get("_track_id", "")
+                    # album_id なし（配信曲/作品テーブル）→ ページ内 CD リンクが1件なら自動補完
+                    if not (_m_alb and _m_trk):
+                        _pg_lnks = _mf_bulk.get("_page_cd_links", [])
+                        if len(_pg_lnks) == 1:
+                            _m_alb = _pg_lnks[0]["album_id"]
+                            _m_trk = _pg_lnks[0]["track_id"]
+                    if _m_alb and _m_trk and not updates.get("委任者"):
+                        try:
+                            _delg_b = _mf_c.fetch_product_detail(_m_alb, _m_trk)
+                            _chuukanri = _delg_b.get("集中管理", "")
+                            if _chuukanri in ("委任者", "非委任者"):
+                                updates["委任者"] = _chuukanri
+                            _iv_minc = _delg_b.get("IV", "")
+                            if _iv_minc in ("I", "V"):
+                                _minc_iv = _iv_minc
+                        except Exception:
+                            pass
+                    # MINC 作品詳細から作曲者・作詞者・編曲者・訳詞者を補完
+                    _mfr_dhref = _mfr.get("_detail_href", "")
+                    if _mfr_dhref:
+                        try:
+                            _mf_d = _mf_c.get_detail(_mfr_dhref)
+                            if not _mf_d.get("error"):
+                                if _mf_d.get("作曲者") and not updates.get("作曲者"): updates["作曲者"] = _mf_d["作曲者"]
+                                if _mf_d.get("作詞者") and not updates.get("作詞者"): updates["作詞者"] = _mf_d["作詞者"]
+                                if _mf_d.get("編曲者") and not updates.get("編曲者"): updates["編曲者"] = _mf_d["編曲者"]
+                                if _mf_d.get("訳詞者") and not updates.get("訳詞者"): updates["訳詞者"] = _mf_d["訳詞者"]
+                        except Exception:
+                            pass
+                    # 詳細ページを引けなかった／作家名が載っていなかった分は
+                    # 検索結果の「作詞／作曲」列で埋める（通信なし）
+                    for _ak in ("作曲者", "作詞者", "編曲者", "訳詞者"):
+                        if _mfr.get(_ak) and not updates.get(_ak):
+                            updates[_ak] = _mfr[_ak]
+            except Exception as _me:
+                stats["MINCエラー"] += 1
+                stats.setdefault("_minc_last_error", f"{type(_me).__name__}: {_me}")
+
+        # ---- CD の情報を自社CD台帳（TSP）から埋める ----
+        #
+        # MINC に聞き直すと1曲ごとに通信が1回増える（応答は実測
+        # 0.6〜12秒）。台帳はこちらの DB なので、作品コードさえ
+        # 分かれば通信なしで品番・CD名・レコード会社名が入る。
+        # 台帳が空（まだ取り込んでいない）なら何も起きない。
+        _cd_code = (updates.get("JASRAC作品コード")
+                    or str(row.get("JASRAC作品コード", ""))).strip()
+        _cd_filled = not _is_blank(
+            updates.get("CD番号") or row.get("CD番号", ""))
+        if _cd_code and not _cd_filled:
+            _cd_dig = "".join(c for c in _cd_code if c.isdigit())
+            if _cd_dig not in _cd_ledger_cache:
+                try:
+                    _cd_ledger_cache.update(
+                        cd_fetch_by_jasrac({_cd_dig})
+                        or {_cd_dig: []})
+                except Exception:
+                    _cd_ledger_cache[_cd_dig] = []
+            _cd_cands = _cd_ledger_cache.get(_cd_dig) or []
+            # 同じ作品が複数の盤に入っていることがある。手元に
+            # アーティスト名があれば、それに合う盤を選ぶ
+            _cd_hit = next(
+                (_c for _c in _cd_cands
+                 if _artist_matches(_art_known, _c.get("artist", ""))),
+                _cd_cands[0] if _cd_cands else None,
+            )
+            if _cd_hit:
+                for _col, _key in (("CD番号", "cd_no"),
+                                   ("CD名", "cd_name"),
+                                   ("レコード会社名", "label")):
+                    if _cd_hit.get(_key) and not updates.get(_col) \
+                            and _is_blank(row.get(_col, "")):
+                        updates[_col] = _cd_hit[_key]
+                if updates.get("CD番号"):
+                    stats["台帳CD"] += 1
+
+        # ---- それでも埋まらなかった分だけ MINC に聞く ----
+        #
+        # 台帳は JASRAC作品コードでしか引けないので、NexTone
+        # だけで管理されている曲は当たらない。検索結果の行に
+        # 品番が載っていないこともある。そういう残りだけ、作品
+        # コードから CD商品リストを引き直す。
+        #
+        # ここは1曲につき通信が1回増える（実測 0.6〜12秒）。
+        # 埋め残しだけが対象なので、実測では33曲中4曲だった。
+        _cd_filled2 = not _is_blank(
+            updates.get("CD番号") or row.get("CD番号", ""))
+        _cd_ncd = (updates.get("NexTone管理番号")
+                   or str(row.get("NexTone管理番号", ""))).strip()
+        if _is_blank(_cd_ncd):
+            _cd_ncd = ""
+        if _mf_ok_bulk and not _cd_filled2 and (_cd_code or _cd_ncd):
+            _mk = f"{_cd_code}|{_cd_ncd}"
+            if _mk not in _cd_minc_cache:
+                try:
+                    _cd_minc_cache[_mk] = (
+                        _get_mf_client().search_cds_by_jasrac(
+                            _cd_code,
+                            title=search_term,
+                            ncd=_cd_ncd,
+                        ).get("cds") or []
+                    )
+                except Exception as _ce:
+                    _cd_minc_cache[_mk] = []
+                    stats["MINCエラー"] += 1
+                    stats.setdefault(
+                        "_minc_last_error",
+                        f"{type(_ce).__name__}: {_ce}")
+            _mc = _cd_minc_cache.get(_mk) or []
+            # 台帳と同じ選び方。手元にアーティスト名があれば
+            # それに合う盤、無ければ先頭
+            _mc_hit = next(
+                (_c for _c in _mc
+                 if _artist_matches(_art_known,
+                                    _c.get("アーティスト", ""))),
+                _mc[0] if _mc else None,
+            )
+            if _mc_hit:
+                for _col, _key in (("CD番号", "品番"),
+                                   ("CD名", "CD商品タイトル"),
+                                   ("レコード会社名", "レコード会社名")):
+                    if _mc_hit.get(_key) and not updates.get(_col) \
+                            and _is_blank(row.get(_col, "")):
+                        updates[_col] = _mc_hit[_key]
+                if updates.get("CD番号"):
+                    stats["MINC引き直しCD"] += 1
+
+        # I/V区分 自動判定
+        #   ① MINC の CD情報に I/V 表記があればそれを使う
+        #   ② 無ければ作詞者の有無で判定（作詞者あり→ヴォーカル／なし→インスト）
+        # ②は作家名を取得できた行に限る（未取得の空欄をインストにしないため）
+        _BLANK = ("", "nan", "none")
+        _new_lyr   = updates.get("作詞者", "").strip()
+        _exist_lyr = str(row.get("作詞者", "")).strip()
+        _lyr = _new_lyr or ("" if _exist_lyr.lower() in _BLANK else _exist_lyr)
+        _cred_known = bool(
+            _jwid_detail_ok
+            or _lyr
+            or updates.get("作曲者", "").strip()
+            or str(row.get("作曲者", "")).strip().lower() not in _BLANK
+        )
+        _iv_set    = str(row.get("I/V区分", "")).strip().lower() not in _BLANK
+        if not _iv_set:
+            if _minc_iv == "I":
+                updates["I/V区分"] = "インスト"
+            elif _minc_iv == "V":
+                updates["I/V区分"] = "ヴォーカル"
+            elif _cred_known:
+                updates["I/V区分"] = _infer_iv(_lyr)
+
+        # 原訳詞区分 自動判定（作詞者ありで未設定なら "原詞"）
+        if (_new_lyr or (_exist_lyr and _exist_lyr.lower() not in _BLANK)):
+            if str(row.get("原訳詞区分", "")).strip().lower() in _BLANK and not updates.get("原訳詞区分"):
+                updates["原訳詞区分"] = "原詞"
+
+        # 邦洋区分 自動判定（JASRACコード 2文字目: 数字→邦楽、英字→洋楽）
+        _jasrac = (updates.get("JASRAC作品コード") or str(row.get("JASRAC作品コード", ""))).strip()
+        if _jasrac and len(_jasrac) >= 2 and str(row.get("邦洋区分", "")).strip().lower() in _BLANK and not updates.get("邦洋区分"):
+            _c2 = _jasrac[1]
+            if _c2.isdigit():
+                updates["邦洋区分"] = "邦楽"
+            elif _c2.isalpha():
+                updates["邦洋区分"] = "洋楽"
+
+        if updates:
+            # 作曲者一致 > アーティスト一致 > 曲名のみ一致 > 複数候補から選択
+            if _mf_comp_matched:
+                updates["確認ステータス"] = "作曲者一致"
+                stats["作曲者一致"] += 1
+                if _mf_art_matched:
+                    stats["作曲者アーティスト一致"] += 1
+            elif _mf_art_matched:
+                updates["確認ステータス"] = "アーティスト一致"
+                stats["アーティスト一致"] += 1
+            else:
+                updates["確認ステータス"] = "複数候補あり" if _mf_multi_match else "候補あり"
+            for col, val in updates.items():
+                if col in st.session_state.songs_df.columns:
+                    st.session_state.songs_df.at[idx, col] = val
+            stats["自動入力"] += 1
+        elif jwid_r or nt_r:
+            # 当たりはあったが自動では入れなかった＝どれか選ぶ
+            # 必要がある行。人が見に行く先なので、そう書く
+            st.session_state.songs_df.at[idx, "確認ステータス"] = "複数候補あり"
+            stats["複数候補"] += 1
+        else:
+            st.session_state.songs_df.at[idx, "確認ステータス"] = "該当なし"
+            stats["ヒットなし"] += 1
+
+    _ph.empty()
+
+    result_msg = (
+        f"✅ 完了: 自動入力 {stats['自動入力']} 件"
+        + (f"（うち作曲者まで一致 {stats['作曲者一致']} 件"
+           + (f"／うちアーティストも一致 {stats['作曲者アーティスト一致']} 件"
+              if stats["作曲者アーティスト一致"] else "")
+           + "）"
+           if stats["作曲者一致"] else "")
+        + (f"（うちアーティストのみ一致 {stats['アーティスト一致']} 件）"
+           if stats["アーティスト一致"] else "")
+        + (f"（うち CD を台帳から {stats['台帳CD']} 件）"
+           if stats["台帳CD"] else "")
+        + (f"（うち CD を MINC から {stats['MINC引き直しCD']} 件）"
+           if stats["MINC引き直しCD"] else "")
+        + f" ／ 複数候補 {stats['複数候補']} 件 ／ "
+        f"ヒットなし {stats['ヒットなし']} 件"
+    )
+    if stats["エラー"]:
+        result_msg += f" ／ エラー {stats['エラー']} 件"
+    if stats.get("_last_error"):
+        result_msg += f"  \nJ-WID/NexToneエラー: {stats['_last_error']}"
+    if stats["MINCエラー"]:
+        result_msg += (
+            f"  \n⚠️ MINC エラー {stats['MINCエラー']} 件: "
+            f"{stats.get('_minc_last_error','')}"
+        )
+    # 直後に rerun するとこの場で出したメッセージは消えるため持ち越す
+    st.session_state["_apply_msg"] = result_msg
+    # 何分もかけて取った結果を取り直さずに済むよう、ここで保存する。
+    # 結果は songs_df に書き込んだだけで、DBにはまだ入っていない
+    _autosave_to_db("（一括検索の完了時）")
+    # 調べがついた曲を共有データに貯める。次に同じ曲が来たら
+    # 照合実行の時点で自動的に入る
+    _learned = _master_learn()
+    if _learned:
+        st.session_state["_apply_msg"] += (
+            f"  \n🗃️ 共有楽曲データに {_learned} 曲を貯めました。"
+        )
+    # 検索が終わったら詳細設定は畳んでよい
+    st.session_state.pop("bulk_search_open", None)
+    st.rerun()
+
+
 def _minc_state() -> tuple[str, str]:
     """MINC ログインの状態を (表示文字, 調子) で返す。
 
@@ -2562,6 +3073,9 @@ with tabs[0]:
         st.caption(f"表示: {len(filtered_df)} 件 ／ 全 {len(songs_df)} 件")
 
         # ---- 一括検索 ----
+        # 検索の進み具合を出す場所。中身はこの回のいちばん最後に入れる
+        _bulk_ph = st.empty()
+
         # expander の中のウィジェットを操作すると再実行が走り、expanded 引数の値
         # （False）に戻って畳まれてしまう。操作時にコールバックでフラグを立て、
         # 開いたままにする（コールバックは再実行前に走るので次の描画に間に合う）。
@@ -2665,490 +3179,10 @@ with tabs[0]:
                 disabled=target_count == 0,
                 on_click=_keep_bulk_open,
             ):
-                target_indices = st.session_state.songs_df[target_mask].index.tolist()
-                total = len(target_indices)
-                progress_bar = st.progress(0)
-                status_ph = st.empty()
-                stats: dict[str, int] = {
-                    "自動入力": 0, "作曲者一致": 0, "アーティスト一致": 0,
-                    "作曲者アーティスト一致": 0, "複数候補": 0,
-                    "ヒットなし": 0, "エラー": 0, "MINCエラー": 0,
-                    "台帳CD": 0, "MINC引き直しCD": 0,
-                }
-                # 自社CD台帳の引き当て結果。同じ作品コードが何度も出て
-                # くるので、1回の実行の中では覚えておいて DB への往復を
-                # 減らす（Supabase は1往復 0.2秒ほどかかる）
-                _cd_ledger_cache: dict[str, list[dict]] = {}
-                # 台帳で埋まらず MINC に聞き直した分。同じ作品コードを
-                # 二度引かないために覚えておく（1回が最大12秒かかる）
-                _cd_minc_cache: dict[str, list[dict]] = {}
-
-                for i, idx in enumerate(target_indices):
-                    row = st.session_state.songs_df.loc[idx]
-                    event_name = str(row.get("イベント名", ""))
-
-                    # 検索語: 曲名 → WAV検出タイトル → イベント名（管理番号は使わない）
-                    search_term = (
-                        str(row.get("曲名", "")).strip()
-                        or str(row.get("WAV検出タイトル", "")).strip()
-                        or event_name
-                    )
-                    if search_term.lower() == "nan":
-                        search_term = event_name
-
-                    # 作曲者ヒント（空の場合はアーティスト名でフォールバック）
-                    composer_hint = str(row.get("作曲者", "")).strip()
-                    if not composer_hint or composer_hint.lower() == "nan":
-                        composer_hint = str(row.get("アーティスト", "")).strip()
-                    if composer_hint.lower() == "nan":
-                        composer_hint = ""
-
-                    # 候補の絞り込み用。MP3のID3タグ等で既に入っている作曲者名だけを使う
-                    # （アーティスト名で代用すると別人の同名曲を掴むため）
-                    _comp_known = str(row.get("作曲者", "")).strip()
-                    if _comp_known.lower() == "nan":
-                        _comp_known = ""
-                    # 同上。MP3のID3タグは作曲者が空でもアーティストは入っていることが多い
-                    _art_known = str(row.get("アーティスト", "")).strip()
-                    if _art_known.lower() == "nan":
-                        _art_known = ""
-
-                    status_ph.caption(f"({i + 1}/{total}) 検索中: {search_term[:50]}")
-                    progress_bar.progress((i + 1) / total)
-
-                    # ---- MINC は先に投げておく ----
-                    #
-                    # MINC は J-WID / NexTone とは別のサイトなので、順番に
-                    # 待つ理由がない。ここで投げておいて、J-WID を調べ終えた
-                    # 下の方で受け取る。1曲あたりの待ち時間が「合計」から
-                    # 「一番遅い1つ」に縮む。
-                    # 相手の1台から見た間隔は変わらない（待ち時間の管理は
-                    # サイトごとに別勘定のため）。
-                    # 別スレッドから st.session_state は触れないので、
-                    # client はここ（本体側）で取っておいて渡す。
-                    _mf_ok_bulk, _ = st.session_state.get("mf_auth_state", (False, ""))
-                    _mf_box: dict = {}
-                    _mf_th = None
-                    if _mf_ok_bulk:
-                        try:
-                            _mf_c = _get_mf_client()
-                        except Exception as _e:
-                            _mf_c = None
-                            _mf_box["e"] = _e
-                        if _mf_c is not None:
-                            def _mf_run(_c=_mf_c, _t=search_term, _box=_mf_box):
-                                try:
-                                    _box["r"] = _c.search(_t, match=3)
-                                except Exception as _e2:
-                                    _box["e"] = _e2
-                            _mf_th = threading.Thread(target=_mf_run, daemon=True)
-                            _mf_th.start()
-
-                    try:
-                        result = search_all(search_term, composer=composer_hint)
-                    except Exception as _e:
-                        stats["エラー"] += 1
-                        stats.setdefault("_last_error", str(_e))
-                        # 投げっぱなしにすると次の曲の検索と重なるので待つ
-                        if _mf_th is not None:
-                            _mf_th.join()
-                        continue
-
-                    _jwid_err = result.get("jwid", {}).get("error")
-                    if _jwid_err:
-                        stats["エラー"] += 1
-                        stats.setdefault("_last_error", f"J-WID: {_jwid_err}")
-
-                    jwid_r      = result.get("jwid", {}).get("results", []) or []
-                    jwid_comp_n = result.get("jwid", {}).get("composer_matched_count", 0)
-                    nt_r        = result.get("nextone", {}).get("results", []) or []
-                    nt_comp_n   = result.get("nextone", {}).get("composer_matched_count", 0)
-
-                    # 自動適用条件: 1件のみ OR 作曲者一致が1件（results は一致順にソート済み）
-                    def _auto_apply(results, comp_n):
-                        return bool(results) and (len(results) == 1 or comp_n == 1)
-
-                    updates: dict = {}
-                    _jwid_detail_ok = False  # I/V区分「インスト」判定用
-                    _minc_iv = ""            # MINC から取得した IV 値（"I" or "V"）
-
-                    if _auto_apply(jwid_r, jwid_comp_n):
-                        r = jwid_r[0]
-                        if r.get("作品コード"):
-                            updates["JASRAC作品コード"] = r["作品コード"]
-                        # J-WID 検索結果には著作者名しかなく、作曲者/作詞者は詳細ページから取得
-                        _jw_durl = r.get("_detail_url", "")
-                        if _jw_durl:
-                            try:
-                                from modules.scraper import fetch_jwid_detail as _fetch_jwd_b
-                                _jwd_b = _fetch_jwd_b(_jw_durl)
-                                if not _jwd_b.get("error"):
-                                    _jwid_detail_ok = True
-                                    if _jwd_b.get("作曲者"): updates["作曲者"] = _jwd_b["作曲者"]
-                                    if _jwd_b.get("作詞者"): updates["作詞者"] = _jwd_b["作詞者"]
-                                    if _jwd_b.get("編曲者"): updates["編曲者"] = _jwd_b["編曲者"]
-                                    if _jwd_b.get("訳詞者"): updates["訳詞者"] = _jwd_b["訳詞者"]
-                                    # 放送・配信。詳細ページはもう取ってある
-                                    # ので、ここで書き取るのに追加の通信は要らない
-                                    _apply_management_status(
-                                        _jwd_b.get("管理状況") or {},
-                                        updates, "J", row)
-                            except Exception:
-                                pass
-
-                    if _auto_apply(nt_r, nt_comp_n):
-                        r = nt_r[0]
-                        if r.get("作曲者") and not updates.get("作曲者"):
-                            updates["作曲者"] = r["作曲者"]
-                        if r.get("作詞者") and not updates.get("作詞者"):
-                            updates["作詞者"] = r["作詞者"]
-                        if r.get("管理番号"):
-                            updates["NexTone管理番号"] = r["管理番号"]
-                        # 放送・配信。NexTone は検索結果の表に支分権が
-                        # そのまま出ているので、追加の通信は要らない
-                        _apply_management_status(
-                            r.get("管理状況") or {}, updates, "N", row)
-                        if r.get("アーティスト") and not updates.get("アーティスト"):
-                            updates["アーティスト"] = r["アーティスト"]
-
-                    # MINC 検索（セッション有効時のみ）。上で先に投げてある
-                    # ので、ここでは結果を受け取るだけ
-                    _mf_multi_match = False
-                    _mf_comp_matched = False   # 作曲者まで一致した候補を採用したか
-                    _mf_art_matched  = False   # アーティストまで一致した候補を採用したか
-                    if _mf_ok_bulk:
-                        try:
-                            if _mf_th is not None:
-                                _mf_th.join()
-                            if _mf_box.get("e") is not None:
-                                raise _mf_box["e"]
-                            _mf_bulk = _mf_box.get("r") or {}
-                            _mf_bulk_items = _mf_bulk.get("results", []) or []
-                            # 候補の絞り込み:
-                            #   ① 作品名が曲名と完全一致する候補に限定（1件だけなら無条件採用）
-                            #   ② その中で作曲者が一致する候補を優先（＝どの作品か）
-                            #   ③ さらにアーティストも一致する行を優先（＝どのCD／音源か）
-                            # MINCの検索結果には「作詞／作曲」列も「アーティスト」列も
-                            # 含まれるので、②③の照合に追加の通信は発生しない。
-                            # 作曲者は作品ごとに一意だが、アーティストは同じ作品でも
-                            # 音源（カバー等）ごとに変わるため、②より弱い決め手として扱う。
-                            _mfr = None
-                            if len(_mf_bulk_items) == 1:
-                                _mf_named = _mf_bulk_items
-                            else:
-                                _song_n = normalize_for_match(search_term)
-                                _mf_named = [
-                                    _mi for _mi in _mf_bulk_items
-                                    if normalize_for_match(_mi.get("作品名", "")) == _song_n
-                                ]
-                            _mf_by_comp = [
-                                _mi for _mi in _mf_named
-                                if _composer_matches(_comp_known, _mi.get("作曲者", ""))
-                            ]
-                            _mf_by_art = [
-                                _mi for _mi in _mf_named
-                                if _artist_matches(_art_known, _mi.get("アーティスト", ""))
-                            ]
-                            _mf_art_ids = {id(_mi) for _mi in _mf_by_art}
-
-                            # 同じ作品で複数行あるとき、どの行を採るか。
-                            #
-                            # 欲しいのは CD の情報なので、まず「品番のある行
-                            # ＝CD の行」を見る。MINC では CD を持つ収録曲の行
-                            # はアーティスト欄が空のことが多く、アーティスト
-                            # 一致だけで選ぶと、CD を持たない配信曲の行が勝っ
-                            # てしまう（「ゾートロープの光の小人」）。空欄は
-                            # 「不一致」ではなく「不明」として扱う。
-                            #
-                            # ただしアーティストが食い違う行の CD は別の盤な
-                            # ので、それよりは「CD は無いがアーティストが合う
-                            # 行」を採る。間違った盤を書くより空の方がまし。
-                            def _mf_pick_rank(_mi: dict) -> int:
-                                _has_cd = not _is_blank(_mi.get("品番", ""))
-                                _art_ok = id(_mi) in _mf_art_ids
-                                _art_blank = _is_blank(_mi.get("アーティスト", ""))
-                                if _has_cd and _art_ok:
-                                    return 0
-                                if _has_cd and _art_blank:
-                                    return 1
-                                if _art_ok:
-                                    return 2
-                                if _has_cd:
-                                    return 3
-                                return 4
-
-                            def _mf_pick(_cands: list) -> dict | None:
-                                # min は同点なら先に出てきた方を残す（＝元の順）
-                                return min(_cands, key=_mf_pick_rank) if _cands else None
-
-                            if _mf_by_comp:
-                                # 作曲者まで一致 → 同名異曲ではないと確認できたので確信度が高い。
-                                _mfr = _mf_pick(_mf_by_comp)
-                                _mf_comp_matched = True
-                                _mf_art_matched = id(_mfr) in _mf_art_ids
-                            elif _mf_by_art:
-                                # 作曲者が空（ID3タグに無い等）でもアーティストで絞れた場合。
-                                # カバー音源を掴む可能性が残るので作曲者一致より一段弱い扱い。
-                                #
-                                # 選ぶ相手はアーティストが当たった行だけでなく、曲名が
-                                # 一致する行すべてにする。アーティスト欄が空の行は「別人」
-                                # ではなく「不明」で、CD が付いているのはたいていその行
-                                # だからで、当たった行だけを見ると CD を拾えない
-                                _mfr = _mf_pick(_mf_named)
-                                _mf_art_matched = id(_mfr) in _mf_art_ids
-                                if not _mf_art_matched:
-                                    # アーティストで当てた行ではない＝決め手は曲名だけ
-                                    _mf_multi_match = len(_mf_bulk_items) > 1
-                            elif _mf_named:
-                                _mfr = _mf_pick(_mf_named)
-                                # 曲名一致だけで複数候補から選んだ場合は要確認
-                                _mf_multi_match = len(_mf_bulk_items) > 1
-                            if _mfr:
-                                if _mfr.get("JASRAC作品コード") and not updates.get("JASRAC作品コード"):
-                                    updates["JASRAC作品コード"] = _mfr["JASRAC作品コード"]
-                                if _mfr.get("NexTone管理番号") and not updates.get("NexTone管理番号"):
-                                    updates["NexTone管理番号"] = _mfr["NexTone管理番号"]
-                                if _mfr.get("アーティスト") and not updates.get("アーティスト"):
-                                    updates["アーティスト"] = _mfr["アーティスト"]
-                                if _mfr.get("品番") and not updates.get("CD番号"):
-                                    updates["CD番号"] = _mfr["品番"]
-                                if _mfr.get("CD商品タイトル") and not updates.get("CD名"):
-                                    updates["CD名"] = _mfr["CD商品タイトル"]
-                                if _mfr.get("レコード会社名") and not updates.get("レコード会社名"):
-                                    updates["レコード会社名"] = _mfr["レコード会社名"]
-                                # 委任者（MINC CD詳細から取得）
-                                _m_alb = _mfr.get("_album_id", "")
-                                _m_trk = _mfr.get("_track_id", "")
-                                # album_id なし（配信曲/作品テーブル）→ ページ内 CD リンクが1件なら自動補完
-                                if not (_m_alb and _m_trk):
-                                    _pg_lnks = _mf_bulk.get("_page_cd_links", [])
-                                    if len(_pg_lnks) == 1:
-                                        _m_alb = _pg_lnks[0]["album_id"]
-                                        _m_trk = _pg_lnks[0]["track_id"]
-                                if _m_alb and _m_trk and not updates.get("委任者"):
-                                    try:
-                                        _delg_b = _mf_c.fetch_product_detail(_m_alb, _m_trk)
-                                        _chuukanri = _delg_b.get("集中管理", "")
-                                        if _chuukanri in ("委任者", "非委任者"):
-                                            updates["委任者"] = _chuukanri
-                                        _iv_minc = _delg_b.get("IV", "")
-                                        if _iv_minc in ("I", "V"):
-                                            _minc_iv = _iv_minc
-                                    except Exception:
-                                        pass
-                                # MINC 作品詳細から作曲者・作詞者・編曲者・訳詞者を補完
-                                _mfr_dhref = _mfr.get("_detail_href", "")
-                                if _mfr_dhref:
-                                    try:
-                                        _mf_d = _mf_c.get_detail(_mfr_dhref)
-                                        if not _mf_d.get("error"):
-                                            if _mf_d.get("作曲者") and not updates.get("作曲者"): updates["作曲者"] = _mf_d["作曲者"]
-                                            if _mf_d.get("作詞者") and not updates.get("作詞者"): updates["作詞者"] = _mf_d["作詞者"]
-                                            if _mf_d.get("編曲者") and not updates.get("編曲者"): updates["編曲者"] = _mf_d["編曲者"]
-                                            if _mf_d.get("訳詞者") and not updates.get("訳詞者"): updates["訳詞者"] = _mf_d["訳詞者"]
-                                    except Exception:
-                                        pass
-                                # 詳細ページを引けなかった／作家名が載っていなかった分は
-                                # 検索結果の「作詞／作曲」列で埋める（通信なし）
-                                for _ak in ("作曲者", "作詞者", "編曲者", "訳詞者"):
-                                    if _mfr.get(_ak) and not updates.get(_ak):
-                                        updates[_ak] = _mfr[_ak]
-                        except Exception as _me:
-                            stats["MINCエラー"] += 1
-                            stats.setdefault("_minc_last_error", f"{type(_me).__name__}: {_me}")
-
-                    # ---- CD の情報を自社CD台帳（TSP）から埋める ----
-                    #
-                    # MINC に聞き直すと1曲ごとに通信が1回増える（応答は実測
-                    # 0.6〜12秒）。台帳はこちらの DB なので、作品コードさえ
-                    # 分かれば通信なしで品番・CD名・レコード会社名が入る。
-                    # 台帳が空（まだ取り込んでいない）なら何も起きない。
-                    _cd_code = (updates.get("JASRAC作品コード")
-                                or str(row.get("JASRAC作品コード", ""))).strip()
-                    _cd_filled = not _is_blank(
-                        updates.get("CD番号") or row.get("CD番号", ""))
-                    if _cd_code and not _cd_filled:
-                        _cd_dig = "".join(c for c in _cd_code if c.isdigit())
-                        if _cd_dig not in _cd_ledger_cache:
-                            try:
-                                _cd_ledger_cache.update(
-                                    cd_fetch_by_jasrac({_cd_dig})
-                                    or {_cd_dig: []})
-                            except Exception:
-                                _cd_ledger_cache[_cd_dig] = []
-                        _cd_cands = _cd_ledger_cache.get(_cd_dig) or []
-                        # 同じ作品が複数の盤に入っていることがある。手元に
-                        # アーティスト名があれば、それに合う盤を選ぶ
-                        _cd_hit = next(
-                            (_c for _c in _cd_cands
-                             if _artist_matches(_art_known, _c.get("artist", ""))),
-                            _cd_cands[0] if _cd_cands else None,
-                        )
-                        if _cd_hit:
-                            for _col, _key in (("CD番号", "cd_no"),
-                                               ("CD名", "cd_name"),
-                                               ("レコード会社名", "label")):
-                                if _cd_hit.get(_key) and not updates.get(_col) \
-                                        and _is_blank(row.get(_col, "")):
-                                    updates[_col] = _cd_hit[_key]
-                            if updates.get("CD番号"):
-                                stats["台帳CD"] += 1
-
-                    # ---- それでも埋まらなかった分だけ MINC に聞く ----
-                    #
-                    # 台帳は JASRAC作品コードでしか引けないので、NexTone
-                    # だけで管理されている曲は当たらない。検索結果の行に
-                    # 品番が載っていないこともある。そういう残りだけ、作品
-                    # コードから CD商品リストを引き直す。
-                    #
-                    # ここは1曲につき通信が1回増える（実測 0.6〜12秒）。
-                    # 埋め残しだけが対象なので、実測では33曲中4曲だった。
-                    _cd_filled2 = not _is_blank(
-                        updates.get("CD番号") or row.get("CD番号", ""))
-                    _cd_ncd = (updates.get("NexTone管理番号")
-                               or str(row.get("NexTone管理番号", ""))).strip()
-                    if _is_blank(_cd_ncd):
-                        _cd_ncd = ""
-                    if _mf_ok_bulk and not _cd_filled2 and (_cd_code or _cd_ncd):
-                        _mk = f"{_cd_code}|{_cd_ncd}"
-                        if _mk not in _cd_minc_cache:
-                            try:
-                                _cd_minc_cache[_mk] = (
-                                    _get_mf_client().search_cds_by_jasrac(
-                                        _cd_code,
-                                        title=search_term,
-                                        ncd=_cd_ncd,
-                                    ).get("cds") or []
-                                )
-                            except Exception as _ce:
-                                _cd_minc_cache[_mk] = []
-                                stats["MINCエラー"] += 1
-                                stats.setdefault(
-                                    "_minc_last_error",
-                                    f"{type(_ce).__name__}: {_ce}")
-                        _mc = _cd_minc_cache.get(_mk) or []
-                        # 台帳と同じ選び方。手元にアーティスト名があれば
-                        # それに合う盤、無ければ先頭
-                        _mc_hit = next(
-                            (_c for _c in _mc
-                             if _artist_matches(_art_known,
-                                                _c.get("アーティスト", ""))),
-                            _mc[0] if _mc else None,
-                        )
-                        if _mc_hit:
-                            for _col, _key in (("CD番号", "品番"),
-                                               ("CD名", "CD商品タイトル"),
-                                               ("レコード会社名", "レコード会社名")):
-                                if _mc_hit.get(_key) and not updates.get(_col) \
-                                        and _is_blank(row.get(_col, "")):
-                                    updates[_col] = _mc_hit[_key]
-                            if updates.get("CD番号"):
-                                stats["MINC引き直しCD"] += 1
-
-                    # I/V区分 自動判定
-                    #   ① MINC の CD情報に I/V 表記があればそれを使う
-                    #   ② 無ければ作詞者の有無で判定（作詞者あり→ヴォーカル／なし→インスト）
-                    # ②は作家名を取得できた行に限る（未取得の空欄をインストにしないため）
-                    _BLANK = ("", "nan", "none")
-                    _new_lyr   = updates.get("作詞者", "").strip()
-                    _exist_lyr = str(row.get("作詞者", "")).strip()
-                    _lyr = _new_lyr or ("" if _exist_lyr.lower() in _BLANK else _exist_lyr)
-                    _cred_known = bool(
-                        _jwid_detail_ok
-                        or _lyr
-                        or updates.get("作曲者", "").strip()
-                        or str(row.get("作曲者", "")).strip().lower() not in _BLANK
-                    )
-                    _iv_set    = str(row.get("I/V区分", "")).strip().lower() not in _BLANK
-                    if not _iv_set:
-                        if _minc_iv == "I":
-                            updates["I/V区分"] = "インスト"
-                        elif _minc_iv == "V":
-                            updates["I/V区分"] = "ヴォーカル"
-                        elif _cred_known:
-                            updates["I/V区分"] = _infer_iv(_lyr)
-
-                    # 原訳詞区分 自動判定（作詞者ありで未設定なら "原詞"）
-                    if (_new_lyr or (_exist_lyr and _exist_lyr.lower() not in _BLANK)):
-                        if str(row.get("原訳詞区分", "")).strip().lower() in _BLANK and not updates.get("原訳詞区分"):
-                            updates["原訳詞区分"] = "原詞"
-
-                    # 邦洋区分 自動判定（JASRACコード 2文字目: 数字→邦楽、英字→洋楽）
-                    _jasrac = (updates.get("JASRAC作品コード") or str(row.get("JASRAC作品コード", ""))).strip()
-                    if _jasrac and len(_jasrac) >= 2 and str(row.get("邦洋区分", "")).strip().lower() in _BLANK and not updates.get("邦洋区分"):
-                        _c2 = _jasrac[1]
-                        if _c2.isdigit():
-                            updates["邦洋区分"] = "邦楽"
-                        elif _c2.isalpha():
-                            updates["邦洋区分"] = "洋楽"
-
-                    if updates:
-                        # 作曲者一致 > アーティスト一致 > 曲名のみ一致 > 複数候補から選択
-                        if _mf_comp_matched:
-                            updates["確認ステータス"] = "作曲者一致"
-                            stats["作曲者一致"] += 1
-                            if _mf_art_matched:
-                                stats["作曲者アーティスト一致"] += 1
-                        elif _mf_art_matched:
-                            updates["確認ステータス"] = "アーティスト一致"
-                            stats["アーティスト一致"] += 1
-                        else:
-                            updates["確認ステータス"] = "複数候補あり" if _mf_multi_match else "候補あり"
-                        for col, val in updates.items():
-                            if col in st.session_state.songs_df.columns:
-                                st.session_state.songs_df.at[idx, col] = val
-                        stats["自動入力"] += 1
-                    elif jwid_r or nt_r:
-                        # 当たりはあったが自動では入れなかった＝どれか選ぶ
-                        # 必要がある行。人が見に行く先なので、そう書く
-                        st.session_state.songs_df.at[idx, "確認ステータス"] = "複数候補あり"
-                        stats["複数候補"] += 1
-                    else:
-                        st.session_state.songs_df.at[idx, "確認ステータス"] = "該当なし"
-                        stats["ヒットなし"] += 1
-
-                progress_bar.empty()
-                status_ph.empty()
-
-                result_msg = (
-                    f"✅ 完了: 自動入力 {stats['自動入力']} 件"
-                    + (f"（うち作曲者まで一致 {stats['作曲者一致']} 件"
-                       + (f"／うちアーティストも一致 {stats['作曲者アーティスト一致']} 件"
-                          if stats["作曲者アーティスト一致"] else "")
-                       + "）"
-                       if stats["作曲者一致"] else "")
-                    + (f"（うちアーティストのみ一致 {stats['アーティスト一致']} 件）"
-                       if stats["アーティスト一致"] else "")
-                    + (f"（うち CD を台帳から {stats['台帳CD']} 件）"
-                       if stats["台帳CD"] else "")
-                    + (f"（うち CD を MINC から {stats['MINC引き直しCD']} 件）"
-                       if stats["MINC引き直しCD"] else "")
-                    + f" ／ 複数候補 {stats['複数候補']} 件 ／ "
-                    f"ヒットなし {stats['ヒットなし']} 件"
-                )
-                if stats["エラー"]:
-                    result_msg += f" ／ エラー {stats['エラー']} 件"
-                if stats.get("_last_error"):
-                    result_msg += f"  \nJ-WID/NexToneエラー: {stats['_last_error']}"
-                if stats["MINCエラー"]:
-                    result_msg += (
-                        f"  \n⚠️ MINC エラー {stats['MINCエラー']} 件: "
-                        f"{stats.get('_minc_last_error','')}"
-                    )
-                # 直後に rerun するとこの場で出したメッセージは消えるため持ち越す
-                st.session_state["_apply_msg"] = result_msg
-                # 何分もかけて取った結果を取り直さずに済むよう、ここで保存する。
-                # 結果は songs_df に書き込んだだけで、DBにはまだ入っていない
-                _autosave_to_db("（一括検索の完了時）")
-                # 調べがついた曲を共有データに貯める。次に同じ曲が来たら
-                # 照合実行の時点で自動的に入る
-                _learned = _master_learn()
-                if _learned:
-                    st.session_state["_apply_msg"] += (
-                        f"  \n🗃️ 共有楽曲データに {_learned} 曲を貯めました。"
-                    )
-                # 検索が終わったら詳細設定は畳んでよい
-                st.session_state.pop("bulk_search_open", None)
+                # 何分もかかるので、ここでは回さない。印を立てて描き直し、
+                # タブを描く前に _run_bulk_search() で回す（回している間、
+                # 前の描画が下に残って二重に見えるのを避けるため）
+                st.session_state["_bulk_go"] = True
                 st.rerun()
 
         # ---- MusicBrainz / Spotify / Claude 一括補完 ----
@@ -6180,3 +6214,13 @@ with tabs[2]:
                         st.rerun()
                     else:
                         st.error("❌ 消せませんでした。")
+
+
+# =====================================================================
+# 一括検索は、画面を全部描き終えたここで回す
+# =====================================================================
+# 途中で回すと、何分ものあいだ描きかけのままになり、前の描画が下に
+# 残って二重に見える。ここまで来ていれば、どのウィジェットも今回の
+# 描画で作り直されているので、覚えている値も消えない。
+if st.session_state.pop("_bulk_go", False):
+    _run_bulk_search()
