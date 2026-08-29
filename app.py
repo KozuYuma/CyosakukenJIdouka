@@ -5686,6 +5686,7 @@ with tabs[2]:
                     "曲名":         st.column_config.TextColumn("曲名", width="medium"),
                     "管理番号キー":  st.column_config.TextColumn("管理番号キー", width="small"),
                     "トラックキー":  st.column_config.TextColumn("トラックキー", width="small"),
+                    "ファイル名キー": st.column_config.TextColumn("ファイル名キー", width="small"),
                     "更新":         st.column_config.TextColumn("更新", width="small"),
                 },
             )

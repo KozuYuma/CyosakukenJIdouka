@@ -156,15 +156,21 @@ def _ddl() -> list[str]:
                    id         SERIAL PRIMARY KEY,
                    mgmt_key   TEXT NOT NULL DEFAULT '',
                    track_key  TEXT NOT NULL DEFAULT '',
+                   file_key   TEXT NOT NULL DEFAULT '',
                    title      TEXT NOT NULL DEFAULT '',
                    data       JSONB NOT NULL,
                    updated_at TIMESTAMPTZ DEFAULT now()
                )""",
+            # 先に作られたテーブルにも足す
+            "ALTER TABLE song_master ADD COLUMN IF NOT EXISTS "
+            "file_key TEXT NOT NULL DEFAULT ''",
             # 空文字のキーは一致に使わないので、索引から外して軽くする
             "CREATE INDEX IF NOT EXISTS ix_song_master_mgmt "
             "ON song_master (mgmt_key) WHERE mgmt_key <> ''",
             "CREATE INDEX IF NOT EXISTS ix_song_master_track "
             "ON song_master (track_key) WHERE track_key <> ''",
+            "CREATE INDEX IF NOT EXISTS ix_song_master_file "
+            "ON song_master (file_key) WHERE file_key <> ''",
             # 自社CDの台帳（TSP）。人が育てる song_master とは別に持つ。
             # 元データを丸ごと入れ替えられるよう、JSON にせず普通の列にする
             """CREATE TABLE IF NOT EXISTS cd_master (
@@ -218,6 +224,7 @@ def _ddl() -> list[str]:
                id         INTEGER PRIMARY KEY AUTOINCREMENT,
                mgmt_key   TEXT NOT NULL DEFAULT '',
                track_key  TEXT NOT NULL DEFAULT '',
+               file_key   TEXT NOT NULL DEFAULT '',
                title      TEXT NOT NULL DEFAULT '',
                data       TEXT NOT NULL,
                updated_at TEXT DEFAULT (datetime('now','localtime'))
@@ -226,6 +233,8 @@ def _ddl() -> list[str]:
         "ON song_master (mgmt_key)",
         "CREATE INDEX IF NOT EXISTS ix_song_master_track "
         "ON song_master (track_key)",
+        "CREATE INDEX IF NOT EXISTS ix_song_master_file "
+        "ON song_master (file_key)",
         """CREATE TABLE IF NOT EXISTS cd_master (
                mgmt_key  TEXT PRIMARY KEY,
                disc_key  TEXT NOT NULL DEFAULT '',
@@ -251,21 +260,28 @@ def _ddl() -> list[str]:
 
 def init_db() -> None:
     """起動時に呼ぶ。必要なテーブルがなければ作成する。"""
+    if not is_postgres():
+        # SQLite に ADD COLUMN IF NOT EXISTS は無い。既に列があれば
+        # "duplicate column name"、テーブルがまだ無ければ "no such table"
+        # で失敗するだけなので、それを握りつぶす。失敗しても他の DDL を
+        # 巻き込まないよう、接続を分けて実行する。
+        #
+        # 本体の DDL より先に流す。あとに回すと、足したばかりの列を使う
+        # 索引を作るところで「そんな列は無い」と言われてしまう
+        for stmt in (
+            "ALTER TABLE projects ADD COLUMN owner TEXT DEFAULT ''",
+            "ALTER TABLE song_master ADD COLUMN file_key TEXT "
+            "NOT NULL DEFAULT ''",
+        ):
+            try:
+                with get_engine().begin() as conn:
+                    conn.execute(text(stmt))
+            except Exception:
+                pass
+
     with get_engine().begin() as conn:
         for stmt in _ddl():
             conn.execute(text(stmt))
-
-    if not is_postgres():
-        # SQLite に ADD COLUMN IF NOT EXISTS は無い。既に列があれば
-        # "duplicate column name" で失敗するだけなので、それを握りつぶす。
-        # 失敗しても他の DDL を巻き込まないよう、接続を分けて実行する。
-        try:
-            with get_engine().begin() as conn:
-                conn.execute(text(
-                    "ALTER TABLE projects ADD COLUMN owner TEXT DEFAULT ''"
-                ))
-        except Exception:
-            pass
 
 
 def _now_sql() -> str:
@@ -468,6 +484,11 @@ def load_events(project_id: int) -> pd.DataFrame | None:
 # 案件に属さない。全員で貯めて全員で使う。中身の決め方は
 # modules/song_master.py 側にある。ここは出し入れだけ。
 
+# SELECT で並べる列。どこも同じ形で受け取れるように一箇所にまとめる
+MASTER_COLUMNS = ("id, mgmt_key, track_key, file_key, title, data, "
+                  "updated_at")
+
+
 def _master_row(r) -> dict:
     """SELECT の1行を dict にする。data は PostgreSQL なら dict で返る。"""
     d = dict(r)
@@ -477,11 +498,13 @@ def _master_row(r) -> dict:
     return d
 
 
-def master_fetch(mgmt_keys: set[str], track_keys: set[str]) -> list[dict]:
-    """どちらかのキーに当たる行を返す。キーが空なら何も返さない。"""
+def master_fetch(mgmt_keys: set[str], track_keys: set[str],
+                 file_keys: set[str] | None = None) -> list[dict]:
+    """どれかのキーに当たる行を返す。キーが空なら何も返さない。"""
     mgmt = [k for k in (mgmt_keys or set()) if k]
     track = [k for k in (track_keys or set()) if k]
-    if not mgmt and not track:
+    file_ = [k for k in (file_keys or set()) if k]
+    if not mgmt and not track and not file_:
         return []
 
     # IN 句は自前で組み立てず、SQLAlchemy の展開に任せる
@@ -492,9 +515,12 @@ def master_fetch(mgmt_keys: set[str], track_keys: set[str]) -> list[dict]:
     if track:
         where.append("track_key IN :track")
         params["track"] = tuple(track)
+    if file_:
+        where.append("file_key IN :file")
+        params["file"] = tuple(file_)
 
     sql = text(
-        "SELECT id, mgmt_key, track_key, title, data, updated_at "
+        f"SELECT {MASTER_COLUMNS} "
         "FROM song_master WHERE " + " OR ".join(where)
     ).bindparams(*[
         # tuple をそのまま渡すと1個の値と見なされるので展開を指示する
@@ -514,13 +540,13 @@ def master_upsert(records: list[dict]) -> int:
         return 0
     cast = "CAST(:data AS JSONB)" if is_postgres() else ":data"
     ins = text(
-        f"INSERT INTO song_master (mgmt_key, track_key, title, data) "
-        f"VALUES (:mgmt_key, :track_key, :title, {cast})"
+        f"INSERT INTO song_master (mgmt_key, track_key, file_key, title, data) "
+        f"VALUES (:mgmt_key, :track_key, :file_key, :title, {cast})"
     )
     upd = text(
         f"UPDATE song_master SET mgmt_key = :mgmt_key, track_key = :track_key, "
-        f"title = :title, data = {cast}, updated_at = {_now_sql()} "
-        f"WHERE id = :id"
+        f"file_key = :file_key, title = :title, data = {cast}, "
+        f"updated_at = {_now_sql()} WHERE id = :id"
     )
     n = 0
     with get_engine().begin() as conn:
@@ -528,6 +554,7 @@ def master_upsert(records: list[dict]) -> int:
             p = {
                 "mgmt_key": rec.get("mgmt_key") or "",
                 "track_key": rec.get("track_key") or "",
+                "file_key": rec.get("file_key") or "",
                 "title": rec.get("title") or "",
                 "data": json.dumps(rec.get("data") or {}, ensure_ascii=False,
                                    default=str, allow_nan=False),
@@ -545,7 +572,7 @@ def master_all() -> list[dict]:
     try:
         with get_engine().connect() as conn:
             rows = conn.execute(text(
-                "SELECT id, mgmt_key, track_key, title, data, updated_at "
+                f"SELECT {MASTER_COLUMNS} "
                 "FROM song_master ORDER BY updated_at DESC"
             )).mappings().all()
         return [_master_row(r) for r in rows]
@@ -568,7 +595,8 @@ def master_search(keyword: str = "", limit: int = 300) -> list[dict]:
     if kw:
         where = (
             " WHERE title LIKE :kw OR mgmt_key LIKE :kw_id "
-            f"OR track_key LIKE :kw OR {data_as_text} LIKE :kw"
+            f"OR track_key LIKE :kw OR file_key LIKE :kw "
+            f"OR {data_as_text} LIKE :kw"
         )
         params["kw"] = f"%{kw}%"
         # 管理番号は記号を抜いた形で入っているので、探す方も揃える
@@ -577,7 +605,7 @@ def master_search(keyword: str = "", limit: int = 300) -> list[dict]:
     try:
         with get_engine().connect() as conn:
             rows = conn.execute(text(
-                "SELECT id, mgmt_key, track_key, title, data, updated_at "
+                f"SELECT {MASTER_COLUMNS} "
                 "FROM song_master" + where +
                 " ORDER BY updated_at DESC LIMIT :lim"
             ), params).mappings().all()

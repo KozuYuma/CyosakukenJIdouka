@@ -179,6 +179,47 @@ def mgmt_candidates(row) -> list[str]:
     return seen
 
 
+# ファイル名キーに使う列。実際の音源ファイルの名前が入っている方から見る。
+# NUENDO のファイル名は案件ごとに付け替えられていることがあるので使わない
+FILE_COLUMNS: tuple[str, ...] = ("WAV一致ファイル名", "MP3一致ファイル名")
+
+# 音源の拡張子。同じ音源が .wav と .mp3 で来ても同じキーにする
+_AUDIO_EXT: tuple[str, ...] = (".wav", ".mp3", ".aif", ".aiff", ".flac", ".m4a")
+
+# これより短い名前は当てに使わない。「01」のようなありふれた名前で
+# 別の曲どうしがつながってしまうのを防ぐ
+_FILE_KEY_MIN = 6
+
+
+def norm_file(value) -> str:
+    """ファイル名を比べる形にする。使えない名前なら空文字。
+
+    拡張子を落として、全角半角・大文字小文字・空白をそろえる。
+    """
+    s = unicodedata.normalize("NFKC", str(value or "")).strip().casefold()
+    for ext in _AUDIO_EXT:
+        if s.endswith(ext):
+            s = s[:-len(ext)]
+            break
+    s = "".join(s.split())
+    return s if len(s) >= _FILE_KEY_MIN else ""
+
+
+def file_candidates(row) -> list[str]:
+    """ファイル名キーの候補。先頭が新しく作るときの形。
+
+    同じ曲名・同じトラック番号でも、実際には別の音源（別のCD）という
+    ことがある。ファイル名なら音源そのものを指すので、曲名で当てるより
+    確かに決まる。管理番号の次に強いキーとして使う。
+    """
+    out: list[str] = []
+    for col in FILE_COLUMNS:
+        key = norm_file(row.get(col))
+        if key and key not in out:
+            out.append(key)
+    return out
+
+
 def track_candidates(row) -> list[str]:
     """トラック番号＋曲名キーの候補。先頭が新しく作るときの形。
 
@@ -198,15 +239,17 @@ def track_candidates(row) -> list[str]:
     return out
 
 
-def make_keys(row) -> tuple[str, str]:
-    """(管理番号キー, トラック番号＋曲名キー)。使えない方は空文字。
+def make_keys(row) -> tuple[str, str, str]:
+    """(管理番号キー, トラック番号＋曲名キー, ファイル名キー)。
 
-    どちらも新しく作るときの形。既にある行を探すときは
-    mgmt_candidates / track_candidates の候補を全部使う。
+    使えないものは空文字。どれも新しく作るときの形。既にある行を探す
+    ときは *_candidates の候補を全部使う。
     """
     mgmt = mgmt_candidates(row)
     track = track_candidates(row)
-    return (mgmt[0] if mgmt else ""), (track[0] if track else "")
+    file_ = file_candidates(row)
+    return ((mgmt[0] if mgmt else ""), (track[0] if track else ""),
+            (file_[0] if file_ else ""))
 
 
 # ─── 貯める ────────────────────────────────────────────
@@ -236,7 +279,8 @@ def collect(songs_df: pd.DataFrame, user: str = "") -> list[dict]:
 
         mgmt_cands = mgmt_candidates(row)
         track_cands = track_candidates(row)
-        if not mgmt_cands and not track_cands:
+        file_cands = file_candidates(row)
+        if not mgmt_cands and not track_cands and not file_cands:
             continue
 
         data: dict[str, dict] = {}
@@ -253,9 +297,11 @@ def collect(songs_df: pd.DataFrame, user: str = "") -> list[dict]:
             # 新しく作るときの形
             "mgmt_key": mgmt_cands[0] if mgmt_cands else "",
             "track_key": track_cands[0] if track_cands else "",
+            "file_key": file_cands[0] if file_cands else "",
             # 既にある行を探すときの候補（書き方の揺れを吸収する）
             "mgmt_cands": mgmt_cands,
             "track_cands": track_cands,
+            "file_cands": file_cands,
             "title": _cell(row.get("曲名")),
             "data": data,
         })
@@ -296,6 +342,25 @@ def _first_hit(index: dict, keys) -> dict | None:
     return None
 
 
+def _track_hit(by_track: dict, track_cands, file_cands) -> dict | None:
+    """曲名＋トラック番号で当てる。ただしファイル名が食い違う行は捨てる。
+
+    同じ曲名・同じトラック番号でも、別の音源（別のCD）ということが
+    ある。両方にファイル名があって、それが違うなら別の曲。
+
+    貯めてある行の方にファイル名がまだ無いときは当てる。ファイル名を
+    持つ前に貯めた行が当たらなくなってしまうため（当たった行には
+    あとでファイル名を書き足す）。
+    """
+    hit = _first_hit(by_track, track_cands)
+    if hit is None:
+        return None
+    theirs = hit.get("file_key") or ""
+    if theirs and file_cands and theirs not in file_cands:
+        return None
+    return hit
+
+
 def save(songs_df: pd.DataFrame, user: str = "") -> int:
     """songs_df の確定・一致行を song_master に貯める。入れた曲数を返す。"""
     records = collect(songs_df, user)
@@ -305,14 +370,18 @@ def save(songs_df: pd.DataFrame, user: str = "") -> int:
     existing = master_fetch(
         {k for r in records for k in r["mgmt_cands"]},
         {k for r in records for k in r["track_cands"]},
+        {k for r in records for k in r["file_cands"]},
     )
     by_mgmt = {e["mgmt_key"]: e for e in existing if e["mgmt_key"]}
     by_track = {e["track_key"]: e for e in existing if e["track_key"]}
+    by_file = {e.get("file_key"): e for e in existing if e.get("file_key")}
 
     writes: list[dict] = []
     for rec in records:
+        # 強い順に見る。管理番号 → ファイル名 → トラック番号＋曲名
         hit = (_first_hit(by_mgmt, rec["mgmt_cands"])
-               or _first_hit(by_track, rec["track_cands"]))
+               or _first_hit(by_file, rec["file_cands"])
+               or _track_hit(by_track, rec["track_cands"], rec["file_cands"]))
         if hit is None:
             # 同じ実行の中で同じ曲が二度出てきても、二重に作らない。
             # 書き方が違うだけの行も拾えるよう、候補を全部登録する。
@@ -322,12 +391,15 @@ def save(songs_df: pd.DataFrame, user: str = "") -> int:
                 "id": None,
                 "mgmt_key": rec["mgmt_key"],
                 "track_key": rec["track_key"],
+                "file_key": rec["file_key"],
                 "title": rec["title"],
                 "data": dict(rec["data"]),
             }
             writes.append(new)
             for k in rec["mgmt_cands"]:
                 by_mgmt.setdefault(k, new)
+            for k in rec["file_cands"]:
+                by_file.setdefault(k, new)
             for k in rec["track_cands"]:
                 by_track.setdefault(k, new)
             continue
@@ -336,9 +408,10 @@ def save(songs_df: pd.DataFrame, user: str = "") -> int:
         if not changed:
             continue
         hit["data"] = merged
-        # 片方しかキーが無かった行に、もう片方のキーを足していく
+        # 一部のキーしか無かった行に、残りのキーを足していく
         hit["mgmt_key"] = hit.get("mgmt_key") or rec["mgmt_key"]
         hit["track_key"] = hit.get("track_key") or rec["track_key"]
+        hit["file_key"] = hit.get("file_key") or rec["file_key"]
         hit["title"] = hit.get("title") or rec["title"]
         # この実行で作ったばかりの行なら、既に積んである
         if any(hit is w for w in writes):
@@ -347,6 +420,7 @@ def save(songs_df: pd.DataFrame, user: str = "") -> int:
             "id": hit.get("id"),
             "mgmt_key": hit["mgmt_key"],
             "track_key": hit["track_key"],
+            "file_key": hit["file_key"],
             "title": hit["title"],
             "data": merged,
         })
@@ -383,31 +457,35 @@ def fill(songs_df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
     if songs_df is None or songs_df.empty:
         return songs_df, 0, 0
 
-    keys = [(mgmt_candidates(row), track_candidates(row))
+    keys = [(mgmt_candidates(row), track_candidates(row), file_candidates(row))
             for _, row in songs_df.iterrows()]
     found = master_fetch(
-        {k for cands, _ in keys for k in cands},
-        {k for _, cands in keys for k in cands},
+        {k for cands, _, _ in keys for k in cands},
+        {k for _, cands, _ in keys for k in cands},
+        {k for _, _, cands in keys for k in cands},
     )
     if not found:
         return songs_df, 0, 0
 
     by_mgmt = {e["mgmt_key"]: e for e in found if e["mgmt_key"]}
     by_track = {e["track_key"]: e for e in found if e["track_key"]}
+    by_file = {e.get("file_key"): e for e in found if e.get("file_key")}
 
     df = songs_df.copy()
     hit_rows = 0
     filled = 0
-    for pos, (mgmt_cands, track_cands) in enumerate(keys):
-        hit = _first_hit(by_mgmt, mgmt_cands)
+    for pos, (mgmt_cands, track_cands, file_cands) in enumerate(keys):
+        # 管理番号かファイル名で当たった行は、それだけで曲が決まる
+        hit = (_first_hit(by_mgmt, mgmt_cands)
+               or _first_hit(by_file, file_cands))
         by_number = hit is not None
-        hit = hit or _first_hit(by_track, track_cands)
+        hit = hit or _track_hit(by_track, track_cands, file_cands)
         if hit is None:
             continue
         idx = df.index[pos]
         touched = False
-        # 管理番号で当たった行は、それだけで「どの曲か」が決まる。
-        # 曲名＋トラック番号で当たった方は付けない（同名の別物が
+        # 管理番号やファイル名で当たった行は、それだけで「どの曲か」が
+        # 決まる。曲名＋トラック番号で当たった方は付けない（同名の別物が
         # 混ざりうるので、人が見に行く先として残す）
         if by_number and mark_status(df, idx):
             filled += 1
@@ -479,6 +557,7 @@ def edit(record: dict, values: dict, user: str = "") -> int:
         "id": record.get("id"),
         "mgmt_key": record.get("mgmt_key") or "",
         "track_key": record.get("track_key") or "",
+        "file_key": record.get("file_key") or "",
         "title": title,
         "data": data,
     }])
@@ -493,14 +572,15 @@ def to_frame(records: list[dict]) -> pd.DataFrame:
             "曲名": _cell(rec.get("title")),
             "管理番号キー": _cell(rec.get("mgmt_key")),
             "トラックキー": _cell(rec.get("track_key")),
+            "ファイル名キー": _cell(rec.get("file_key")),
             "更新": _cell(rec.get("updated_at")),
         }
         for col in MASTER_FIELDS:
             row[col] = cell_of(rec, col)["v"]
         rows.append(row)
 
-    cols = ["id", "曲名", "管理番号キー", "トラックキー", "更新",
-            *MASTER_FIELDS]
+    cols = ["id", "曲名", "管理番号キー", "トラックキー", "ファイル名キー",
+            "更新", *MASTER_FIELDS]
     return pd.DataFrame(rows, columns=cols)
 
 
