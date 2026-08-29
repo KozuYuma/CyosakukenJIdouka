@@ -4361,14 +4361,47 @@ with tabs[0]:
                         # ── ① ページ内CDリスト（推奨） ──────────────────────────
                         if _page_cd_links:
                             st.markdown("##### 📋 検索結果ページ内のCDリスト")
-                            st.caption("MINCの検索結果ページで見つかったCDです。候補に紐付けてください。")
-                            _pg_labels = [lnk["label"] for lnk in _page_cd_links]
+                            st.caption(
+                                "MINCの検索結果ページに出ていたCDです。候補に紐付けて"
+                                "ください。　※これは検索でヒットしたページに載っていた"
+                                "分だけです。作品コードに紐づく収録CDの全件は、上の"
+                                "「🔍 このJASRACコードのCDを検索（MINC）」の方に出ます。"
+                            )
+                            # 数が多いと選びにくいので、CD名の一部で絞れるようにする
+                            _pg_q = st.text_input(
+                                "絞り込み（CD名の一部）",
+                                key=f"mf_pg_q_{selected_no}",
+                                placeholder="例: ベスト / TOCT",
+                            ).strip()
+                            _pg_pool = _page_cd_links
+                            if _pg_q:
+                                _pg_ql = _pg_q.lower()
+                                _pg_hit = [lnk for lnk in _page_cd_links
+                                           if _pg_ql in lnk["label"].lower()]
+                                if _pg_hit:
+                                    st.caption(
+                                        f"「{_pg_q}」で絞り込み: "
+                                        f"**{len(_pg_hit)}** / {len(_page_cd_links)} 件")
+                                    _pg_pool = _pg_hit
+                                else:
+                                    # 0件のまま選ばせても何も選べないので全件に戻す
+                                    st.caption(
+                                        f"「{_pg_q}」に一致するCDが無いため"
+                                        f"全 {len(_page_cd_links)} 件を出しています")
+                            else:
+                                st.caption(f"CD **{len(_page_cd_links)} 件**")
+                            _pg_labels = [lnk["label"] for lnk in _pg_pool]
+                            # 絞り込みで選択中のCDが消えると選びようがなくなるので、
+                            # 残っていないときは選び直し（先頭）に戻す
+                            _pg_cd_key = f"mf_pg_cd_{selected_no}"
+                            if st.session_state.get(_pg_cd_key) not in _pg_labels:
+                                st.session_state.pop(_pg_cd_key, None)
                             _pg_sel_label = st.selectbox(
                                 "CD",
                                 options=_pg_labels,
-                                key=f"mf_pg_cd_{selected_no}",
+                                key=_pg_cd_key,
                             )
-                            _pg_sel_lnk = _page_cd_links[_pg_labels.index(_pg_sel_label)]
+                            _pg_sel_lnk = _pg_pool[_pg_labels.index(_pg_sel_label)]
                             _pg_cand_sel = st.selectbox(
                                 "適用する候補",
                                 options=_man_cand_opts,
