@@ -502,6 +502,33 @@ def _render_delivery_rows(_cp_res: dict, row_idx: int, key_prefix: str) -> None:
     )
 
 
+def _cds_fetch_for_hit(_client, _hit: dict, _term: str = "") -> dict:
+    """作品検索の1行から、その作品のCD商品リストを引く。"""
+    return _client.search_cds_by_jasrac(
+        str(_hit.get("JASRAC作品コード", "")).strip(),
+        title=_hit.get("作品名", "") or _term,
+        ncd=str(_hit.get("NexTone管理番号", "")).strip(),
+    )
+
+
+def _cds_cand_label(_hit: dict) -> str:
+    """作品候補を1行で見分けられる形にする。"""
+    _parts = [
+        str(_hit.get("作品名", "") or "（曲名なし）")
+        + (f"（{_hit['副題']}）" if _hit.get("副題") else "")
+    ]
+    _code = (str(_hit.get("JASRAC作品コード", "")).strip()
+             or str(_hit.get("NexTone管理番号", "")).strip())
+    if _code:
+        _parts.append(_code)
+    for _k in ("アーティスト", "作曲者", "収録CD"):
+        if _hit.get(_k):
+            _parts.append(f"{_k}: {_hit[_k]}")
+    if _hit.get("_source_table"):
+        _parts.append(str(_hit["_source_table"]))
+    return "｜".join(_parts)
+
+
 def _render_cd_results(
     _cp_res: dict | None, row_idx: int, key_prefix: str, artist_filter: str = ""
 ) -> None:
@@ -560,11 +587,23 @@ def _render_cd_results(
             )
 
     # ── 絞り込み（品番／CD商品タイトル／アーティスト／会社名の部分一致）────────
-    _cp_q = st.text_input(
-        "絞り込み（品番・CDタイトル・アーティスト・会社名）",
-        key=f"cpanel_q_{key_prefix}",
-        placeholder="例: TOCT / ベスト / チューリップ",
-    ).strip()
+    _cp_qc1, _cp_qc2 = st.columns([4, 1])
+    with _cp_qc1:
+        _cp_q = st.text_input(
+            "絞り込み（品番・CDタイトル・アーティスト・会社名）",
+            key=f"cpanel_q_{key_prefix}",
+            placeholder="例: TOCT / ベスト / チューリップ",
+        ).strip()
+    with _cp_qc2:
+        # 入力欄のラベルの高さぶんだけ下げて、ボタンの高さを揃える
+        st.markdown("<div style='height:1.8rem'></div>", unsafe_allow_html=True)
+        # ボタンを押すと入力欄の値が確定して再実行されるので、
+        # 中身は空でよい（Enter キーを知らなくても絞り込めるようにする）
+        st.button(
+            "🔎 絞り込む",
+            key=f"cpanel_qbtn_{key_prefix}",
+            use_container_width=True,
+        )
     if _cp_q:
         _cp_ql = _cp_q.lower()
         _cp_view = [
@@ -574,12 +613,18 @@ def _render_cd_results(
                 c.get("アーティスト", ""), c.get("発売会社", ""), c.get("販売会社", ""),
             ]).lower()
         ]
+        if _cp_view:
+            st.caption(f"「{_cp_q}」で絞り込み: **{len(_cp_view)}** / {len(_cp_items)} 件")
+        else:
+            # 0件のまま隠すと、打ち間違えただけで表ごと消えてしまう。
+            # 全件に戻して、一致しなかったことだけ伝える
+            st.warning(
+                f"「{_cp_q}」に一致するCDはありません。"
+                f"全 {len(_cp_items)} 件を出しています。"
+            )
+            _cp_view = _cp_items
     else:
         _cp_view = _cp_items
-
-    if not _cp_view:
-        st.info(f"「{_cp_q}」に一致するCDはありません。")
-        return
 
     # ── 全件一覧（行クリックで下の「反映するCDを選択」に連動）──────────────
     _cp_sel_key  = f"cpanel_sel_{key_prefix}"
@@ -4270,11 +4315,19 @@ with tabs[0]:
                                     "曲名や作者名で検索を絞ると拾える件数が増えます。"
                                 )
                             # 数が多いと選びにくいので、CD名の一部で絞れるようにする
-                            _pg_q = st.text_input(
-                                "絞り込み（CD名の一部）",
-                                key=f"mf_pg_q_{selected_no}",
-                                placeholder="例: ベスト / TOCT",
-                            ).strip()
+                            _pg_qc1, _pg_qc2 = st.columns([4, 1])
+                            with _pg_qc1:
+                                _pg_q = st.text_input(
+                                    "絞り込み（CD名の一部）",
+                                    key=f"mf_pg_q_{selected_no}",
+                                    placeholder="例: ベスト / TOCT",
+                                ).strip()
+                            with _pg_qc2:
+                                st.markdown("<div style='height:1.8rem'></div>",
+                                            unsafe_allow_html=True)
+                                st.button("🔎 絞り込む",
+                                          key=f"mf_pg_qbtn_{selected_no}",
+                                          use_container_width=True)
                             _pg_pool = _page_cd_links
                             if _pg_q:
                                 _pg_ql = _pg_q.lower()
@@ -4483,13 +4536,20 @@ with tabs[0]:
                                         f"トラック{_cd_trk_d}: {_cd_name_d}" + (f"（{_cd_dur_d}）" if _cd_dur_d else "")
                                     )
                                 st.session_state["_apply_msg"] = "  \n".join(_msg_lines)
-                                st.session_state[f"mf_manual_dbg_{selected_no}"] = _m_cd_result.get("debug_html", "")[:3000]
+                                # 品番もCD名も取れなかったときだけHTMLを残す。
+                                # 取れているのに出すと、うまくいった場面で
+                                # HTMLの塊が開いて出てエラーのように見える
+                                if not _cd_cat_d and not _cd_title_d:
+                                    st.session_state[f"mf_manual_dbg_{selected_no}"] = \
+                                        _m_cd_result.get("debug_html", "")[:3000]
+                                else:
+                                    st.session_state.pop(f"mf_manual_dbg_{selected_no}", None)
                                 st.rerun()
 
                 # デバッグ HTML 表示（手動取得で品番・CD名が取れなかった場合、rerun後も表示）
                 _mf_manual_dbg = st.session_state.get(f"mf_manual_dbg_{selected_no}", "")
                 if _mf_manual_dbg:
-                    with st.expander("🔍 デバッグ HTML（品番・CD名が取得できなかった場合）", expanded=True):
+                    with st.expander("🔍 デバッグ HTML（品番・CD名が取得できなかった場合）", expanded=False):
                         st.caption("このHTMLを確認すると、ページ構造から正確なパーサーを書けます。")
                         st.code(_mf_manual_dbg, language="html")
                         if st.button("デバッグHTML削除", key=f"mf_dbg_clear_{selected_no}"):
@@ -4513,6 +4573,20 @@ with tabs[0]:
 
             _cds_artist_default = str(row.get("アーティスト", "")).strip()
             _cds_artist_default = "" if _cds_artist_default.lower() == "nan" else _cds_artist_default
+
+            # 表の側で曲名やJASRACコードを直したら、この入力欄も追従させる。
+            # Streamlit は key があると value を見ないので、既定値そのものが
+            # 変わったときだけ入れ直す（利用者が手で消した分は消えたまま残る）
+            _cds_def_key = f"cds_defaults_{selected_no}"
+            _cds_defaults = (_cds_jcd_default, _cds_title_default, _cds_artist_default)
+            if st.session_state.get(_cds_def_key, _cds_defaults) != _cds_defaults:
+                for _cds_wk, _cds_wv in (
+                    (f"cds_jcd_{selected_no}", _cds_jcd_default),
+                    (f"cds_title_{selected_no}", _cds_title_default),
+                    (f"cds_artist_{selected_no}", _cds_artist_default),
+                ):
+                    st.session_state[_cds_wk] = _cds_wv
+            st.session_state[_cds_def_key] = _cds_defaults
 
             _cds_c1, _cds_c2, _cds_c3 = st.columns(3)
             with _cds_c1:
@@ -4547,7 +4621,9 @@ with tabs[0]:
                 with st.spinner("MINCからCDリストを取得中..."):
                     try:
                         _cds_client = _get_mf_client()
+                        _cds_cand_key = f"cds_cands_{selected_no}"
                         if _cds_jcd_input.strip():
+                            st.session_state.pop(_cds_cand_key, None)
                             _cds_raw = _cds_client.search_cds_by_jasrac(
                                 _cds_jcd_input.strip(),
                                 title=_cds_title_input.strip() or _cds_title_default,
@@ -4555,10 +4631,13 @@ with tabs[0]:
                         else:
                             _cds_term = _cds_title_input.strip() or _cds_title_default
                             if not _cds_term:
+                                st.session_state.pop(_cds_cand_key, None)
                                 _cds_raw = {"cds": [], "error": "JASRACコードまたは曲名を入力してください。"}
                             else:
-                                # 曲名のみ → まず作品を検索し、ヒットしたJASRACコードで
-                                #            CD商品リスト（全件）を取得する
+                                # 曲名のみ → まず作品を検索する。MINCは曲名の部分一致
+                                # で探すので「きらきら星」で「きらきら星変奏曲より」も
+                                # 返ってくる。作品が2つ以上あるときは勝手に選ばず、
+                                # 下の候補一覧から選んでもらう（自動で選ぶと選び直せない）
                                 _cds_sr = _cds_client.search(_cds_term)
                                 _cds_hits = _cds_sr.get("results") or [{}]
                                 _cds_ai = _cds_artist_input.strip().lower()
@@ -4593,37 +4672,35 @@ with tabs[0]:
 
                                 _cds_hits = sorted(_cds_hits, key=_cds_rank)
 
-                                # 上から順に引き、CD が見つかった時点で止める。
-                                # 1件目に CD が無くても、別のコードに付いて
-                                # いることがあるため。MINC への負担を考えて
-                                # 3件まで。同じコードは二度引かない
-                                _cds_raw = None
-                                _cds_tried: list[str] = []
+                                # コードを持つ候補だけを、同じコードは1つに
+                                # まとめて残す（収録曲・配信曲で同じ作品が
+                                # 何行にも出るため）
+                                _cds_cands: list[dict] = []
+                                _cds_seen: list[str] = []
                                 for _cds_h in _cds_hits:
                                     _cds_fjcd = str(_cds_h.get("JASRAC作品コード", "")).strip()
                                     _cds_fncd = str(_cds_h.get("NexTone管理番号", "")).strip()
                                     if not _cds_fjcd and not _cds_fncd:
                                         continue
                                     _cds_ckey = f"{_cds_fjcd}|{_cds_fncd}"
-                                    if _cds_ckey in _cds_tried:
+                                    if _cds_ckey in _cds_seen:
                                         continue
-                                    _cds_tried.append(_cds_ckey)
-                                    _cds_try = _cds_client.search_cds_by_jasrac(
-                                        _cds_fjcd,
-                                        title=_cds_h.get("作品名", "") or _cds_term,
-                                        ncd=_cds_fncd,
-                                    )
-                                    # 最初に引いた結果は、CD が無くても残す。
-                                    # 配信しかない曲は、その配信を出したいため
-                                    if _cds_raw is None:
-                                        _cds_raw = _cds_try
-                                    if _cds_try.get("cds"):
-                                        _cds_raw = _cds_try
-                                        break
-                                    if len(_cds_tried) >= 3:
-                                        break
+                                    _cds_seen.append(_cds_ckey)
+                                    _cds_cands.append(_cds_h)
 
-                                if _cds_raw is None:
+                                if len(_cds_cands) > 1:
+                                    # 選んでもらう。今の結果は消して、下に候補を出す
+                                    st.session_state[_cds_cand_key] = {
+                                        "term": _cds_term, "hits": _cds_cands,
+                                    }
+                                    st.session_state.pop(f"cds_results_{selected_no}", None)
+                                    _cds_raw = None
+                                elif _cds_cands:
+                                    st.session_state.pop(_cds_cand_key, None)
+                                    _cds_raw = _cds_fetch_for_hit(
+                                        _cds_client, _cds_cands[0], _cds_term)
+                                else:
+                                    st.session_state.pop(_cds_cand_key, None)
                                     _cds_raw = {
                                         "cds": [],
                                         "error": (
@@ -4631,14 +4708,70 @@ with tabs[0]:
                                             or f"「{_cds_term}」に一致する作品が見つかりませんでした。"
                                         ),
                                     }
-                        # 検索時点のアーティスト指定を結果と一緒に保持する
-                        _cds_raw["_artist_filter"] = _cds_artist_input.strip()
-                        st.session_state[f"cds_results_{selected_no}"] = _cds_raw
-                        for _cds_ck in list(st.session_state.keys()):
-                            if _cds_ck.startswith(f"cds_detail_{selected_no}_"):
-                                del st.session_state[_cds_ck]
+                        if _cds_raw is not None:
+                            # 検索時点のアーティスト指定を結果と一緒に保持する
+                            _cds_raw["_artist_filter"] = _cds_artist_input.strip()
+                            st.session_state[f"cds_results_{selected_no}"] = _cds_raw
+                            for _cds_ck in list(st.session_state.keys()):
+                                if _cds_ck.startswith(f"cds_detail_{selected_no}_"):
+                                    del st.session_state[_cds_ck]
                     except MusicForestError as _cds_ce:
                         st.session_state[f"cds_results_{selected_no}"] = {"cds": [], "error": str(_cds_ce)}
+
+            # ── 作品の候補（曲名だけで検索して2件以上見つかった場合）──────
+            _cds_cand_st = st.session_state.get(f"cds_cands_{selected_no}") or {}
+            _cds_cand_hits = _cds_cand_st.get("hits") or []
+            if _cds_cand_hits:
+                st.info(
+                    f"「{_cds_cand_st.get('term', '')}」で作品が "
+                    f"**{len(_cds_cand_hits)} 件** 見つかりました。"
+                    "MINCは曲名の一部でも探すため、別の曲も混ざります。"
+                    "CDを見たい作品を選んでください。"
+                )
+                _cds_cand_view = _cds_cand_hits[:50]
+                if len(_cds_cand_hits) > len(_cds_cand_view):
+                    st.caption(
+                        f"※多いので先頭 {len(_cds_cand_view)} 件だけ出しています。"
+                        "曲名を詳しく入れると絞れます。"
+                    )
+                _cds_cand_sel_key = f"cds_cand_sel_{selected_no}"
+                if st.session_state.get(_cds_cand_sel_key) not in range(len(_cds_cand_view)):
+                    st.session_state.pop(_cds_cand_sel_key, None)
+                _cds_cand_i = st.selectbox(
+                    "作品を選ぶ",
+                    options=list(range(len(_cds_cand_view))),
+                    format_func=lambda i: _cds_cand_label(_cds_cand_view[i]),
+                    key=_cds_cand_sel_key,
+                )
+                _cds_cb1, _cds_cb2 = st.columns(2)
+                if _cds_cb1.button(
+                    "💿 この作品のCDリストを取得",
+                    key=f"cds_cand_go_{selected_no}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    with st.spinner("MINCからCDリストを取得中..."):
+                        try:
+                            _cds_cand_raw = _cds_fetch_for_hit(
+                                _get_mf_client(),
+                                _cds_cand_view[_cds_cand_i],
+                                _cds_cand_st.get("term", ""),
+                            )
+                        except MusicForestError as _cds_cand_e:
+                            _cds_cand_raw = {"cds": [], "error": str(_cds_cand_e)}
+                    _cds_cand_raw["_artist_filter"] = _cds_artist_input.strip()
+                    st.session_state[f"cds_results_{selected_no}"] = _cds_cand_raw
+                    for _cds_ck in list(st.session_state.keys()):
+                        if _cds_ck.startswith(f"cds_detail_{selected_no}_"):
+                            del st.session_state[_cds_ck]
+                    st.rerun()
+                if _cds_cb2.button(
+                    "✖ 候補を閉じる",
+                    key=f"cds_cand_close_{selected_no}",
+                    use_container_width=True,
+                ):
+                    st.session_state.pop(f"cds_cands_{selected_no}", None)
+                    st.rerun()
 
             _cds_res_cur = st.session_state.get(f"cds_results_{selected_no}")
             _render_cd_results(
