@@ -4389,15 +4389,17 @@ with tabs[0]:
                             st.markdown("##### 🔗 URLから直接指定（上のリストにない場合）")
                         else:
                             st.caption(
-                                "MINCの **検索URL**（/music/list?tr=…）または **CD詳細URL**（/parts/product/detail?album_id=…）"
-                                "を貼り付けてください。"
+                                "MINCの **検索URL**（/music/list?tr=…）、"
+                                "**CD商品リストURL**（/product/list/?dn=品番…）、"
+                                "**CD詳細URL**（/parts/product/detail?album_id=…）"
+                                "のいずれかを貼り付けてください。"
                             )
 
                         # ── ② URL入力 ─────────────────────────────────────────
                         _man_url = st.text_input(
-                            "MINC URL（検索URLまたはCD詳細URL）",
+                            "MINC URL（検索URL・CD商品リストURL・CD詳細URL）",
                             key=f"mf_manual_url_{selected_no}",
-                            placeholder="https://www.minc.or.jp/music/list?tr=... または /parts/product/detail?album_id=...",
+                            placeholder="https://www.minc.or.jp/music/list?tr=... / /product/list/?dn=品番 / /parts/product/detail?album_id=...",
                         )
                         _man_sel = st.selectbox(
                             "適用する候補" if not _page_cd_links else "適用する候補（URL指定用）",
@@ -4433,8 +4435,43 @@ with tabs[0]:
                                             _m_trk = _m_hits[0]["_track_id"]
                                         else:
                                             _m_fetch_err = "CD情報付き結果が見つかりませんでした。CD詳細URLを直接貼り付けてください。"
+                                elif "product/list" in _m_parsed.path:
+                                    # CD商品リスト（品番検索 /product/list/?dn=… や
+                                    # 作品コードからの from_saku）。この表の行には
+                                    # track_id が無いので、候補の曲名から拾い直す
+                                    _m_dn = (_m_q.get("dn", "")
+                                             or _m_q.get("jcd", "")).strip()
+                                    _m_cand_title = (
+                                        _mf_items[_man_url_target_idx].get("作品名", "")
+                                        if _man_url_target_idx is not None else "")
+                                    if not _m_dn:
+                                        _m_fetch_err = (
+                                            "URLから品番（dn パラメータ）を取得できませんでした。")
+                                    else:
+                                        with st.spinner(f"MINC で品番「{_m_dn}」を検索中..."):
+                                            _m_cds = _get_mf_client().search_cds_by_hinban(_m_dn)
+                                        _m_list = _m_cds.get("cds") or []
+                                        if not _m_list:
+                                            _m_fetch_err = (
+                                                _m_cds.get("error")
+                                                or f"品番 {_m_dn} のCDが見つかりませんでした。")
+                                        else:
+                                            _m_alb = _m_list[0].get("album_id", "")
+                                            _m_trk = _m_list[0].get("track_id", "")
+                                            if _m_alb and not _m_trk:
+                                                with st.spinner("トラックを特定中..."):
+                                                    _m_trk = _get_mf_client().find_track_id(
+                                                        _m_alb, _m_cand_title) or "0"
+                                            if not _m_alb:
+                                                _m_fetch_err = (
+                                                    f"品番 {_m_dn} のCDから album_id を"
+                                                    "取得できませんでした。")
                                 else:
-                                    _m_fetch_err = "MINCの検索URL（/music/list）またはCD詳細URL（/parts/product/detail）を貼り付けてください。"
+                                    _m_fetch_err = (
+                                        "MINCの検索URL（/music/list）、CD商品リストURL"
+                                        "（/product/list）、CD詳細URL（/parts/product/detail）"
+                                        "のいずれかを貼り付けてください。"
+                                    )
                                 if not _m_fetch_err and _m_alb and _m_trk:
                                     with st.spinner("CD情報を取得中..."):
                                         _m_cd_result = _get_mf_client().fetch_product_detail(_m_alb, _m_trk)

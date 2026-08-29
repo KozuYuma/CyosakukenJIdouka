@@ -597,6 +597,118 @@ class MusicForestClient:
 
     # ---- JASRACコードでCDリスト取得 -------------------------------------
 
+    def _parse_cd_list_rows(self, table) -> list[dict]:
+        """CD商品リスト（table#cd-list）の行を読む。
+
+        このテーブルは作品コードからの一覧（/product/list/from_saku）でも、
+        品番などからの検索結果（/product/list/?dn=…）でも同じ作りなので、
+        読むところは1つにまとめてある。
+        """
+        cds: list[dict] = []
+        for row in table.select("tbody tr"):
+            tds = row.find_all("td")
+            if len(tds) < 8:
+                continue
+
+            _a = tds[3].select_one("a.collapseDetail[data-target]")
+            album_id = str(_a.get("data-target", "")).strip() if _a else ""
+            track_id = str(_a.get("data-track", "")).strip() if _a else ""
+
+            # 権利表示アイコン（jasrac / nextone）と初回盤フラグ
+            rights = [
+                c for sp in tds[2].select("span.icon.rights")
+                for c in sp.get("class", []) if c in ("jasrac", "nextone")
+            ]
+            shokaiban = bool(tds[2].select_one("span.icon.limited"))
+
+            # 形態／曲数（<br> 区切り）
+            _kt = [
+                s for s in tds[5].get_text("\n", strip=True).split("\n") if s
+            ]
+            keitai = _kt[0] if _kt else ""
+            kyokusu = _kt[1] if len(_kt) > 1 else ""
+
+            # 発売会社／販売会社（" / " 区切り）
+            _cos = [
+                s.strip() for s in
+                tds[7].get_text(" ", strip=True).split("/")
+                if s.strip() and s.strip() != "-"
+            ]
+            hatsubai = _cos[0] if _cos else ""
+            hanbai = _cos[1] if len(_cos) > 1 else ""
+
+            hinban = tds[1].get_text(" ", strip=True)
+            cd_title = tds[3].get_text(" ", strip=True)
+
+            cds.append({
+                "No":             tds[0].get_text(" ", strip=True),
+                "品番":            hinban,
+                "CD商品タイトル":   cd_title,
+                "アーティスト":     tds[4].get_text(" ", strip=True),
+                "形態":            keitai,
+                "曲数":            kyokusu,
+                "発売日":          tds[6].get_text(" ", strip=True),
+                "発売会社":         hatsubai,
+                "販売会社":         hanbai,
+                "レコード会社名":    hatsubai,
+                "権利":            rights,
+                "初回盤":          shokaiban,
+                "album_id":       album_id,
+                "track_id":       track_id,
+                "detail_url":     _product_detail_url(album_id, track_id) if album_id else "",
+                "label":          " / ".join([x for x in (hinban, cd_title) if x]) or f"CD ({album_id})",
+            })
+
+        return cds
+
+    def search_cds_by_hinban(self, hinban: str) -> dict:
+        """
+        品番（ディスク番号）でCD商品を検索する。
+
+        エンドポイント（MINC の「CD商品検索」の品番タブそのもの）:
+            GET /product/list/?dn=<品番>&type=search-form-diskno
+        戻ってくるのは作品コードからの一覧と同じ table#cd-list なので、
+        行の読み方は _parse_cd_list_rows と共通。
+
+        品番はハイフンの有無を問わない（BVCC8108 でも BVCC-8108 でも
+        同じCDが返る）。CD商品リストの行には track_id が入っていないので、
+        詳細を開くときは find_track_id か fetch_track_list を通すこと。
+
+        Returns: {"品番", "件数", "cds": [...], "search_url",
+                  "error": None | str}
+        """
+        out: dict = {"品番": "", "件数": 0, "cds": [],
+                     "search_url": "", "error": None}
+        _dn = str(hinban or "").strip()
+        if not _dn:
+            out["error"] = "品番を入力してください。"
+            return out
+        out["品番"] = _dn
+        url = (f"{BASE_URL}/product/list/"
+               f"?dn={urllib.parse.quote(_dn, safe='-/')}"
+               f"&type=search-form-diskno")
+        out["search_url"] = url
+        try:
+            resp = self._get(url)
+            if "/login" in resp.url.lower():
+                out["error"] = "セッションが切れています。再ログインしてください。"
+                return out
+            soup = BeautifulSoup(resp.text, "lxml")
+            # 0件のときはテーブルごと出ない。取得できなかったのではなく
+            # 「無かった」なので、同じ言い方にそろえる
+            table = soup.select_one("table#cd-list")
+            out["cds"] = self._parse_cd_list_rows(table) if table else []
+            out["件数"] = len(out["cds"])
+            if not out["cds"]:
+                out["error"] = f"品番 {_dn} に一致するCD商品が見つかりませんでした。"
+        except requests.exceptions.ConnectionError:
+            out["error"] = "接続エラー: MusicForest に接続できません。"
+        except requests.exceptions.Timeout:
+            out["error"] = f"タイムアウト（{_TIMEOUT}秒）"
+        except Exception as e:
+            out["error"] = f"取得エラー: {e}"
+        return out
+
     def search_cds_by_jasrac(self, jcd: str, title: str = "", ncd: str = "") -> dict:
         """
         JASRACコードに紐づく収録CD商品リストを MINC から**全件**取得する。
@@ -711,61 +823,7 @@ class MusicForestClient:
                 )
                 return out
 
-            cds: list[dict] = []
-            for row in table.select("tbody tr"):
-                tds = row.find_all("td")
-                if len(tds) < 8:
-                    continue
-
-                _a = tds[3].select_one("a.collapseDetail[data-target]")
-                album_id = str(_a.get("data-target", "")).strip() if _a else ""
-                track_id = str(_a.get("data-track", "")).strip() if _a else ""
-
-                # 権利表示アイコン（jasrac / nextone）と初回盤フラグ
-                rights = [
-                    c for sp in tds[2].select("span.icon.rights")
-                    for c in sp.get("class", []) if c in ("jasrac", "nextone")
-                ]
-                shokaiban = bool(tds[2].select_one("span.icon.limited"))
-
-                # 形態／曲数（<br> 区切り）
-                _kt = [
-                    s for s in tds[5].get_text("\n", strip=True).split("\n") if s
-                ]
-                keitai = _kt[0] if _kt else ""
-                kyokusu = _kt[1] if len(_kt) > 1 else ""
-
-                # 発売会社／販売会社（" / " 区切り）
-                _cos = [
-                    s.strip() for s in
-                    tds[7].get_text(" ", strip=True).split("/")
-                    if s.strip() and s.strip() != "-"
-                ]
-                hatsubai = _cos[0] if _cos else ""
-                hanbai = _cos[1] if len(_cos) > 1 else ""
-
-                hinban = tds[1].get_text(" ", strip=True)
-                cd_title = tds[3].get_text(" ", strip=True)
-
-                cds.append({
-                    "No":             tds[0].get_text(" ", strip=True),
-                    "品番":            hinban,
-                    "CD商品タイトル":   cd_title,
-                    "アーティスト":     tds[4].get_text(" ", strip=True),
-                    "形態":            keitai,
-                    "曲数":            kyokusu,
-                    "発売日":          tds[6].get_text(" ", strip=True),
-                    "発売会社":         hatsubai,
-                    "販売会社":         hanbai,
-                    "レコード会社名":    hatsubai,
-                    "権利":            rights,
-                    "初回盤":          shokaiban,
-                    "album_id":       album_id,
-                    "track_id":       track_id,
-                    "detail_url":     _product_detail_url(album_id, track_id) if album_id else "",
-                    "label":          " / ".join([x for x in (hinban, cd_title) if x]) or f"CD ({album_id})",
-                })
-
+            cds = self._parse_cd_list_rows(table)
             out["cds"] = cds
             if not out["件数"]:
                 out["件数"] = len(cds)
