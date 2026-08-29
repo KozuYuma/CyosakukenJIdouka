@@ -320,6 +320,9 @@ SPOTIFY_CLIENT_SECRET=xxxxx
 - `?sync_minc=` に合言葉を付ける（今は URL を知っていれば誰でも送れる）
 - migration 管理の方針決め（今は `init_db` の中で毎回 DDL を流している）
 - **ステップ6 UI構造（`st.navigation`）は利用者が取り下げた。着手しないこと**
+- **台帳入れ替えの無停止化もやらない**（利用者判断）。`import_tsp.py` は
+  `cd_clear` → `cd_insert` の順なので取り込み中の10〜30分は台帳が空になるが、
+  流すのは手元の VSCode からだけで時間を選べるため、困らない
 
 **やったこと（session 6）** — ブランチ `feat/ui-foundation`
 
