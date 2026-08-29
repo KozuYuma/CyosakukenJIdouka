@@ -21,9 +21,10 @@ import unicodedata
 import pandas as pd
 
 from modules.database import (
+    STALE,
     master_fetch,
     master_merge,
-    master_upsert,
+    master_update_seen,
 )
 
 # 人が管理タブで直したときの出典。PROTECTED_RANK なので機械に負けない
@@ -534,6 +535,11 @@ def edit(record: dict, values: dict, user: str = "") -> int:
     調べ直しても上書きされない（merge_data が PROTECTED_RANK で止める）。
     空にした列はその場から消す。「値が無い」と「空文字が入っている」を
     分けても得が無いため。
+
+    編集画面を開いてから保存するまでの間に、他の人が同じ曲を直して
+    いたら書かずに STALE(-1) を返す。画面を開いたときの内容を元に
+    丸ごと書き戻すので、そのまま書くと相手の直しを黙って消してしまう
+    ため。呼ぶ側は読み直しを促すこと。
     """
     if not record:
         return 0
@@ -560,14 +566,14 @@ def edit(record: dict, values: dict, user: str = "") -> int:
     if not changed:
         return 0
 
-    return master_upsert([{
+    return master_update_seen({
         "id": record.get("id"),
         "mgmt_key": record.get("mgmt_key") or "",
         "track_key": record.get("track_key") or "",
         "file_key": record.get("file_key") or "",
         "title": title,
         "data": data,
-    }])
+    }, record)
 
 
 def to_frame(records: list[dict]) -> pd.DataFrame:

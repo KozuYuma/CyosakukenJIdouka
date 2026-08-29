@@ -49,6 +49,7 @@ from modules.excel_exporter import export_to_excel, build_shinkok_df, _SHINKOK_R
 from modules.matcher import build_song_list
 from modules.song_master import (
     MASTER_FIELDS,
+    STALE as MASTER_STALE,
     cell_of as master_cell,
     edit as master_edit,
     fill as master_fill,
@@ -5737,7 +5738,20 @@ with tabs[2]:
                             )
                         if _save:
                             _n = master_edit(_rec, _vals, CURRENT_USER)
-                            if _n:
+                            if _n == MASTER_STALE:
+                                # 開いている間に他の人が直した。ここで
+                                # 書くと相手の直しを消してしまうので、
+                                # 読み直してからやり直してもらう
+                                st.warning(
+                                    "⚠️ この曲は、開いている間に他の人が"
+                                    "直したか消しました。保存していません。"
+                                    "下のボタンで読み直してから、もう一度"
+                                    "直してください。"
+                                )
+                                if st.button("🔄 読み直す",
+                                             key=f"me_reload_{_ids[0]}"):
+                                    st.rerun()
+                            elif _n:
                                 st.success("✅ 保存しました。")
                                 st.rerun()
                             else:

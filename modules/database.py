@@ -632,6 +632,36 @@ def master_upsert(records: list[dict]) -> int:
         return _master_write(conn, records)
 
 
+STALE = -1   # 読んでから書くまでの間に、他の人が先に直していた
+
+
+def master_update_seen(record: dict, seen: dict) -> int:
+    """読んだときから変わっていなければ書く。
+
+    書けたら 1、他の人が先に直していたか行が消えていたら STALE(-1)。
+
+    seen は編集画面を開いたときに読んだ行。更新時刻だけでなく中身も
+    見比べる。更新時刻は秒までしか持っていないので、同じ秒に二人が
+    直した場合を取りこぼさないため。
+    """
+    rid = record.get("id")
+    if not rid:
+        return 0
+    sql = text(
+        f"SELECT {MASTER_COLUMNS} FROM song_master WHERE id = :id"
+        + (" FOR UPDATE" if is_postgres() else "")
+    )
+    with get_engine().begin() as conn:
+        rows = conn.execute(sql, {"id": rid}).mappings().all()
+        if not rows:
+            return STALE
+        cur = _master_row(rows[0])
+        if (cur.get("updated_at") != _as_text(seen.get("updated_at"))
+                or (cur.get("data") or {}) != (seen.get("data") or {})):
+            return STALE
+        return _master_write(conn, [record])
+
+
 def master_merge(records: list[dict], decide, attempts: int = 3) -> int:
     """「引いて・混ぜて・書く」を1つのトランザクションで通す。
 
