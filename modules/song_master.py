@@ -22,6 +22,7 @@ import pandas as pd
 
 from modules.database import (
     master_fetch,
+    master_merge,
     master_upsert,
 )
 
@@ -362,16 +363,24 @@ def _track_hit(by_track: dict, track_cands, file_cands) -> dict | None:
 
 
 def save(songs_df: pd.DataFrame, user: str = "") -> int:
-    """songs_df の確定・一致行を song_master に貯める。入れた曲数を返す。"""
+    """songs_df の確定・一致行を song_master に貯める。入れた曲数を返す。
+
+    読むところから書くところまでを1つのトランザクションにまとめる
+    （master_merge）。読んでから書くまでの間に他の人が同じ曲を貯めても、
+    どちらかの値が消えないようにするため。
+    """
     records = collect(songs_df, user)
     if not records:
         return 0
+    return master_merge(records, lambda existing: _plan(records, existing))
 
-    existing = master_fetch(
-        {k for r in records for k in r["mgmt_cands"]},
-        {k for r in records for k in r["track_cands"]},
-        {k for r in records for k in r["file_cands"]},
-    )
+
+def _plan(records: list[dict], existing: list[dict]) -> list[dict]:
+    """貯める行と、既にある行を突き合わせて、書き込む形を作る。
+
+    やり直しになることがあるので、何度呼んでも同じ結果になるように
+    する（records には触らず、混ぜた結果を新しい dict にして返す）。
+    """
     by_mgmt = {e["mgmt_key"]: e for e in existing if e["mgmt_key"]}
     by_track = {e["track_key"]: e for e in existing if e["track_key"]}
     by_file = {e.get("file_key"): e for e in existing if e.get("file_key")}
@@ -425,9 +434,7 @@ def save(songs_df: pd.DataFrame, user: str = "") -> int:
             "data": merged,
         })
 
-    if not writes:
-        return 0
-    return master_upsert(writes)
+    return writes
 
 
 # ─── 使う ──────────────────────────────────────────────

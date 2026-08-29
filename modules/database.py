@@ -28,6 +28,7 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import bindparam, create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 DB_PATH = Path(__file__).parent.parent / "data" / "cyosakuken.db"
 
@@ -283,6 +284,44 @@ def init_db() -> None:
         for stmt in _ddl():
             conn.execute(text(stmt))
 
+    _add_unique_indexes()
+
+
+def _add_unique_indexes() -> None:
+    """共有楽曲データのキーに、重なりを許さない索引を張る。
+
+    同じ管理番号・同じファイル名の行が二重にできないよう、DB 側でも
+    止める。二人が同時に同じ曲を貯めたときの取りこぼしを防ぐため。
+
+    track_key には張らない。同じ曲名・同じトラック番号でも音源（CD）が
+    違えば別の行にする決まりなので、重なるのが正常な状態のため。
+
+    既に重なった行が入っていると失敗する。そのときは起動を止めず、
+    今までどおりの索引のまま動かす（重なりはアプリ側で吸収できる）。
+    """
+    made = True
+    for stmt in (
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_song_master_mgmt "
+        "ON song_master (mgmt_key) WHERE mgmt_key <> ''",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_song_master_file "
+        "ON song_master (file_key) WHERE file_key <> ''",
+    ):
+        try:
+            with get_engine().begin() as conn:
+                conn.execute(text(stmt))
+        except Exception:
+            made = False
+    if not made:
+        return
+    # 張れたら、同じ列を見ていた古い索引はもう要らない
+    for stmt in ("DROP INDEX IF EXISTS ix_song_master_mgmt",
+                 "DROP INDEX IF EXISTS ix_song_master_file"):
+        try:
+            with get_engine().begin() as conn:
+                conn.execute(text(stmt))
+        except Exception:
+            pass
+
 
 def _now_sql() -> str:
     return "now()" if is_postgres() else "datetime('now','localtime')"
@@ -498,16 +537,14 @@ def _master_row(r) -> dict:
     return d
 
 
-def master_fetch(mgmt_keys: set[str], track_keys: set[str],
-                 file_keys: set[str] | None = None) -> list[dict]:
-    """どれかのキーに当たる行を返す。キーが空なら何も返さない。"""
-    mgmt = [k for k in (mgmt_keys or set()) if k]
-    track = [k for k in (track_keys or set()) if k]
-    file_ = [k for k in (file_keys or set()) if k]
-    if not mgmt and not track and not file_:
-        return []
+def _master_select(conn, mgmt: list[str], track: list[str], file_: list[str],
+                   lock: bool = False) -> list[dict]:
+    """どれかのキーに当たる行を、渡された接続で読む。
 
-    # IN 句は自前で組み立てず、SQLAlchemy の展開に任せる
+    lock=True なら、読んだ行を書き換えられないように押さえる
+    （PostgreSQL の SELECT ... FOR UPDATE）。SQLite には無い書き方だが、
+    そちらは書き込み自体が1つずつしか通らないので要らない。
+    """
     where, params = [], {}
     if mgmt:
         where.append("mgmt_key IN :mgmt")
@@ -518,26 +555,47 @@ def master_fetch(mgmt_keys: set[str], track_keys: set[str],
     if file_:
         where.append("file_key IN :file")
         params["file"] = tuple(file_)
+    if not where:
+        return []
 
     sql = text(
         f"SELECT {MASTER_COLUMNS} "
         "FROM song_master WHERE " + " OR ".join(where)
+        + (" FOR UPDATE" if lock else "")
     ).bindparams(*[
         # tuple をそのまま渡すと1個の値と見なされるので展開を指示する
         bindparam(k, expanding=True) for k in params
     ])
+    return [_master_row(r) for r in conn.execute(sql, params).mappings().all()]
+
+
+def _keys_of(records: list[dict], name: str) -> list[str]:
+    """records から、候補キーを重複なく集める。"""
+    out: list[str] = []
+    for rec in records:
+        for k in rec.get(name) or []:
+            if k and k not in out:
+                out.append(k)
+    return out
+
+
+def master_fetch(mgmt_keys: set[str], track_keys: set[str],
+                 file_keys: set[str] | None = None) -> list[dict]:
+    """どれかのキーに当たる行を返す。キーが空なら何も返さない。"""
+    mgmt = [k for k in (mgmt_keys or set()) if k]
+    track = [k for k in (track_keys or set()) if k]
+    file_ = [k for k in (file_keys or set()) if k]
+    if not mgmt and not track and not file_:
+        return []
     try:
         with get_engine().connect() as conn:
-            rows = conn.execute(sql, params).mappings().all()
-        return [_master_row(r) for r in rows]
+            return _master_select(conn, mgmt, track, file_)
     except Exception:
         return []
 
 
-def master_upsert(records: list[dict]) -> int:
-    """id があれば更新、なければ追加。書いた件数を返す。"""
-    if not records:
-        return 0
+def _master_write(conn, records: list[dict]) -> int:
+    """渡された接続で、id があれば更新・なければ追加する。"""
     cast = "CAST(:data AS JSONB)" if is_postgres() else ":data"
     ins = text(
         f"INSERT INTO song_master (mgmt_key, track_key, file_key, title, data) "
@@ -549,22 +607,66 @@ def master_upsert(records: list[dict]) -> int:
         f"updated_at = {_now_sql()} WHERE id = :id"
     )
     n = 0
-    with get_engine().begin() as conn:
-        for rec in records:
-            p = {
-                "mgmt_key": rec.get("mgmt_key") or "",
-                "track_key": rec.get("track_key") or "",
-                "file_key": rec.get("file_key") or "",
-                "title": rec.get("title") or "",
-                "data": json.dumps(rec.get("data") or {}, ensure_ascii=False,
-                                   default=str, allow_nan=False),
-            }
-            if rec.get("id"):
-                conn.execute(upd, {**p, "id": rec["id"]})
-            else:
-                conn.execute(ins, p)
-            n += 1
+    for rec in records:
+        p = {
+            "mgmt_key": rec.get("mgmt_key") or "",
+            "track_key": rec.get("track_key") or "",
+            "file_key": rec.get("file_key") or "",
+            "title": rec.get("title") or "",
+            "data": json.dumps(rec.get("data") or {}, ensure_ascii=False,
+                               default=str, allow_nan=False),
+        }
+        if rec.get("id"):
+            conn.execute(upd, {**p, "id": rec["id"]})
+        else:
+            conn.execute(ins, p)
+        n += 1
     return n
+
+
+def master_upsert(records: list[dict]) -> int:
+    """id があれば更新、なければ追加。書いた件数を返す。"""
+    if not records:
+        return 0
+    with get_engine().begin() as conn:
+        return _master_write(conn, records)
+
+
+def master_merge(records: list[dict], decide, attempts: int = 3) -> int:
+    """「引いて・混ぜて・書く」を1つのトランザクションで通す。
+
+    records は song_master.collect が作る形（mgmt_cands などの候補を
+    持つ）。decide(既にある行) が、書き込む行の一覧を返す。
+
+    途中で他の人が同じ曲を書いても取りこぼさないよう、二段構えにする。
+
+      1. 読むときに行を押さえる（PostgreSQL の FOR UPDATE）。
+         押さえている間、その行は他の人から書き換えられない。
+      2. まだ無い行は押さえようがないので、ほぼ同時に同じ曲が二度
+         入ろうとすることがある。そこは DB の索引（ux_song_master_*）が
+         はじくので、はじかれたら最初からやり直す。やり直したときは
+         相手の書いた行が見えるので、今度は混ぜる方に回る。
+    """
+    if not records:
+        return 0
+    mgmt = _keys_of(records, "mgmt_cands")
+    track = _keys_of(records, "track_cands")
+    file_ = _keys_of(records, "file_cands")
+
+    for attempt in range(attempts):
+        try:
+            with get_engine().begin() as conn:
+                existing = _master_select(conn, mgmt, track, file_,
+                                          lock=is_postgres())
+                writes = decide(existing)
+                if not writes:
+                    return 0
+                return _master_write(conn, writes)
+        except IntegrityError:
+            # 同じキーの行を、ほぼ同時に別の人が入れた
+            if attempt == attempts - 1:
+                raise
+    return 0
 
 
 def master_all() -> list[dict]:
