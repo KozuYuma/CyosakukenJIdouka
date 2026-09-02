@@ -1206,6 +1206,28 @@ def _is_blank(v) -> bool:
     return str(v).strip().lower() in ("", "nan", "none")
 
 
+def _mf_reset_result_state(selected_no) -> int:
+    """MINC検索の結果まわりの覚え書きを、新しい検索のために作り直す。
+
+    候補の欄は「候補の番号」で覚えている。Streamlit は key の付いた
+    欄の中身を覚えていて、次に描くときは渡した value より覚えている
+    値のほうを使う。そのため検索し直しても、前の検索の候補1の値が
+    新しい候補1の欄にそのまま残っていた。読み取り専用（灰色）の欄
+    なので、前の検索結果が白いまま残って見えるのはこれが原因。
+
+    版（mf_ver_◯）を1つ上げると、欄の key がぜんぶ変わって作り直され、
+    渡した value が入る。古い版の覚え書きはもう使わないので捨てる。
+    """
+    ver = int(st.session_state.get(f"mf_ver_{selected_no}", 0)) + 1
+    pat = re.compile(rf"^(?:mf|cpanel)[a-z_]*_{selected_no}_(\d+)_\d+$")
+    for k in list(st.session_state.keys()):
+        m = pat.match(str(k))
+        if m and int(m.group(1)) != ver:
+            st.session_state.pop(k, None)
+    st.session_state[f"mf_ver_{selected_no}"] = ver
+    return ver
+
+
 def _mf_norm_name(s: str) -> str:
     """アーティスト名照合用の正規化（NFKC・小文字化・空白除去）。"""
     if _is_blank(s):
@@ -4194,8 +4216,11 @@ with tabs[0]:
                             match=_mf_match_int,
                         )
                         st.session_state[f"mf_results_{selected_no}"] = _mf_result
+                        # 前の検索結果の欄が残らないよう、版を上げる
+                        _mf_reset_result_state(selected_no)
                     except MusicForestError as e:
                         st.session_state[f"mf_results_{selected_no}"] = {"error": str(e), "results": []}
+                        _mf_reset_result_state(selected_no)
 
         # ---- MusicForest 検索結果表示 ----
         _mf_res = st.session_state.get(f"mf_results_{selected_no}")
@@ -4210,6 +4235,8 @@ with tabs[0]:
                     st.code(_mf_res.get("debug_html", "")[:3000], language="html")
             else:
                 _mf_items = _mf_res["results"]
+                # 候補の欄・ボタンの key に入れる版。検索するたびに上がる
+                _mf_v = int(st.session_state.get(f"mf_ver_{selected_no}", 0))
                 if _mf_res.get("truncated"):
                     st.warning(
                         "⚠️ 検索結果が MINC の 500件上限に達しました。"
@@ -4423,21 +4450,21 @@ with tabs[0]:
                         f"  JASRAC:{_mf_item.get('JASRAC作品コード','(なし)')}  "
                         f"NexTone:{_mf_item.get('NexTone管理番号','(なし)')}"
                     )
-                    with st.expander(_mf_label, expanded=(_mf_disp_i == 0), key=f"mf_exp_{selected_no}_{_mf_i}"):
+                    with st.expander(_mf_label, expanded=(_mf_disp_i == 0), key=f"mf_exp_{selected_no}_{_mf_v}_{_mf_i}"):
                         _mf_c1, _mf_c2 = st.columns(2)
-                        _mf_c1.text_input("作品名",         value=_mf_item.get("作品名",""),          key=f"mf_name_{selected_no}_{_mf_i}", disabled=True)
-                        _mf_c1.text_input("アーティスト",   value=_mf_item.get("アーティスト",""),    key=f"mf_art_{selected_no}_{_mf_i}",  disabled=True)
-                        _mf_c1.text_input("品番（CD番号）",  value=_mf_item.get("品番",""),            key=f"mf_cat_{selected_no}_{_mf_i}",  disabled=True)
-                        _mf_c1.text_input("CD商品タイトル",  value=_mf_item.get("CD商品タイトル",""),  key=f"mf_cdtitle_{selected_no}_{_mf_i}", disabled=True)
-                        _mf_c2.text_input("JASRAC作品コード", value=_mf_item.get("JASRAC作品コード",""), key=f"mf_jcd_{selected_no}_{_mf_i}",  disabled=True)
-                        _mf_c2.text_input("NexTone管理番号", value=_mf_item.get("NexTone管理番号",""), key=f"mf_ncd_{selected_no}_{_mf_i}",  disabled=True)
-                        _mf_c2.text_input("レコード会社名",  value=_mf_item.get("レコード会社名",""),  key=f"mf_label_{selected_no}_{_mf_i}", disabled=True)
-                        _mf_c2.text_input("発売会社／販売会社（生）", value=_mf_item.get("発売会社販売会社",""), key=f"mf_pub_{selected_no}_{_mf_i}", disabled=True)
+                        _mf_c1.text_input("作品名",         value=_mf_item.get("作品名",""),          key=f"mf_name_{selected_no}_{_mf_v}_{_mf_i}", disabled=True)
+                        _mf_c1.text_input("アーティスト",   value=_mf_item.get("アーティスト",""),    key=f"mf_art_{selected_no}_{_mf_v}_{_mf_i}",  disabled=True)
+                        _mf_c1.text_input("品番（CD番号）",  value=_mf_item.get("品番",""),            key=f"mf_cat_{selected_no}_{_mf_v}_{_mf_i}",  disabled=True)
+                        _mf_c1.text_input("CD商品タイトル",  value=_mf_item.get("CD商品タイトル",""),  key=f"mf_cdtitle_{selected_no}_{_mf_v}_{_mf_i}", disabled=True)
+                        _mf_c2.text_input("JASRAC作品コード", value=_mf_item.get("JASRAC作品コード",""), key=f"mf_jcd_{selected_no}_{_mf_v}_{_mf_i}",  disabled=True)
+                        _mf_c2.text_input("NexTone管理番号", value=_mf_item.get("NexTone管理番号",""), key=f"mf_ncd_{selected_no}_{_mf_v}_{_mf_i}",  disabled=True)
+                        _mf_c2.text_input("レコード会社名",  value=_mf_item.get("レコード会社名",""),  key=f"mf_label_{selected_no}_{_mf_v}_{_mf_i}", disabled=True)
+                        _mf_c2.text_input("発売会社／販売会社（生）", value=_mf_item.get("発売会社販売会社",""), key=f"mf_pub_{selected_no}_{_mf_v}_{_mf_i}", disabled=True)
 
                         # キー定義（ハンドラ・詳細フィールド共用）
-                        _mf_detail_key = f"mf_detail_{selected_no}_{_mf_i}"
-                        _jwid_minc_key = f"mf_jwid_{selected_no}_{_mf_i}"
-                        _mf_delg_key   = f"mf_delg_{selected_no}_{_mf_i}"
+                        _mf_detail_key = f"mf_detail_{selected_no}_{_mf_v}_{_mf_i}"
+                        _jwid_minc_key = f"mf_jwid_{selected_no}_{_mf_v}_{_mf_i}"
+                        _mf_delg_key   = f"mf_delg_{selected_no}_{_mf_v}_{_mf_i}"
                         _mf_jcd    = _mf_item.get("JASRAC作品コード", "")
                         _mf_alb_id = _mf_item.get("_album_id", "")
                         _mf_trk_id = _mf_item.get("_track_id", "")
@@ -4450,7 +4477,7 @@ with tabs[0]:
                         with _mf_btn1:
                             if st.button(
                                 "💿 MINC CD情報取得",
-                                key=f"mf_detail_btn_{selected_no}_{_mf_i}",
+                                key=f"mf_detail_btn_{selected_no}_{_mf_v}_{_mf_i}",
                                 use_container_width=True,
                                 help=(
                                     "アルバムIDのある候補（収録曲テーブル）のみI/V区分・委任者を取得できます。\n"
@@ -4511,7 +4538,7 @@ with tabs[0]:
                         with _mf_btn_jwid:
                             if st.button(
                                 "📋 J-WID作家情報",
-                                key=f"mf_jwid_btn_{selected_no}_{_mf_i}",
+                                key=f"mf_jwid_btn_{selected_no}_{_mf_v}_{_mf_i}",
                                 use_container_width=True,
                                 disabled=not _mf_jcd,
                                 help=f"JASRACコード {_mf_jcd} でJ-WIDを直接引き当て。作家情報＋管理状況を取得します",
@@ -4533,7 +4560,7 @@ with tabs[0]:
                         with _mf_btn2:
                             if st.button(
                                 "✅ 申告フォーマットに反映",
-                                key=f"mf_apply_{selected_no}_{_mf_i}",
+                                key=f"mf_apply_{selected_no}_{_mf_v}_{_mf_i}",
                                 use_container_width=True,
                             ):
                                 _jw_d = st.session_state.get(_jwid_minc_key, {})
@@ -4601,18 +4628,18 @@ with tabs[0]:
 
                         _mf_detail = st.session_state.get(_mf_detail_key, {})
                         _mf_dc1, _mf_dc2, _mf_dc3 = st.columns(3)
-                        _mf_dc1.text_input("作曲者（MINC詳細）", value=_mf_detail.get("作曲者",""), key=f"mf_comp_{selected_no}_{_mf_i}", disabled=True, placeholder="詳細取得で確認")
-                        _mf_dc2.text_input("作詞者（MINC詳細）", value=_mf_detail.get("作詞者",""), key=f"mf_lyric_{selected_no}_{_mf_i}", disabled=True, placeholder="詳細取得で確認")
-                        _mf_dc3.text_input("編曲者（MINC詳細）", value=_mf_detail.get("編曲者",""), key=f"mf_arr_{selected_no}_{_mf_i}", disabled=True)
+                        _mf_dc1.text_input("作曲者（MINC詳細）", value=_mf_detail.get("作曲者",""), key=f"mf_comp_{selected_no}_{_mf_v}_{_mf_i}", disabled=True, placeholder="詳細取得で確認")
+                        _mf_dc2.text_input("作詞者（MINC詳細）", value=_mf_detail.get("作詞者",""), key=f"mf_lyric_{selected_no}_{_mf_v}_{_mf_i}", disabled=True, placeholder="詳細取得で確認")
+                        _mf_dc3.text_input("編曲者（MINC詳細）", value=_mf_detail.get("編曲者",""), key=f"mf_arr_{selected_no}_{_mf_v}_{_mf_i}", disabled=True)
 
                         # J-WID 直接引き当て（MINCのJASRACコードを使用）
                         _jwid_minc = st.session_state.get(_jwid_minc_key, {})
                         if _jwid_minc and not _jwid_minc.get("error"):
                             _jw_c1, _jw_c2, _jw_c3, _jw_c4 = st.columns(4)
-                            _jw_c1.text_input("作曲者（J-WID）", value=_jwid_minc.get("作曲者",""), key=f"mf_j_comp_{selected_no}_{_mf_i}", disabled=True)
-                            _jw_c2.text_input("作詞者（J-WID）", value=_jwid_minc.get("作詞者",""), key=f"mf_j_lyric_{selected_no}_{_mf_i}", disabled=True)
-                            _jw_c3.text_input("訳詞者（J-WID）", value=_jwid_minc.get("訳詞者",""), key=f"mf_j_tran_{selected_no}_{_mf_i}", disabled=True)
-                            _jw_c4.text_input("編曲者（J-WID）", value=_jwid_minc.get("編曲者",""), key=f"mf_j_arr_{selected_no}_{_mf_i}", disabled=True)
+                            _jw_c1.text_input("作曲者（J-WID）", value=_jwid_minc.get("作曲者",""), key=f"mf_j_comp_{selected_no}_{_mf_v}_{_mf_i}", disabled=True)
+                            _jw_c2.text_input("作詞者（J-WID）", value=_jwid_minc.get("作詞者",""), key=f"mf_j_lyric_{selected_no}_{_mf_v}_{_mf_i}", disabled=True)
+                            _jw_c3.text_input("訳詞者（J-WID）", value=_jwid_minc.get("訳詞者",""), key=f"mf_j_tran_{selected_no}_{_mf_v}_{_mf_i}", disabled=True)
+                            _jw_c4.text_input("編曲者（J-WID）", value=_jwid_minc.get("編曲者",""), key=f"mf_j_arr_{selected_no}_{_mf_v}_{_mf_i}", disabled=True)
                             _mgmt_minc = _jwid_minc.get("管理状況", {})
                             if _mgmt_minc:
                                 st.markdown("**管理状況（JASRAC）:**  \n" + _format_management_status(_mgmt_minc))
@@ -4632,13 +4659,13 @@ with tabs[0]:
                                 _cd_info_c1.text_input(
                                     "I/V区分（MINC）",
                                     value=_iv_disp or "（取得できず）",
-                                    key=f"mf_iv_disp_{selected_no}_{_mf_i}",
+                                    key=f"mf_iv_disp_{selected_no}_{_mf_v}_{_mf_i}",
                                     disabled=True,
                                 )
                                 _cd_info_c2.text_input(
                                     "委任者（MINC）",
                                     value=_delg_status or "（取得できず）",
-                                    key=f"mf_delg_disp_{selected_no}_{_mf_i}",
+                                    key=f"mf_delg_disp_{selected_no}_{_mf_v}_{_mf_i}",
                                     disabled=True,
                                 )
                                 # CDタイトル・トラック情報（fetch_product_detail 拡張版で取得した場合）
@@ -4671,7 +4698,7 @@ with tabs[0]:
                         if _mf_jcd:
                             st.divider()
                             _show_cd_panel(
-                                _mf_jcd, row_idx, f"mf_{selected_no}_{_mf_i}",
+                                _mf_jcd, row_idx, f"mf_{selected_no}_{_mf_v}_{_mf_i}",
                                 title=_mf_item.get("作品名", ""),
                             )
 
@@ -4791,7 +4818,10 @@ with tabs[0]:
                                         _m_fetch_err = str(_pe)
                             # CD情報検索のパネルと同じ「CDから曲を逆引き」を
                             # ここでも使えるようにする
-                            _pg_det_key = f"mf_pg_det_{selected_no}"
+                            # 末尾の _0 は飾りではなく、版の古い覚え書きを
+                            # 捨てる側（_mf_reset_result_state）が見ている形に
+                            # そろえるため。候補ごとの欄と同じ並びにしてある
+                            _pg_det_key = f"mf_pg_det_{selected_no}_{_mf_v}_0"
                             if _pg_bc2.button(
                                 "🎵 収録曲を表示（このCDから曲を逆引き）",
                                 key=f"mf_pg_tracks_{selected_no}",
@@ -4822,7 +4852,7 @@ with tabs[0]:
                                     {"CD商品タイトル": _pg_det_st.get("label", "")},
                                     {},
                                     row_idx,
-                                    f"mfpg_{selected_no}",
+                                    f"mfpg_{selected_no}_{_mf_v}",
                                 )
                                 if st.button("✖ 収録曲を閉じる",
                                              key=f"mf_pg_tracks_close_{selected_no}"):
@@ -4932,7 +4962,7 @@ with tabs[0]:
                                 st.error(f"エラー: {_m_cd_result['error']}")
                             else:
                                 if _man_target_idx is not None:
-                                    st.session_state[f"mf_delg_{selected_no}_{_man_target_idx}"] = _m_cd_result
+                                    st.session_state[f"mf_delg_{selected_no}_{_mf_v}_{_man_target_idx}"] = _m_cd_result
                                     _mf_res_ss_u = st.session_state.get(f"mf_results_{selected_no}", {})
                                     if "results" in _mf_res_ss_u and _man_target_idx < len(_mf_res_ss_u["results"]):
                                         _ss_item = _mf_res_ss_u["results"][_man_target_idx]
@@ -4946,9 +4976,9 @@ with tabs[0]:
                                             if _fv and not _ss_item.get(_fk):
                                                 _ss_item[_fk] = _fv
                                         for _wk in (
-                                            f"mf_cat_{selected_no}_{_man_target_idx}",
-                                            f"mf_cdtitle_{selected_no}_{_man_target_idx}",
-                                            f"mf_art_{selected_no}_{_man_target_idx}",
+                                            f"mf_cat_{selected_no}_{_mf_v}_{_man_target_idx}",
+                                            f"mf_cdtitle_{selected_no}_{_mf_v}_{_man_target_idx}",
+                                            f"mf_art_{selected_no}_{_mf_v}_{_man_target_idx}",
                                         ):
                                             st.session_state.pop(_wk, None)
                                 _cd_iv_raw  = _m_cd_result.get("IV", "")
