@@ -835,10 +835,11 @@ def _render_cd_results(
     # CD情報だけでなく、その曲の作家名とアーティストも一度に入れる。
     # 作家名はCD商品リストに載っていないので、無ければ作品詳細を1回引く
     _cp_want_cd_cred = st.checkbox(
-        "作曲者・作詞者・アーティストも一緒に反映する",
+        "作曲者・作詞者・アーティスト・作品コードも一緒に反映する",
         value=True,
         key=f"cpanel_cdcred_{key_prefix}",
-        help="作家名がまだ取れていないときは、作品コードから作品詳細を1回引いて補います。",
+        help="JASRAC作品コード・NexTone管理番号も入れます。作家名がまだ取れて"
+             "いないときは、作品コードから作品詳細を1回引いて補います。",
     )
 
     _cp_b1, _cp_b2 = st.columns(2)
@@ -916,6 +917,14 @@ def _render_cd_results(
             _cp_cd_cred: dict = {}
             _cp_cd_cmsg = ""
             if _cp_want_cd_cred:
+                # 作品コードも一緒に入れる。いま開いている作品にこの行を
+                # 合わせるためで、これが入っていないと管理状況や放送・配信を
+                # 引くときに前の作品のままになってしまう。
+                # 曲名は利用者が直していることがあるので触らない
+                if _cp_res.get("作品コード"):
+                    _cp_apply["JASRAC作品コード"] = _cp_res["作品コード"]
+                if _cp_res.get("NexTone管理番号"):
+                    _cp_apply["NexTone管理番号"] = _cp_res["NexTone管理番号"]
                 _cp_cd_cred = {k: _cp_res.get(k, "")
                                for k in _CRED_COLS if _cp_res.get(k)}
                 if not _cp_cd_cred:
@@ -944,6 +953,9 @@ def _render_cd_results(
                 if _cp_item.get("アーティスト"):
                     _cp_apply["アーティスト"] = _cp_item["アーティスト"]
 
+            # 別の作品コードに変わるときは、前の作品のぶんの値を先に消す
+            if _cp_apply.get("JASRAC作品コード"):
+                _apply_clear_on_jcd_change(row_idx, _cp_apply["JASRAC作品コード"])
             for _cp_col, _cp_val in _cp_apply.items():
                 if _cp_val and _cp_col in st.session_state.songs_df.columns:
                     st.session_state.songs_df.at[row_idx, _cp_col] = _cp_val
@@ -979,6 +991,8 @@ def _render_cd_results(
                 + (f" 作詞: {_cp_apply['作詞者']}" if _cp_apply.get("作詞者") else "")
                 + (f" アーティスト: {_cp_apply['アーティスト']}"
                    if _cp_apply.get("アーティスト") else "")
+                + (f" 作品コード: {_cp_apply['JASRAC作品コード']}"
+                   if _cp_apply.get("JASRAC作品コード") else "")
                 + _cp_cd_cmsg
             )
             st.session_state.pop("songs_editor", None)
