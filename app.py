@@ -836,10 +836,21 @@ def _render_track_list(
                 for _cp_at in _cp_det["attempts"]:
                     st.markdown(f"- [{_cp_at['url']}]({_cp_at['url']}) → `{_cp_at['result']}`")
     if _cp_tracks:
+        # 2枚組は盤ごとに表が分かれている。何枚組かを見出しに出しておく
+        _cp_ndisc = int(_cp_det.get("枚数") or 1)
+        _cp_multi = _cp_ndisc > 1
         st.markdown(
-            f"**🎵 収録曲（{len(_cp_tracks)}曲）** — "
+            f"**🎵 収録曲（{len(_cp_tracks)}曲"
+            + (f"／{_cp_ndisc}枚組" if _cp_multi else "")
+            + "）** — "
             f"{_cp_det.get('CD商品タイトル', '') or _cp_item.get('CD商品タイトル', '')}"
         )
+        if _cp_multi:
+            st.caption(
+                "2枚組以上のCDです。曲を選ぶと、**その曲が入っているほうの盤の"
+                "CD番号（品番）**を反映します。　品番："
+                + " ／ ".join(_cp_det.get("品番一覧") or [])
+            )
         # 行クリック → 下の「この曲を申告フォーマットに反映」に連動（CD一覧と同じ操作）
         _cp_tsel_key  = f"cpanel_tsel_{key_prefix}"
         _cp_tlast_key = f"cpanel_tblrow_trk_{key_prefix}"
@@ -850,6 +861,8 @@ def _render_track_list(
         _cp_tev = st.dataframe(
             pd.DataFrame([
                 {
+                    **({"盤": t.get("ディスク", 1), "品番": t.get("品番", "")}
+                       if _cp_multi else {}),
                     "曲順":            t.get("曲順", ""),
                     "曲名":            t.get("曲名", ""),
                     "IV":             t.get("IV", ""),
@@ -886,7 +899,9 @@ def _render_track_list(
             "この曲を申告フォーマットに反映",
             options=list(range(len(_cp_tracks))),
             format_func=lambda i: (
-                f"{_cp_tracks[i].get('曲順', '')}. {_cp_tracks[i].get('曲名', '')}"
+                (f"[{_cp_tracks[i].get('ディスク', 1)}枚目 "
+                 f"{_cp_tracks[i].get('品番', '')}] " if _cp_multi else "")
+                + f"{_cp_tracks[i].get('曲順', '')}. {_cp_tracks[i].get('曲名', '')}"
                 f"（{_cp_tracks[i].get('収録時間', '')}／{_cp_tracks[i].get('IV', '')}）"
             ),
             key=_cp_tsel_key,
@@ -908,7 +923,11 @@ def _render_track_list(
                 "曲名":             _cp_trk.get("曲名", ""),
                 "JASRAC作品コード":  _cp_trk.get("JASRAC作品コード", ""),
                 "アーティスト":      _cp_trk.get("アーティスト", ""),
-                "CD番号":           _cp_item.get("品番", "") or _cp_det.get("品番", ""),
+                # 2枚組は盤ごとに品番が違うので、選んだ曲が入っている
+                # ほうの盤の品番を先に使う
+                "CD番号":           (_cp_trk.get("品番", "")
+                                   or _cp_item.get("品番", "")
+                                   or _cp_det.get("品番", "")),
                 "CD名":             _cp_det.get("CD商品タイトル", "") or _cp_item.get("CD商品タイトル", ""),
                 "レコード会社名":     _cp_item.get("レコード会社名", "") or _cp_det.get("レコード会社名", ""),
                 "委任者":           _cp_det.get("集中管理", ""),
@@ -3755,7 +3774,10 @@ with tabs[0]:
                                     _dg_u["I/V区分"] = "ヴォーカル"
                                 if _dg_tr and _dg_tr.get("アーティスト"):
                                     _dg_u["アーティスト"] = _dg_tr["アーティスト"]
-                                _dg_u["CD番号"] = (_dg_d.get("品番")
+                                # 2枚組は盤ごとに品番が違う。この曲が
+                                # 入っているほうの盤の品番を先に使う
+                                _dg_u["CD番号"] = ((_dg_tr or {}).get("品番")
+                                                   or _dg_d.get("品番")
                                                    or _dg_pick.get("品番", ""))
                                 _dg_u["CD名"] = (_dg_d.get("CD商品タイトル")
                                                  or _dg_pick.get("CD商品タイトル", ""))

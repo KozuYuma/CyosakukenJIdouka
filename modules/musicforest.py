@@ -73,6 +73,42 @@ def _product_detail_url(album_id: str, track_id: str = "") -> str:
     return url
 
 
+def _disc_catalog(table, catalogs: list[str], disc: int) -> str:
+    """収録曲の表が、どの品番の盤のものかを返す。
+
+    2枚組は盤ごとに表が分かれ、品番も盤ごとにある。まず表の手前に
+    「品番：…」や「DISC 2」といった見出しが無いか遡って探し、
+    見つからなければ出てきた順（何枚目か）で品番一覧から選ぶ。
+    どちらも分からなければ最初の品番を返す。
+    """
+    # 表の手前を10要素ぶんだけ遡って、見出しに品番が書いていないか見る
+    node = table
+    for _ in range(10):
+        node = node.find_previous(["div", "h3", "h4", "h5", "p", "span", "caption",
+                                   "th", "td", "li"])
+        if node is None:
+            break
+        text = re.sub(r"\s+", " ", node.get_text(" ", strip=True))
+        if len(text) > 80:
+            continue
+        m = re.search(r"品番[：:]\s*([A-Za-z0-9\-\u30fb/\u3001, ]+)", text)
+        if m:
+            cat = m.group(1).strip(" \u3001,/")
+            if cat:
+                return cat
+        # 「DISC 2」「Disc2」「2枚目」だけ書いてある見出しもあるので拾う
+        m2 = re.search(r"(?:DISC|Disc|disc)\s*([0-9]+)|([0-9]+)\u679a\u76ee", text)
+        if m2:
+            n = int(m2.group(1) or m2.group(2))
+            if 1 <= n <= len(catalogs):
+                return catalogs[n - 1]
+            break
+
+    if 1 <= disc <= len(catalogs):
+        return catalogs[disc - 1]
+    return catalogs[0] if catalogs else ""
+
+
 # =====================================================================
 # クライアント
 # =====================================================================
@@ -472,15 +508,19 @@ class MusicForestClient:
           2. 曲名検索の結果ページから拾った同一 album_id の track_id
           3. track_id=0（ハイライト無しで開けるか）
 
+        2枚組は盤ごとに表が分かれているので、表は全部読む。曲には
+        「ディスク」（何枚目か）と、その盤の「品番」を持たせる。
+
         Returns: {
-            "CD商品タイトル": str, "品番": str, "レコード会社名": str,
-            "集中管理": str,
+            "CD商品タイトル": str, "品番": str, "品番一覧": [str, ...],
+            "枚数": int, "レコード会社名": str, "集中管理": str,
             "tracks": [...], "url": str, "attempts": [{"url","result"}, ...],
             "error": None | str, "debug_html": str,
         }
         """
         out: dict = {
-            "CD商品タイトル": "", "品番": "", "レコード会社名": "", "集中管理": "",
+            "CD商品タイトル": "", "品番": "", "品番一覧": [], "枚数": 0,
+            "レコード会社名": "", "集中管理": "",
             "tracks": [], "url": "", "attempts": [], "error": None, "debug_html": "",
         }
         if not album_id:
@@ -531,56 +571,73 @@ class MusicForestClient:
             _dlg = soup.select_one("span.delegation.active")
             if _dlg:
                 out["集中管理"] = _dlg.get_text(strip=True)
+            # 品番は2枚組だと2つ以上ある。出てきた順に全部控えておき、
+            # 何枚目の曲かに合わせて使い分ける
             for div in soup.select("div.detail_data div[class*='col-sm']"):
                 text = div.get_text(" ", strip=True)
-                if not out["品番"]:
-                    _m = re.match(r"品番[：:]\s*(.+)", text)
-                    if _m:
-                        out["品番"] = _m.group(1).strip()
+                _m = re.match(r"品番[：:]\s*(.+)", text)
+                if _m:
+                    _cat = _m.group(1).strip()
+                    if _cat and _cat not in out["品番一覧"]:
+                        out["品番一覧"].append(_cat)
                 if not out["レコード会社名"] and "発売会社" in text:
                     _m2 = re.search(r"発売会社[：:]\s*([^/\n]+)", text)
                     if _m2:
                         out["レコード会社名"] = _m2.group(1).strip()
+            if out["品番一覧"]:
+                out["品番"] = out["品番一覧"][0]
 
-            table = soup.select_one("table.cd-detail2-track-list, table[class*='track-list']")
-
-            # ヘッダー行から列位置を作る（列順の変更に耐えるため）
-            hdr_row = (
-                table.select_one("thead tr")
-                or next((tr for tr in table.select("tr") if tr.find("th")), None)
+            # 2枚組は収録曲の表が盤ごとに分かれている。select_one では
+            # 1枚目しか読めず、2枚目の曲から逆引きできなかった。全部読む
+            _tables = soup.select(
+                "table.cd-detail2-track-list, table[class*='track-list']"
             )
-            col_map: dict[str, int] = {}
-            if hdr_row:
-                for idx, cell in enumerate(hdr_row.find_all(["th", "td"])):
-                    col_map[re.sub(r"\s+", "", cell.get_text(" ", strip=True))] = idx
+            out["枚数"] = len(_tables)
 
-            def _pick(cells: list[str], *kws: str) -> str:
-                for kw in kws:
-                    for name, idx in col_map.items():
-                        if kw in name and idx < len(cells):
-                            return cells[idx]
-                return ""
+            # 盤ごとの表を順に読む。曲には何枚目か（ディスク）と、その盤の
+            # 品番を持たせる。表へ反映するとき、当該曲が入っているほうの
+            # CD番号を使えるようにするため
+            for _disc, table in enumerate(_tables, 1):
+                _disc_cat = _disc_catalog(table, out["品番一覧"], _disc)
+                # ヘッダー行から列位置を作る（列順の変更に耐えるため）
+                hdr_row = (
+                    table.select_one("thead tr")
+                    or next((tr for tr in table.select("tr") if tr.find("th")), None)
+                )
+                col_map: dict[str, int] = {}
+                if hdr_row:
+                    for idx, cell in enumerate(hdr_row.find_all(["th", "td"])):
+                        col_map[re.sub(r"\s+", "", cell.get_text(" ", strip=True))] = idx
 
-            for row in table.select("tr"):
-                if row.find("th"):
-                    continue
-                cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
-                if not cells:
-                    continue
-                _jcd_c = _pick(cells, "JASRAC")
-                _ncd_c = _pick(cells, "NexTone")
-                out["tracks"].append({
-                    "曲順":            _pick(cells, "曲順", "No"),
-                    "メドレー":         _pick(cells, "メドレー"),
-                    "曲名":            _pick(cells, "曲名", "タイトル"),
-                    "IV":             _pick(cells, "IV"),
-                    "収録時間":         _pick(cells, "収録時間", "時間", "尺"),
-                    "アーティスト":     _pick(cells, "アーティスト"),
-                    "ISRC":           _pick(cells, "ISRC"),
-                    "JASRAC作品コード":  "" if _jcd_c == "-" else _jcd_c,
-                    "NexTone作品コード": "" if _ncd_c == "-" else _ncd_c,
-                    "管理情報":         _pick(cells, "管理情報", "著作権"),
-                })
+                def _pick(cells: list[str], *kws: str) -> str:
+                    for kw in kws:
+                        for name, idx in col_map.items():
+                            if kw in name and idx < len(cells):
+                                return cells[idx]
+                    return ""
+
+                for row in table.select("tr"):
+                    if row.find("th"):
+                        continue
+                    cells = [c.get_text(" ", strip=True) for c in row.find_all("td")]
+                    if not cells:
+                        continue
+                    _jcd_c = _pick(cells, "JASRAC")
+                    _ncd_c = _pick(cells, "NexTone")
+                    out["tracks"].append({
+                        "曲順":            _pick(cells, "曲順", "No"),
+                        "メドレー":         _pick(cells, "メドレー"),
+                        "曲名":            _pick(cells, "曲名", "タイトル"),
+                        "IV":             _pick(cells, "IV"),
+                        "収録時間":         _pick(cells, "収録時間", "時間", "尺"),
+                        "アーティスト":     _pick(cells, "アーティスト"),
+                        "ISRC":           _pick(cells, "ISRC"),
+                        "JASRAC作品コード":  "" if _jcd_c == "-" else _jcd_c,
+                        "NexTone作品コード": "" if _ncd_c == "-" else _ncd_c,
+                        "管理情報":         _pick(cells, "管理情報", "著作権"),
+                        "ディスク":         _disc,
+                        "品番":            _disc_cat,
+                    })
 
             if not out["tracks"]:
                 out["error"] = "収録曲を取得できませんでした。"
