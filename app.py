@@ -65,6 +65,7 @@ from modules.musicforest import (
     check_session,
     get_state_path,
     load_client,
+    split_catalog_number,
     sync_session_from_chrome,
     update_sess_cookie,
 )
@@ -876,8 +877,33 @@ def _render_cd_results(
             use_container_width=True,
             disabled=not (_cp_item.get("品番") or _cp_item.get("レコード会社名")),
         ):
+            # 2枚組は品番が「KICA-2592/3」とまとめて書かれていることが
+            # ある。CD商品リストの行だけでは、その曲がどちらの盤に入って
+            # いるかまでは分からない。収録曲を取得済みなら、その曲が入って
+            # いるほうの盤の品番を使う（通信はしない）
+            _cp_cat = _cp_item.get("品番", "")
+            _cp_cat_note = ""
+            if len(split_catalog_number(_cp_cat)) > 1:
+                _cp_want_j = _normalize_jcd(_cp_res.get("作品コード", ""))
+                _cp_want_n = _mf_norm_name(_cp_res.get("作品名", ""))
+                _cp_hit_trk = None
+                for _cp_t in (_cp_det.get("tracks") or []):
+                    if ((_cp_want_j
+                         and _normalize_jcd(_cp_t.get("JASRAC作品コード", "")) == _cp_want_j)
+                            or (_cp_want_n
+                                and _mf_norm_name(_cp_t.get("曲名", "")) == _cp_want_n)):
+                        _cp_hit_trk = _cp_t
+                        break
+                if _cp_hit_trk and _cp_hit_trk.get("品番"):
+                    _cp_cat = _cp_hit_trk["品番"]
+                    _cp_cat_note = (f"（{_cp_item.get('品番', '')} のうち"
+                                    f"{_cp_hit_trk.get('ディスク', 1)}枚目）")
+                else:
+                    _cp_cat_note = ("（2枚組のまとめ書きです。「🎵 収録曲を表示」から"
+                                    "曲を選ぶと1枚ぶんの番号が入ります）")
+
             _cp_apply = {
-                "CD番号":         _cp_item.get("品番", ""),
+                "CD番号":         _cp_cat,
                 "CD名":           _cp_item.get("CD商品タイトル", ""),
                 "レコード会社名": _cp_item.get("レコード会社名", ""),
                 "委任者":         _cp_dlg,
@@ -948,7 +974,7 @@ def _render_cd_results(
             ):
                 st.session_state.songs_df.at[row_idx, "邦洋区分"] = _cp_hy0
             st.session_state["_apply_msg"] = (
-                f"CD番号・レコード会社名を反映しました。（{_cp_item.get('品番', '')}）"
+                f"CD番号・レコード会社名を反映しました。（{_cp_cat}）{_cp_cat_note}"
                 + (f" 作曲: {_cp_apply['作曲者']}" if _cp_apply.get("作曲者") else "")
                 + (f" 作詞: {_cp_apply['作詞者']}" if _cp_apply.get("作詞者") else "")
                 + (f" アーティスト: {_cp_apply['アーティスト']}"
@@ -1002,6 +1028,8 @@ def _render_track_list(
                 "2枚組以上のCDです。曲を選ぶと、**その曲が入っているほうの盤の"
                 "CD番号（品番）**を反映します。　品番："
                 + " ／ ".join(_cp_det.get("品番一覧") or [])
+                + (f"（MINCの表記「{_cp_det['品番まとめ書き']}」を盤ごとに分けました）"
+                   if _cp_det.get("品番まとめ書き") else "")
             )
         # 行クリック → 下の「この曲を申告フォーマットに反映」に連動（CD一覧と同じ操作）
         _cp_tsel_key  = f"cpanel_tsel_{key_prefix}"
@@ -2192,6 +2220,11 @@ def _run_bulk_search() -> None:
                             _iv_minc = _delg_b.get("IV", "")
                             if _iv_minc in ("I", "V"):
                                 _minc_iv = _iv_minc
+                            # 検索結果の品番が「KICA-2592/3」のまとめ書きの
+                            # ときは、盤の分かっているCD詳細の品番に入れ替える
+                            if _delg_b.get("品番") and len(
+                                    split_catalog_number(updates.get("CD番号", ""))) > 1:
+                                updates["CD番号"] = _delg_b["品番"]
                         except Exception:
                             pass
                     # MINC 作品詳細から作曲者・作詞者・編曲者・訳詞者を補完
@@ -4797,6 +4830,11 @@ with tabs[0]:
                                 _委任者 = _delg_r.get("集中管理","")
                                 _iv_raw = _delg_r.get("IV","")
                                 _iv_apply = {"I": "インスト", "V": "ヴォーカル"}.get(_iv_raw, "")
+                                # 「KICA-2592/3」のまとめ書きより、何枚目の盤か
+                                # 分かっているCD詳細の品番を先に使う
+                                _mf_cat = _mf_item.get("品番", "") or _delg_r.get("品番", "")
+                                if _delg_r.get("品番") and len(split_catalog_number(_mf_cat)) > 1:
+                                    _mf_cat = _delg_r["品番"]
                                 _mf_jcd2 = _mf_item.get("JASRAC作品コード","") or _detail_now.get("作品コード","")
                                 # JASRACコードが変わる場合は先に関連フィールドをクリア
                                 _apply_clear_on_jcd_change(row_idx, _mf_jcd2)
@@ -4807,7 +4845,7 @@ with tabs[0]:
                                     "訳詞者":          _translator,
                                     "編曲者":          _arranger,
                                     "アーティスト":    _mf_item.get("アーティスト","") or _delg_r.get("アーティスト",""),
-                                    "CD番号":          _mf_item.get("品番","") or _delg_r.get("品番",""),
+                                    "CD番号":          _mf_cat,
                                     "CD名":            _mf_item.get("CD商品タイトル","") or _delg_r.get("CD商品タイトル",""),
                                     "レコード会社名":  _mf_item.get("レコード会社名",""),
                                     "JASRAC作品コード": _mf_jcd2,

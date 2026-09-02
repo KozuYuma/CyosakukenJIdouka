@@ -56,6 +56,68 @@ def _norm_title(s: str) -> str:
     return re.sub(r"[\s　・･'\"’“”~〜\-−ー]", "", _s)
 
 
+#: 品番のまとめ書きを区切っている記号。「KICA-2592/3」「KICA-2592〜4」など
+_CAT_SPLIT = re.compile(r"\s*[/／~〜～・、,]\s*")
+
+
+def split_catalog_number(cat: str) -> list[str]:
+    """まとめ書きされた品番を、盤ごとの品番にほどく。
+
+    2枚組は品番が「KICA-2592/3」と1つの欄にまとめて書かれていることが
+    ある。この形だと品番が1件としか数えられず、2枚目の曲にも1枚目の
+    品番（というより、まとめ書きそのもの）が入ってしまう。
+
+        KICA-2592/3    → ["KICA-2592", "KICA-2593"]
+        KICA-2592/2593 → ["KICA-2592", "KICA-2593"]
+        KICA-2599/600  → ["KICA-2599", "KICA-2600"]
+        KICA-2592〜4   → ["KICA-2592", "KICA-2593", "KICA-2594"]
+        KICA-2592      → ["KICA-2592"]（そのまま）
+
+    数字の桁は後ろから合わせる（「/3」は末尾1桁だけを差し替える）。
+    ほどけない書き方のときは、元の文字列だけを入れた1件を返す。
+    """
+    text = str(cat or "").strip()
+    if not text:
+        return []
+    parts = [p.strip() for p in _CAT_SPLIT.split(text) if p.strip()]
+    if len(parts) <= 1:
+        return [text]
+
+    base = parts[0]
+    m = re.search(r"(\d+)\s*$", base)
+    if not m:
+        return [text]
+    head, num = base[:m.start(1)], m.group(1)
+
+    out = [base]
+    all_numeric = True          # 後ろの札がすべて数字だけか（範囲の展開に使う）
+    for part in parts[1:]:
+        if re.fullmatch(r"\d+", part):
+            # 「/3」は末尾1桁、「/600」は末尾3桁を差し替える
+            out.append(head + (num[:len(num) - len(part)] + part
+                               if len(part) < len(num) else part))
+        elif re.search(r"\d", part):
+            out.append(part)    # 「KICA-2593」と丸ごと書いてある
+            all_numeric = False
+        else:
+            all_numeric = False
+
+    # 「〜」は範囲。間の盤も品番があるはずなので埋める
+    if all_numeric and len(out) == 2 and re.search(r"[~〜～]", text):
+        last = re.search(r"(\d+)\s*$", out[1])
+        if last:
+            a, b = int(num), int(last.group(1))
+            if 0 < b - a <= 20:
+                out = [head + str(n).zfill(len(num)) for n in range(a, b + 1)]
+
+    # 同じ品番が並んだときは1件にまとめる（順番は変えない）
+    seen: list[str] = []
+    for c in out:
+        if c and c not in seen:
+            seen.append(c)
+    return seen
+
+
 def _product_detail_url(album_id: str, track_id: str = "") -> str:
     """
     CD商品詳細（モーダル）のURLを組み立てる。
@@ -95,7 +157,11 @@ def _disc_catalog(table, catalogs: list[str], disc: int) -> str:
         if m:
             cat = m.group(1).strip(" \u3001,/")
             if cat:
-                return cat
+                if len(split_catalog_number(cat)) == 1:
+                    return cat
+                # 「KICA-2592/3」はCD全体のまとめ書きで、盤ごとの
+                # 見出しではない。ほどいた品番から出てきた順で選ぶ
+                break
         # 「DISC 2」「Disc2」「2枚目」だけ書いてある見出しもあるので拾う
         m2 = re.search(r"(?:DISC|Disc|disc)\s*([0-9]+)|([0-9]+)\u679a\u76ee", text)
         if m2:
@@ -308,7 +374,9 @@ class MusicForestClient:
             "集中管理": "委任者" | "非委任者" | "",
             "IV": "I" | "V" | "",
             "CD商品タイトル": str,
-            "品番": str,
+            "品番": str,          # 2枚組はこの曲が入っているほうの盤の品番
+            "品番まとめ書き": str, # 「KICA-2592/3」のような元の書き方
+            "枚数": int, "ディスク": int,
             "アーティスト": str,
             "曲名": str,          # ハイライト行の曲名
             "トラック番号": str,   # ハイライト行のトラック番号
@@ -320,6 +388,7 @@ class MusicForestClient:
         out: dict = {
             "集中管理": "", "IV": "",
             "CD商品タイトル": "", "品番": "", "アーティスト": "", "レコード会社名": "",
+            "品番まとめ書き": "", "枚数": 0, "ディスク": 0,
             "曲名": "", "トラック番号": "", "尺": "",
             "error": None, "debug_html": "",
         }
@@ -347,12 +416,16 @@ class MusicForestClient:
                 out["CD商品タイトル"] = modal_title.get_text(strip=True)
 
             # ── 品番・発売会社: detail_data の div.col-sm-* テキスト ─────────
+            _cats: list[str] = []      # 2枚組は品番が2つ載っていることがある
             for div in soup.select("div.detail_data div[class*='col-sm']"):
                 text = div.get_text(" ", strip=True)
-                if not out["品番"]:
-                    _m = re.match(r"品番[：:]\s*(.+)", text)
-                    if _m:
-                        out["品番"] = _m.group(1).strip()
+                _m = re.match(r"品番[：:]\s*(.+)", text)
+                if _m:
+                    _cat = _m.group(1).strip()
+                    if _cat and _cat not in _cats:
+                        _cats.append(_cat)
+                    if not out["品番"]:
+                        out["品番"] = _cat
                 if not out["レコード会社名"] and "発売会社" in text:
                     _m2 = re.search(r"発売会社[：:]\s*([^/\n]+)", text)
                     if _m2:
@@ -463,6 +536,25 @@ class MusicForestClient:
                             out["IV"] = c
                             break
 
+                # ── 何枚目の盤の曲か ────────────────────────────────
+                # 2枚組は収録曲の表が盤ごとに分かれている。この曲の表が
+                # 何番目かを見て、その盤の品番を入れる。品番が
+                # 「KICA-2592/3」とまとめて書かれているときはほどく
+                _p_tables = soup.select(
+                    "table.cd-detail2-track-list, table[class*='track-list']"
+                )
+                if len(_p_tables) > 1 and tbl is not None and tbl in _p_tables:
+                    out["枚数"] = len(_p_tables)
+                    _disc = _p_tables.index(tbl) + 1
+                    out["ディスク"] = _disc
+                    _disc_cats = _cats if len(_cats) > 1 else split_catalog_number(
+                        out["品番"]
+                    )
+                    if 1 <= _disc <= len(_disc_cats):
+                        if out["品番"] != _disc_cats[_disc - 1]:
+                            out["品番まとめ書き"] = out["品番"]
+                        out["品番"] = _disc_cats[_disc - 1]
+
         except requests.exceptions.ConnectionError:
             out["error"] = "接続エラー"
         except Exception as e:
@@ -513,13 +605,15 @@ class MusicForestClient:
 
         Returns: {
             "CD商品タイトル": str, "品番": str, "品番一覧": [str, ...],
+            "品番まとめ書き": str,   # 「KICA-2592/3」のような元の書き方
             "枚数": int, "レコード会社名": str, "集中管理": str,
             "tracks": [...], "url": str, "attempts": [{"url","result"}, ...],
             "error": None | str, "debug_html": str,
         }
         """
         out: dict = {
-            "CD商品タイトル": "", "品番": "", "品番一覧": [], "枚数": 0,
+            "CD商品タイトル": "", "品番": "", "品番一覧": [], "品番まとめ書き": "",
+            "枚数": 0,
             "レコード会社名": "", "集中管理": "",
             "tracks": [], "url": "", "attempts": [], "error": None, "debug_html": "",
         }
@@ -593,6 +687,16 @@ class MusicForestClient:
                 "table.cd-detail2-track-list, table[class*='track-list']"
             )
             out["枚数"] = len(_tables)
+
+            # 「KICA-2592/3」のように1つの欄へまとめて書かれていると、
+            # 品番は1件としか数えられない。盤の数に足りないときはほどいて
+            # 盤ごとに割り当てる（ほどけない書き方ならそのまま）
+            if len(out["品番一覧"]) == 1 and out["枚数"] > 1:
+                _split = split_catalog_number(out["品番一覧"][0])
+                if len(_split) > 1:
+                    out["品番まとめ書き"] = out["品番一覧"][0]
+                    out["品番一覧"] = _split
+                    out["品番"] = _split[0]
 
             # 盤ごとの表を順に読む。曲には何枚目か（ディスク）と、その盤の
             # 品番を持たせる。表へ反映するとき、当該曲が入っているほうの
