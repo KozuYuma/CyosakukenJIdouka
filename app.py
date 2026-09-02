@@ -158,6 +158,63 @@ _SCROLL_JS = """
 </script>
 """
 
+# 表の中を、選んだ行が真ん中に来るところまでスクロールさせる。
+# `__ANCHOR__` `__ROW__` `__TOTAL__` を差し替えて使う。
+#
+# st.data_editor は、チェックを付け替えるたびに key を変えて作り直して
+# いる（表側が持っている編集中の印を消すため）。作り直すと表の中の
+# スクロールは先頭に戻ってしまい、下のほうの行にチェックを入れると
+# その行を見失う。そこで、付けた直後に元の位置まで戻してやる。
+#
+# 表の中身は canvas に描かれていて行の要素が無いので、行の高さは
+# 「中身の高さ ÷ 行数」から割り出す。表は少し遅れて描き上がるので、
+# 一度きりではなく間を空けて数回試す。
+_TABLE_SCROLL_JS = """
+<script>
+(function () {
+  var doc = parent.document;
+  var row = __ROW__, total = __TOTAL__;
+  // 目印より後ろにある表を探す。タブの裏にも別の表があるので、
+  // 画面全体から探すと違う表を掴んでしまう
+  function scroller() {
+    var a = doc.getElementById("__ANCHOR__");
+    if (!a) return null;
+    var n = a;
+    while (n && n !== doc.body) {
+      var s = n;
+      while ((s = s.nextElementSibling)) {
+        var g = s.querySelector(".dvn-scroller");
+        if (g) return g;
+        // 表の作りが変わって class 名が違っていても動くよう、
+        // 縦に流れている入れ物を代わりに探す
+        var t = s.querySelector('[data-testid="stDataFrame"],'
+                              + ' [data-testid="stDataEditor"]');
+        if (t) {
+          var all = t.querySelectorAll("div");
+          for (var i = 0; i < all.length; i++) {
+            if (all[i].scrollHeight > all[i].clientHeight + 4) return all[i];
+          }
+        }
+      }
+      n = n.parentElement;
+    }
+    return null;
+  }
+  function go() {
+    var g = scroller();
+    if (!g || !total) return;
+    var rowH = g.scrollHeight / total;
+    if (!(rowH > 0)) return;
+    var want = (row + 0.5) * rowH - g.clientHeight / 2;
+    want = Math.max(0, Math.min(want, g.scrollHeight - g.clientHeight));
+    if (Math.abs(g.scrollTop - want) < 2) return;
+    g.scrollTop = want;
+  }
+  [80, 250, 600, 1200].forEach(function (ms) { setTimeout(go, ms); });
+})();
+</script>
+"""
+
 # 確認ステータスの選択肢（全画面共通）
 CONFIRM_STATUS_OPTIONS = [
     "未調査",
@@ -359,6 +416,9 @@ def _pick_shinkok_row(state: dict) -> None:
         if isinstance(ch, dict) and "選択" in ch and int(p) != keep:
             ch["選択"] = False
     st.session_state["_shinkok_sel"] = keep
+    # 作り直すと表の中のスクロールが先頭に戻る。選んだ行を見失わない
+    # よう、描いたあとでその行まで戻す（_TABLE_SCROLL_JS）
+    st.session_state["_shinkok_scroll_row"] = keep
     # 表を作り直させる。次の描画では選ばれた行だけに印が付く
     st.session_state["_shinkok_ver"] = st.session_state.get("_shinkok_ver", 0) + 1
 
@@ -3540,6 +3600,9 @@ with tabs[0]:
                 st.session_state.pop(_prev_key, None)
             st.session_state["_shinkok_key"] = _shinkok_key
 
+            # 表の中をスクロールさせるときの目印。タブの裏にも表があるので、
+            # 「この目印より後ろの表」と分かるようにここに置く
+            st.markdown('<a id="sec-shinkok-table"></a>', unsafe_allow_html=True)
             _edited_shinkok = st.data_editor(
                 _shinkok_src,
                 use_container_width=True,
@@ -3550,6 +3613,18 @@ with tabs[0]:
                 disabled=["状態", *JWID_MGMT_COLS],
                 on_change=_sync_shinkok_to_songs,
             )
+
+            # チェックを付けた直後は表が作り直されて先頭に戻っているので、
+            # その行が真ん中に来るところまでスクロールし直す
+            _sh_srow = st.session_state.pop("_shinkok_scroll_row", None)
+            if isinstance(_sh_srow, int) and len(_shinkok_src):
+                _stc.html(
+                    _TABLE_SCROLL_JS
+                    .replace("__ANCHOR__", "sec-shinkok-table")
+                    .replace("__ROW__", str(int(_sh_srow)))
+                    .replace("__TOTAL__", str(len(_shinkok_src))),
+                    height=0,
+                )
 
             # チェックされた行のナビゲーションボタンを即表示。
             # 表のすぐ下に置く（印の説明よりも先）。行き先を選ぶのは表を
