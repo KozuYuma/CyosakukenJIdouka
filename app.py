@@ -287,6 +287,10 @@ _CLEAR_ON_JCD_CHANGE = [
 ]
 
 
+#: 作家名の欄。MINCの作品詳細・J-WID・検索結果のどれでも同じ名前で並ぶ
+_CRED_COLS = ("作曲者", "作詞者", "編曲者", "訳詞者")
+
+
 def _normalize_jcd(s: str) -> str:
     """JASRACコードをハイフン・空白除去 + 大文字化した正規化文字列で返す（比較用）。"""
     return re.sub(r"[-\s]", "", str(s)).upper().strip()
@@ -827,6 +831,15 @@ def _render_cd_results(
     _cp_dc2.text_input("レコード会社", value=_cp_item.get("レコード会社名", ""), key=f"cpanel_rco_{key_prefix}", disabled=True)
     _cp_dc3.text_input("委任者区分",   value=_cp_dlg or "(詳細取得で確認)",      key=f"cpanel_dlg_{key_prefix}", disabled=True)
 
+    # CD情報だけでなく、その曲の作家名とアーティストも一度に入れる。
+    # 作家名はCD商品リストに載っていないので、無ければ作品詳細を1回引く
+    _cp_want_cd_cred = st.checkbox(
+        "作曲者・作詞者・アーティストも一緒に反映する",
+        value=True,
+        key=f"cpanel_cdcred_{key_prefix}",
+        help="作家名がまだ取れていないときは、作品コードから作品詳細を1回引いて補います。",
+    )
+
     _cp_b1, _cp_b2 = st.columns(2)
     with _cp_b1:
         if st.button(
@@ -857,7 +870,8 @@ def _render_cd_results(
                     st.toast(f"エラー: {_cp_fe}", icon="❌")
     with _cp_b2:
         if st.button(
-            "✅ CD番号・レコード会社を反映",
+            "✅ CD情報＋作家名をまとめて反映" if _cp_want_cd_cred
+            else "✅ CD番号・レコード会社を反映",
             key=f"cpanel_apply_{key_prefix}",
             use_container_width=True,
             disabled=not (_cp_item.get("品番") or _cp_item.get("レコード会社名")),
@@ -868,6 +882,42 @@ def _render_cd_results(
                 "レコード会社名": _cp_item.get("レコード会社名", ""),
                 "委任者":         _cp_dlg,
             }
+
+            # ── 作家名・アーティストも一緒に入れる ──────────────────────
+            # CD商品リストの行に作家名は載っていないので、検索したときの
+            # 作品情報を使い、無ければ作品コードから作品詳細を1回だけ引く。
+            # 引いた結果は検索結果に控えて、次に押したときは通信しない
+            _cp_cd_cred: dict = {}
+            _cp_cd_cmsg = ""
+            if _cp_want_cd_cred:
+                _cp_cd_cred = {k: _cp_res.get(k, "")
+                               for k in _CRED_COLS if _cp_res.get(k)}
+                if not _cp_cd_cred:
+                    _cp_cd_j = _normalize_jcd(_cp_res.get("作品コード", ""))
+                    _cp_cd_n = _normalize_jcd(_cp_res.get("NexTone管理番号", ""))
+                    if _cp_cd_j or _cp_cd_n:
+                        with st.spinner("作詞者・作曲者を取得中..."):
+                            try:
+                                _cp_cd_det = _get_mf_client().get_detail(
+                                    f"jcd={_cp_cd_j}&ncd={_cp_cd_n}"
+                                    "&refer=music/list-product"
+                                ) or {}
+                            except MusicForestError as _cp_cd_e:
+                                _cp_cd_det = {"error": str(_cp_cd_e)}
+                        if _cp_cd_det.get("error"):
+                            _cp_cd_cmsg = f"（作家名の取得に失敗: {_cp_cd_det['error']}）"
+                        else:
+                            _cp_cd_cred = {k: _cp_cd_det.get(k, "")
+                                           for k in _CRED_COLS if _cp_cd_det.get(k)}
+                            _cp_res.update(_cp_cd_cred)
+                            if not _cp_cd_cred:
+                                _cp_cd_cmsg = "（MINCの作品詳細に作家名がありませんでした）"
+                    else:
+                        _cp_cd_cmsg = "（作品コードが無いため作家名は取得できません）"
+                _cp_apply.update(_cp_cd_cred)
+                if _cp_item.get("アーティスト"):
+                    _cp_apply["アーティスト"] = _cp_item["アーティスト"]
+
             for _cp_col, _cp_val in _cp_apply.items():
                 if _cp_val and _cp_col in st.session_state.songs_df.columns:
                     st.session_state.songs_df.at[row_idx, _cp_col] = _cp_val
@@ -879,10 +929,12 @@ def _render_cd_results(
             if not _cp_iv_str:
                 # MINCのCD詳細にI/V表記が無い場合は作詞者の有無から決める
                 # （作家名が取得済みの行に限る）
-                _cp_row_lyr = str(st.session_state.songs_df.at[row_idx, "作詞者"]
-                                  if "作詞者" in st.session_state.songs_df.columns else "")
-                _cp_row_cmp = str(st.session_state.songs_df.at[row_idx, "作曲者"]
-                                  if "作曲者" in st.session_state.songs_df.columns else "")
+                _cp_row_lyr = str(_cp_apply.get("作詞者") or (
+                    st.session_state.songs_df.at[row_idx, "作詞者"]
+                    if "作詞者" in st.session_state.songs_df.columns else ""))
+                _cp_row_cmp = str(_cp_apply.get("作曲者") or (
+                    st.session_state.songs_df.at[row_idx, "作曲者"]
+                    if "作曲者" in st.session_state.songs_df.columns else ""))
                 if not (_is_blank(_cp_row_lyr) and _is_blank(_cp_row_cmp)):
                     _cp_iv_str = _infer_iv(_cp_row_lyr)
             if _cp_iv_str and not _cp_cur_iv:
@@ -897,6 +949,11 @@ def _render_cd_results(
                 st.session_state.songs_df.at[row_idx, "邦洋区分"] = _cp_hy0
             st.session_state["_apply_msg"] = (
                 f"CD番号・レコード会社名を反映しました。（{_cp_item.get('品番', '')}）"
+                + (f" 作曲: {_cp_apply['作曲者']}" if _cp_apply.get("作曲者") else "")
+                + (f" 作詞: {_cp_apply['作詞者']}" if _cp_apply.get("作詞者") else "")
+                + (f" アーティスト: {_cp_apply['アーティスト']}"
+                   if _cp_apply.get("アーティスト") else "")
+                + _cp_cd_cmsg
             )
             st.session_state.pop("songs_editor", None)
             st.rerun()
@@ -5152,11 +5209,46 @@ with tabs[0]:
                                     "アーティスト":   _cd_art_d,
                                     "レコード会社名": _cd_rec_co,
                                 }
+
+                                # CD情報だけでなく、その候補の作家名も一緒に
+                                # 入れる。J-WID → MINC詳細 → 検索結果の順に見て、
+                                # どれも無ければ作品詳細を1回だけ引く
+                                _m_cred: dict = {}
+                                if _man_target_idx is not None and _man_target_idx < len(_mf_items):
+                                    _m_it = _mf_items[_man_target_idx]
+                                    _m_jw = st.session_state.get(
+                                        f"mf_jwid_{selected_no}_{_mf_v}_{_man_target_idx}", {}) or {}
+                                    _m_dt = st.session_state.get(
+                                        f"mf_detail_{selected_no}_{_mf_v}_{_man_target_idx}", {}) or {}
+                                    for _m_ck in _CRED_COLS:
+                                        _m_cv = (_m_jw.get(_m_ck) or _m_dt.get(_m_ck)
+                                                 or _m_it.get(_m_ck, ""))
+                                        if _m_cv:
+                                            _m_cred[_m_ck] = _m_cv
+                                    if not _m_cred and _m_it.get("_detail_href"):
+                                        with st.spinner("作詞者・作曲者を取得中..."):
+                                            try:
+                                                _m_ad = _get_mf_client().get_detail(
+                                                    _m_it["_detail_href"]) or {}
+                                            except Exception:
+                                                _m_ad = {"error": "取得できませんでした"}
+                                        if not _m_ad.get("error"):
+                                            st.session_state[
+                                                f"mf_detail_{selected_no}_{_mf_v}_{_man_target_idx}"
+                                            ] = _m_ad
+                                            _m_cred = {k: _m_ad.get(k, "")
+                                                       for k in _CRED_COLS if _m_ad.get(k)}
+                                    if not _m_direct.get("アーティスト") and _m_it.get("アーティスト"):
+                                        _m_direct["アーティスト"] = _m_it["アーティスト"]
+                                _m_direct.update(_m_cred)
+
                                 if not _cd_iv_appl and not (
-                                    _is_blank(row.get("作曲者", "")) and _is_blank(row.get("作詞者", ""))
+                                    _is_blank(_m_cred.get("作曲者", "") or row.get("作曲者", ""))
+                                    and _is_blank(_m_cred.get("作詞者", "") or row.get("作詞者", ""))
                                 ):
                                     # CD詳細にI/V表記が無ければ、取得済みの作詞者の有無で判定
-                                    _cd_iv_appl = _infer_iv(str(row.get("作詞者", "")))
+                                    _cd_iv_appl = _infer_iv(
+                                        str(_m_cred.get("作詞者", "") or row.get("作詞者", "")))
                                 if _cd_iv_appl and not str(row.get("I/V区分", "")).strip():
                                     _m_direct["I/V区分"] = _cd_iv_appl
                                 for _col, _val in _m_direct.items():
@@ -5171,6 +5263,10 @@ with tabs[0]:
                                     _msg_lines.append(f"CD: {_cd_title_d}" + (f"（{_cd_cat_d}）" if _cd_cat_d else ""))
                                 if _cd_rec_co:
                                     _msg_lines.append(f"レコード会社: {_cd_rec_co}")
+                                if _m_cred:
+                                    _msg_lines.append(
+                                        "　".join(f"{k}: {v}" for k, v in _m_cred.items())
+                                    )
                                 if _cd_trk_d or _cd_name_d:
                                     _msg_lines.append(
                                         f"トラック{_cd_trk_d}: {_cd_name_d}" + (f"（{_cd_dur_d}）" if _cd_dur_d else "")
