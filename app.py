@@ -4087,8 +4087,14 @@ with tabs[0]:
             _mf_row_art = str(row.get("アーティスト", "")).strip()
             st.session_state[_mf_art_key] = "" if _is_blank(_mf_row_art) else _mf_row_art
 
+        # JASRAC作品コードでの絞り込み。同じ曲名がずらりと並ぶとき、
+        # 番号が分かっていれば一発で目当ての候補まで辿り着ける。
+        # 初期値は空にしておく。行の番号を勝手に入れると、番号を付け直したくて
+        # 検索したときに、その番号の候補しか出なくなってしまう
+        _mf_jq_key = f"mf_jcdq_{selected_no}"
+
         if _mf_ok:
-            _mf_s1, _mf_s2, _mf_s2b, _mf_s3 = st.columns([3, 2, 2, 1])
+            _mf_s1, _mf_s2, _mf_s2b, _mf_s2c, _mf_s3 = st.columns([3, 2, 2, 2, 1])
             with _mf_s1:
                 _mf_term_opts = [f"[{lbl}]  {val}" for lbl, val in term_candidates]
                 _mf_term_sel = st.selectbox(
@@ -4119,6 +4125,20 @@ with tabs[0]:
                         "MINCの検索結果をこのアーティスト名で絞り込みます（部分一致）。"
                         "楽曲まとめのアーティストを初期値に入れています。"
                         "一致する候補が無いときは全件表示に戻します。"
+                    ),
+                )
+            with _mf_s2c:
+                st.text_input(
+                    "JASRAC作品コード（任意・絞り込み用）",
+                    key=_mf_jq_key,
+                    placeholder="例: 123-4567-8",
+                    help=(
+                        "MINCの検索結果をこの作品コードで絞り込みます"
+                        "（前の方だけの一致でも可）。"
+                        "ハイフンや空白は気にしなくて大丈夫です。"
+                        "この行に入っている番号は "
+                        + (str(row.get("JASRAC作品コード", "")).strip() or "（なし）")
+                        + "です。一致する候補が無いときは全件表示に戻します。"
                     ),
                 )
             with _mf_s3:
@@ -4209,6 +4229,27 @@ with tabs[0]:
                         st.caption(
                             f"🎤 アーティスト「{st.session_state[_mf_art_key].strip()}」に一致する候補が"
                             "無いため全件表示しています（表記ゆれの可能性があります）"
+                        )
+
+                # ── JASRAC作品コードで絞り込み ────────────────────────────
+                # ハイフンの有無は気にせず、前方からの部分一致で照合する
+                _mf_jq_raw = str(st.session_state.get(_mf_jq_key, "")).strip()
+                _mf_jq = _normalize_jcd(_mf_jq_raw)
+                if _mf_jq:
+                    _mf_jhit = [
+                        (_i, _it) for _i, _it in _mf_pairs
+                        if _mf_jq in _normalize_jcd(_it.get("JASRAC作品コード", ""))
+                    ]
+                    if _mf_jhit:
+                        st.caption(
+                            f"🔢 JASRAC作品コード「{_mf_jq_raw}」で絞り込み: "
+                            f"**{len(_mf_jhit)}** / {len(_mf_pairs)} 件"
+                        )
+                        _mf_pairs = _mf_jhit
+                    else:
+                        st.caption(
+                            f"🔢 JASRAC作品コード「{_mf_jq_raw}」に一致する候補が"
+                            "無いため、コードでの絞り込みはしていません"
                         )
 
                 for _mf_disp_i, (_mf_i, _mf_item) in enumerate(_mf_pairs[:20]):
