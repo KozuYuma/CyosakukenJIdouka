@@ -5437,9 +5437,7 @@ with tabs[0]:
                 with st.spinner("MINCからCDリストを取得中..."):
                     try:
                         _cds_client = _get_mf_client()
-                        _cds_cand_key = f"cds_cands_{selected_no}"
                         if _cds_jcd_input.strip():
-                            st.session_state.pop(_cds_cand_key, None)
                             _cds_raw = _cds_client.search_cds_by_jasrac(
                                 _cds_jcd_input.strip(),
                                 title=_cds_title_input.strip() or _cds_title_default,
@@ -5447,7 +5445,6 @@ with tabs[0]:
                         else:
                             _cds_term = _cds_title_input.strip() or _cds_title_default
                             if not _cds_term:
-                                st.session_state.pop(_cds_cand_key, None)
                                 _cds_raw = {
                                     "cds": [],
                                     "error": (
@@ -5535,26 +5532,26 @@ with tabs[0]:
                                     if str(_h.get("JASRAC作品コード", "")).strip()
                                     or str(_h.get("NexTone管理番号", "")).strip()
                                 ]
-                                if len(_cds_cands) > 1:
-                                    st.session_state[_cds_cand_key] = {
-                                        "term": _cds_term, "hits": _cds_cands,
-                                    }
-                                else:
-                                    st.session_state.pop(_cds_cand_key, None)
-
-                                if len(_cds_coded) == 1:
+                                # ここで探しているのは盤であって作品ではない。
+                                # 作品を選ばせずに、いちばん近い候補（作品コード
+                                # のあるものを優先）のCDをそのまま出す。違うとき
+                                # は曲名を詳しくするか、作品コードで引き直す
+                                _cds_pick = (_cds_coded or _cds_cands or [None])[0]
+                                if _cds_pick is not None:
                                     _cds_raw = _cds_fetch_for_hit(
-                                        _cds_client, _cds_coded[0], _cds_term)
-                                elif _cds_cands and len(_cds_cands) == 1:
-                                    _cds_raw = _cds_fetch_for_hit(
-                                        _cds_client, _cds_cands[0], _cds_term)
-                                elif _cds_cands:
-                                    # 作品が2つ以上。勝手に選ばず、下の候補から
-                                    # 選んでもらう（今の結果は消す）
-                                    st.session_state.pop(f"cds_results_{selected_no}", None)
-                                    _cds_raw = None
+                                        _cds_client, _cds_pick, _cds_term)
+                                    if len(_cds_cands) > 1:
+                                        _cds_raw["_cand_note"] = (
+                                            f"「{_cds_term}」で作品が "
+                                            f"**{len(_cds_cands)} 件** 見つかったので、"
+                                            "いちばん近い "
+                                            f"{_cds_cand_label(_cds_pick)} のCDを出して"
+                                            "います。MINCは曲名の一部でも探すため、"
+                                            "別の曲も混ざります。目当てのものでなければ、"
+                                            "曲名を詳しく入れるか、JASRAC作品コードで"
+                                            "検索してください。"
+                                        )
                                 else:
-                                    st.session_state.pop(_cds_cand_key, None)
                                     _cds_raw = {
                                         "cds": [],
                                         "error": (
@@ -5597,71 +5594,15 @@ with tabs[0]:
                 _cds_hb_raw["_hinban_filter"] = ""
                 _cds_hb_raw["_cdname_filter"] = _cds_cdname_input.strip()
                 st.session_state[f"cds_results_{selected_no}"] = _cds_hb_raw
-                st.session_state.pop(f"cds_cands_{selected_no}", None)
                 for _cds_ck in list(st.session_state.keys()):
                     if _cds_ck.startswith(f"cds_detail_{selected_no}_"):
                         del st.session_state[_cds_ck]
                 st.rerun()
 
-            # ── 作品の候補（曲名だけで検索して2件以上見つかった場合）──────
-            _cds_cand_st = st.session_state.get(f"cds_cands_{selected_no}") or {}
-            _cds_cand_hits = _cds_cand_st.get("hits") or []
-            if _cds_cand_hits:
-                st.info(
-                    f"「{_cds_cand_st.get('term', '')}」で候補が "
-                    f"**{len(_cds_cand_hits)} 件** 見つかりました。"
-                    "MINCは曲名の一部でも探すため、別の曲も混ざります。"
-                    "下のCDリストが目当てのものでなければ、ここで選び直してください。"
-                    "「作品コード無し・このCDのみ」の候補は、そのCD1枚だけを開きます。"
-                )
-                _cds_cand_view = _cds_cand_hits[:50]
-                if len(_cds_cand_hits) > len(_cds_cand_view):
-                    st.caption(
-                        f"※多いので先頭 {len(_cds_cand_view)} 件だけ出しています。"
-                        "曲名を詳しく入れると絞れます。"
-                    )
-                _cds_cand_sel_key = f"cds_cand_sel_{selected_no}"
-                if st.session_state.get(_cds_cand_sel_key) not in range(len(_cds_cand_view)):
-                    st.session_state.pop(_cds_cand_sel_key, None)
-                _cds_cand_i = st.selectbox(
-                    "作品を選ぶ",
-                    options=list(range(len(_cds_cand_view))),
-                    format_func=lambda i: _cds_cand_label(_cds_cand_view[i]),
-                    key=_cds_cand_sel_key,
-                )
-                _cds_cb1, _cds_cb2 = st.columns(2)
-                if _cds_cb1.button(
-                    "💿 この作品のCDリストを取得",
-                    key=f"cds_cand_go_{selected_no}",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    with st.spinner("MINCからCDリストを取得中..."):
-                        try:
-                            _cds_cand_raw = _cds_fetch_for_hit(
-                                _get_mf_client(),
-                                _cds_cand_view[_cds_cand_i],
-                                _cds_cand_st.get("term", ""),
-                            )
-                        except MusicForestError as _cds_cand_e:
-                            _cds_cand_raw = {"cds": [], "error": str(_cds_cand_e)}
-                    _cds_cand_raw["_artist_filter"] = _cds_artist_input.strip()
-                    _cds_cand_raw["_cdname_filter"] = _cds_cdname_input.strip()
-                    _cds_cand_raw["_hinban_filter"] = _cds_hinban_input.strip()
-                    st.session_state[f"cds_results_{selected_no}"] = _cds_cand_raw
-                    for _cds_ck in list(st.session_state.keys()):
-                        if _cds_ck.startswith(f"cds_detail_{selected_no}_"):
-                            del st.session_state[_cds_ck]
-                    st.rerun()
-                if _cds_cb2.button(
-                    "✖ 候補を閉じる",
-                    key=f"cds_cand_close_{selected_no}",
-                    use_container_width=True,
-                ):
-                    st.session_state.pop(f"cds_cands_{selected_no}", None)
-                    st.rerun()
-
             _cds_res_cur = st.session_state.get(f"cds_results_{selected_no}")
+            # 曲名だけで引いて作品が2件以上あったときの断り書き
+            if (_cds_res_cur or {}).get("_cand_note"):
+                st.info(_cds_res_cur["_cand_note"])
             _render_cd_results(
                 _cds_res_cur,
                 row_idx,
