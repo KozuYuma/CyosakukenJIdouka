@@ -4196,7 +4196,13 @@ with tabs[0]:
             else:
                 _mf_items = _mf_res["results"]
                 if _mf_res.get("truncated"):
-                    st.warning("⚠️ 検索結果が 500件上限に達しました。検索語を絞り込んでください。")
+                    st.warning(
+                        "⚠️ 検索結果が MINC の 500件上限に達しました。"
+                        "**この先の候補はMINCから返ってきていない**ので、"
+                        "下の「🔎 さらに絞り込む」では出てきません。"
+                        "検索語を長くする・一致方式を「2: 前方一致」にする・"
+                        "著作者名を入れる、のいずれかで件数を減らしてください。"
+                    )
                 st.success(f"🌲 MINC: {len(_mf_items)} 件見つかりました")
                 st.caption(f"検索URL: {_mf_res.get('search_url','')}")
 
@@ -4252,7 +4258,150 @@ with tabs[0]:
                             "無いため、コードでの絞り込みはしていません"
                         )
 
-                for _mf_disp_i, (_mf_i, _mf_item) in enumerate(_mf_pairs[:20]):
+                # ── さらに絞り込む（件数が多くて探しきれないとき）────────
+                # MINC は500件までしか返さないので、まず検索語や一致方式で
+                # 減らすのが本筋。それでも多いときのために、取れている項目で
+                # 絞れるようにしておく。ここは通信しないので何度でも変えられる
+                _mf_fk = f"mf_filt_{selected_no}"      # 絞り込み欄のキーの頭
+                _mf_nshow_key = f"{_mf_fk}_n"
+                _mf_filt_keys = [
+                    f"{_mf_fk}_title", f"{_mf_fk}_cd", f"{_mf_fk}_cred",
+                    f"{_mf_fk}_label", f"{_mf_fk}_src", f"{_mf_fk}_code",
+                ]
+
+                def _mf_clear_filters(_keys=tuple(_mf_filt_keys)) -> None:
+                    """絞り込みを空に戻す。押した回の描画前に呼ばれる"""
+                    for _k in _keys:
+                        st.session_state.pop(_k, None)
+
+                _mf_before = len(_mf_pairs)
+                with st.expander(
+                    f"🔎 さらに絞り込む（今 {_mf_before} 件）", expanded=False
+                ):
+                    st.caption(
+                        "取得済みの候補をここで絞ります（**通信しません**）。"
+                        "空欄の項目は使いません。ハイフン・全角・大文字小文字の"
+                        "違いは気にしなくて大丈夫です。"
+                    )
+                    _mf_f1, _mf_f2 = st.columns(2)
+                    _mf_q_title = _mf_f1.text_input(
+                        "曲名に含む語", key=f"{_mf_fk}_title",
+                        placeholder="例: サビ違い、ライブ",
+                        help="作品名と副題を見ます（部分一致）")
+                    _mf_q_cd = _mf_f2.text_input(
+                        "CD名・品番に含む語", key=f"{_mf_fk}_cd",
+                        placeholder="例: ベスト、COCP-1234",
+                        help="収録CD名・CD商品タイトル・品番を見ます（部分一致）")
+                    _mf_q_cred = _mf_f1.text_input(
+                        "作家名に含む語", key=f"{_mf_fk}_cred",
+                        placeholder="例: 加藤達也",
+                        help="作曲者・作詞者・編曲者・訳詞者を見ます（部分一致）。"
+                             "検索結果に載っている名前だけが対象です")
+                    _mf_q_label = _mf_f2.text_input(
+                        "レコード会社に含む語", key=f"{_mf_fk}_label",
+                        placeholder="例: ビクター",
+                        help="レコード会社名・発売会社／販売会社を見ます（部分一致）")
+                    _mf_q_src = _mf_f1.multiselect(
+                        "どの表から出た候補か", options=["収録曲", "配信曲", "作品"],
+                        key=f"{_mf_fk}_src",
+                        help="MINCの検索結果は3つの表に分かれています。"
+                             "選ばなければ全部です")
+                    _mf_q_code = _mf_f2.radio(
+                        "作品コードの有無",
+                        options=["すべて", "JASRACコードあり",
+                                 "NexToneコードあり", "コードなし"],
+                        key=f"{_mf_fk}_code", horizontal=False)
+                    _mf_c1, _mf_c2 = st.columns([1, 2])
+                    _mf_c1.button("↩️ 絞り込みを解除",
+                                  key=f"{_mf_fk}_reset",
+                                  on_click=_mf_clear_filters,
+                                  use_container_width=True)
+                    _mf_nshow = _mf_c2.selectbox(
+                        "画面に出す件数", options=[20, 50, 100, 0],
+                        format_func=lambda v: "すべて" if v == 0 else f"{v} 件",
+                        key=_mf_nshow_key,
+                        help="多く出すほど画面は重くなります")
+
+                def _mf_hay(_it: dict, *cols: str) -> str:
+                    """絞り込みで見る欄をひとつなぎにして、比べる形に直す"""
+                    return _mf_norm_name(
+                        " ".join(str(_it.get(_c, "") or "") for _c in cols))
+
+                _mf_conds: list[tuple[str, object]] = []
+                if str(_mf_q_title or "").strip():
+                    _mf_conds.append((
+                        f"曲名「{_mf_q_title.strip()}」",
+                        lambda _it, _q=_mf_norm_name(_mf_q_title):
+                            _q in _mf_hay(_it, "作品名", "副題")))
+                if str(_mf_q_cd or "").strip():
+                    # 品番は記号の入り方が揺れるので、記号を落とした形でも見る
+                    _mf_conds.append((
+                        f"CD「{_mf_q_cd.strip()}」",
+                        lambda _it, _q=_mf_norm_name(_mf_q_cd),
+                               _h=_normalize_jcd(_mf_q_cd):
+                            _q in _mf_hay(_it, "収録CD", "CD商品タイトル",
+                                          "アルバム名", "品番")
+                            or (bool(_h) and _h in _normalize_jcd(
+                                _it.get("品番", "")))))
+                if str(_mf_q_cred or "").strip():
+                    _mf_conds.append((
+                        f"作家名「{_mf_q_cred.strip()}」",
+                        lambda _it, _q=_mf_norm_name(_mf_q_cred):
+                            _q in _mf_hay(_it, "作曲者", "作詞者",
+                                          "編曲者", "訳詞者")))
+                if str(_mf_q_label or "").strip():
+                    _mf_conds.append((
+                        f"レコード会社「{_mf_q_label.strip()}」",
+                        lambda _it, _q=_mf_norm_name(_mf_q_label):
+                            _q in _mf_hay(_it, "レコード会社名",
+                                          "発売会社販売会社")))
+                if _mf_q_src:
+                    _mf_conds.append((
+                        "／".join(_mf_q_src),
+                        lambda _it, _s=set(_mf_q_src):
+                            _it.get("_source_table", "") in _s))
+                if _mf_q_code == "JASRACコードあり":
+                    _mf_conds.append((
+                        "JASRACコードあり",
+                        lambda _it: bool(str(_it.get("JASRAC作品コード", "")).strip())))
+                elif _mf_q_code == "NexToneコードあり":
+                    _mf_conds.append((
+                        "NexToneコードあり",
+                        lambda _it: bool(str(_it.get("NexTone管理番号", "")).strip())))
+                elif _mf_q_code == "コードなし":
+                    _mf_conds.append((
+                        "コードなし",
+                        lambda _it: not (str(_it.get("JASRAC作品コード", "")).strip()
+                                         or str(_it.get("NexTone管理番号", "")).strip())))
+
+                if _mf_conds:
+                    _mf_pairs = [
+                        (_i, _it) for _i, _it in _mf_pairs
+                        if all(_f(_it) for _lbl, _f in _mf_conds)
+                    ]
+                    st.caption(
+                        "🔎 " + "／".join(_lbl for _lbl, _f in _mf_conds)
+                        + f" で絞り込み: **{len(_mf_pairs)}** / {_mf_before} 件"
+                    )
+                    if not _mf_pairs:
+                        st.info(
+                            "この条件に合う候補はありませんでした。"
+                            "「🔎 さらに絞り込む」を開いて"
+                            "「↩️ 絞り込みを解除」を押すと元に戻ります。"
+                        )
+
+                # 画面に出すのは先頭から一定件数だけ。多いと重くなるため
+                _mf_lim = int(st.session_state.get(_mf_nshow_key, 20) or 0)
+                _mf_shown = _mf_pairs if _mf_lim <= 0 else _mf_pairs[:_mf_lim]
+                if len(_mf_shown) < len(_mf_pairs):
+                    st.caption(
+                        f"↕️ {len(_mf_shown)} 件を表示しています"
+                        f"（絞り込み後 {len(_mf_pairs)} 件）。"
+                        "残りを見るには「🔎 さらに絞り込む」で条件を足すか、"
+                        "「画面に出す件数」を増やしてください。"
+                    )
+
+                for _mf_disp_i, (_mf_i, _mf_item) in enumerate(_mf_shown):
                     _mf_label = (
                         f"候補{_mf_i+1} [{_mf_item['_source_table']}]: "
                         f"{_mf_item.get('作品名','')} ／ {_mf_item.get('アーティスト','')} "
