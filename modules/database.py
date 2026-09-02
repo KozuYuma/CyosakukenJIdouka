@@ -251,6 +251,10 @@ def _ddl() -> list[str]:
            )""",
         "CREATE INDEX IF NOT EXISTS ix_cd_master_jasrac "
         "ON cd_master (jasrac)",
+        # 管理番号が無い曲を、トラック番号＋曲名で引くための索引。
+        # 36万行あるので、これが無いと毎回ぜんぶ見に行くことになる
+        "CREATE INDEX IF NOT EXISTS ix_cd_master_track "
+        "ON cd_master (track_key)",
         """CREATE TABLE IF NOT EXISTS minc_state (
                name       TEXT PRIMARY KEY,
                state      TEXT NOT NULL,
@@ -898,9 +902,10 @@ def cd_insert(rows: list[dict]) -> int:
 def cd_fetch(mgmt_keys: set[str]) -> list[dict]:
     """管理番号で台帳を引く。
 
-    曲名＋トラック番号では引かない。台帳は36万曲あり、「1曲目・
-    オープニング」のような組み合わせが1万3千種類も重なっているため、
-    曲名で当てると別の盤の曲を掴んでしまう。
+    管理番号は曲ごとに固有なので、当たればどの曲かが決まる。
+    トラック番号＋曲名で引くのは cd_fetch_by_track。台帳は36万曲あり
+    「1曲目・オープニング」のような組み合わせが1万3千種類も重なって
+    いるため、そちらは当たりが1つに絞れたときだけ使う決まりにしてある。
     """
     mgmt = [k for k in (mgmt_keys or set()) if k]
     if not mgmt:
@@ -916,6 +921,45 @@ def cd_fetch(mgmt_keys: set[str]) -> list[dict]:
                     conn.execute(sql, {"mgmt": tuple(mgmt)}).mappings().all()]
     except Exception:
         return []
+
+
+def cd_fetch_by_track(track_keys: set[str]) -> dict[str, list[dict]]:
+    """トラック番号＋曲名で台帳を引く。「キー → 当たった行」を返す。
+
+    管理番号と違って、このキーは曲を1つに決められない。台帳は36万曲
+    あり、「1曲目・オープニング」のような組み合わせが1万3千種類も
+    重なっている。だから当たった行は絞らずに全部返し、どれを採るか
+    （あるいは採らないか）は呼ぶ側で決める。
+
+    多すぎる当たりは持ち帰らない。同名の曲が何百枚のCDに入っている
+    ようなキーは、どのみち1つに決められないため。
+
+    台帳が空のとき・テーブルがまだ無いときは空を返す。ここで例外を
+    投げると読み込みが丸ごと止まってしまうため。
+    """
+    keys = [k for k in (track_keys or set()) if k]
+    if not keys:
+        return {}
+
+    sql = text(
+        f"SELECT {', '.join(CD_COLUMNS)} FROM cd_master "
+        # track_key <> '' は結果を変えない。索引を使わせるために揃える
+        "WHERE track_key <> '' AND track_key IN :keys"
+    ).bindparams(bindparam("keys", expanding=True))
+    try:
+        with get_engine().connect() as conn:
+            rows = [dict(r) for r in
+                    conn.execute(sql, {"keys": tuple(keys)}).mappings().all()]
+    except Exception:
+        return {}
+
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(str(r.get("track_key") or ""), []).append(r)
+    # 毎回同じ順で返す。呼ぶ側が中身を見比べるとき、順が揺れると困る
+    for v in out.values():
+        v.sort(key=lambda r: str(r.get("mgmt_key") or ""))
+    return out
 
 
 def jasrac_variants(code: str) -> list[str]:

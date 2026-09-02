@@ -4,17 +4,36 @@
 台帳は TSP から取り込んだ36万曲。人は直さない読み取り専用の資料。
 育てていく共有楽曲データ（song_master）とは役割が違う。
 
-当てるのは管理番号だけ。曲名では当てない。理由は database.cd_fetch に。
+まず管理番号で当てる。番号は曲ごとに固有なので、当たればどの曲かが
+決まる。番号で当たらなかった曲は、次にトラック番号＋曲名で当てにいく。
+ただしこの組み合わせは曲を1つに決められない（「1曲目・オープニング」
+のような重なりが1万3千種類ある）ので、当たりが1つに絞れた欄だけ埋め、
+絞れなかった行には「複数候補あり」と書いて人に回す。
 """
 from __future__ import annotations
 
 import pandas as pd
 
-from modules.database import cd_fetch
-from modules.song_master import _cell, mark_status, norm_id
+from modules.database import cd_fetch, cd_fetch_by_track
+from modules.song_master import (
+    LEDGER_OVERWRITABLE, _cell, mark_status, norm_id, norm_title,
+    track_candidates,
+)
 
 # 出典の名前。song_master.SRC_RANK に載せてある
 SRC = "自社CD"
+
+#: トラック番号＋曲名で当たった行に書く確認ステータス。
+#: 管理番号で当たった「台帳一致」より弱い当たりなので、後から
+#: 見分けられるように分けてある
+TRACK_STATUS = "台帳一致（曲名）"
+
+#: 当たりが複数あって1つに決められなかった行に書く確認ステータス
+AMBIGUOUS_STATUS = "複数候補あり"
+
+#: 1つのキーに対して見比べる台帳の行数の上限。同名の曲が何百枚のCDに
+#: 入っているようなキーは、どのみち1つに決められないので早めに諦める
+MAX_CANDIDATES = 60
 
 # 台帳の列 → 楽曲まとめの列
 COLUMN_MAP: dict[str, str] = {
@@ -53,47 +72,170 @@ def keys_of(row) -> list[str]:
     return out
 
 
+def _mark(df: pd.DataFrame, idx, status: str) -> bool:
+    """確認ステータスを書く。手つかずの行だけ。書いたら True。"""
+    if "確認ステータス" not in df.columns:
+        return False
+    if _cell(df.at[idx, "確認ステータス"]) not in LEDGER_OVERWRITABLE:
+        return False
+    df.at[idx, "確認ステータス"] = status
+    return True
+
+
+def _same(a: str, b: str) -> bool:
+    """台帳の値どうしを比べる。書き方の揺れは吸収する。"""
+    return norm_title(a) == norm_title(b)
+
+
+def _narrow(rows: list[dict], row) -> list[dict]:
+    """既に分かっているCD情報で、台帳の当たりを絞る。
+
+    CD番号 → CD名 → アーティスト の順に、行に値が入っていて、かつ
+    それで1件以上残るときだけ絞る。絞った結果が空になるなら、その
+    条件は当てにならない（表記が違う等）とみなして絞らない。
+    """
+    for col, src in (("CD番号", "cd_no"), ("CD名", "cd_name"),
+                     ("アーティスト", "artist")):
+        want = _cell(row.get(col))
+        if not want:
+            continue
+        kept = [r for r in rows if _same(r.get(src), want)]
+        if kept:
+            rows = kept
+    return rows
+
+
+def _agreed(rows: list[dict], src_col: str) -> tuple[str, bool]:
+    """台帳の当たりが、その欄で同じことを言っているか。
+
+    返すのは (値, 揃っているか)。空欄は数えない。中身のある値が
+    2種類以上あれば揃っていないとみなす。
+    """
+    vals: list[str] = []
+    for r in rows:
+        v = _cell(r.get(src_col))
+        if v and not any(_same(v, x) for x in vals):
+            vals.append(v)
+    if not vals:
+        return "", True
+    return vals[0], len(vals) == 1
+
+
+def _apply(df: pd.DataFrame, idx, rows: list[dict]) -> tuple[int, bool]:
+    """当たった台帳の行で空欄を埋める。(埋めた欄数, 迷った欄があるか)。
+
+    当たりが複数あっても、その欄について全員が同じことを言っている
+    なら埋めてよい。言うことが割れている欄だけ空けておく。
+    """
+    filled = 0
+    conflicted = False
+    for src_col, dst_col in COLUMN_MAP.items():
+        if dst_col not in df.columns:
+            continue
+        val, agreed = _agreed(rows, src_col)
+        if not agreed:
+            conflicted = True
+            continue
+        if not val or _cell(df.at[idx, dst_col]):
+            continue
+        df.at[idx, dst_col] = val
+        filled += 1
+    return filled, conflicted
+
+
 def fill(songs_df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
     """台帳の値で空欄を埋める。(埋めた後の df, 当たった曲数, 埋めた欄数)。
 
     埋めるのは空欄だけ。既に入っている値は触らない。
+
+    まず管理番号で当てる。当たらなかった行は、トラック番号＋曲名で
+    もう一度当てにいく（管理番号が書かれていない曲を拾うため）。
     """
     if songs_df is None or songs_df.empty:
         return songs_df, 0, 0
 
     keys = [keys_of(row) for _, row in songs_df.iterrows()]
     found = cd_fetch({k for cands in keys for k in cands})
-    if not found:
-        return songs_df, 0, 0
-
     by_key = {r["mgmt_key"]: r for r in found}
 
     df = songs_df.copy()
     hit_rows = 0
     filled = 0
+    # 管理番号で当たらなかった行の位置。あとでトラック番号＋曲名を試す
+    left: list[int] = []
     for pos, cands in enumerate(keys):
         # 候補は書いてあったとおりの番号が先。台帳にある方を採る
         hit = next((by_key[k] for k in cands if k in by_key), None)
         if hit is None:
+            left.append(pos)
             continue
         idx = df.index[pos]
         touched = False
-        # 当てているのは管理番号だけなので、当たった行はどの曲かが決まる
+        # 当てているのは管理番号なので、当たった行はどの曲かが決まる
         if mark_status(df, idx):
             filled += 1
             touched = True
-        for src_col, dst_col in COLUMN_MAP.items():
-            if dst_col not in df.columns:
-                continue
-            if _cell(df.at[idx, dst_col]):
-                continue
-            val = _cell(hit.get(src_col))
-            if not val:
-                continue
-            df.at[idx, dst_col] = val
-            filled += 1
+        _f, _ = _apply(df, idx, [hit])
+        if _f:
+            filled += _f
             touched = True
         if touched:
             hit_rows += 1
 
-    return df, hit_rows, filled
+    _h2, _f2 = _fill_by_track(df, left)
+    return df, hit_rows + _h2, filled + _f2
+
+
+def _fill_by_track(df: pd.DataFrame, positions: list[int]) -> tuple[int, int]:
+    """管理番号で当たらなかった行を、トラック番号＋曲名で埋める。
+
+    (当たった曲数, 埋めた欄数)。df はその場で書き換える。
+
+    このキーは曲を1つに決められないので、
+      ・行に入っているCD番号・CD名・アーティストでまず絞る
+      ・それでも複数残るときは、全員が同じことを言っている欄だけ埋める
+      ・言うことが割れた欄が1つでもあれば「複数候補あり」と書いて残す
+    という決まりにしてある。勝手に別の盤の曲を入れないため。
+    """
+    if not positions:
+        return 0, 0
+
+    # 行ごとのキー候補（桁をそろえた形と、そのままの形）
+    cands: dict[int, list[str]] = {}
+    for pos in positions:
+        row = df.iloc[pos]
+        ks = track_candidates(row)
+        if ks:
+            cands[pos] = ks
+    if not cands:
+        return 0, 0
+
+    found = cd_fetch_by_track({k for ks in cands.values() for k in ks})
+    if not found:
+        return 0, 0
+
+    hit_rows = 0
+    filled = 0
+    for pos, ks in cands.items():
+        rows: list[dict] = []
+        seen: set[str] = set()
+        for k in ks:
+            for r in found.get(k, []):
+                mk = str(r.get("mgmt_key") or "")
+                if mk not in seen:
+                    seen.add(mk)
+                    rows.append(r)
+        if not rows or len(rows) > MAX_CANDIDATES:
+            continue
+
+        idx = df.index[pos]
+        rows = _narrow(rows, df.iloc[pos])
+        _f, conflicted = _apply(df, idx, rows)
+        # 迷った欄があった行は、人がどれか選びに行く必要がある
+        if _mark(df, idx, AMBIGUOUS_STATUS if conflicted else TRACK_STATUS):
+            _f += 1
+        if _f:
+            filled += _f
+            hit_rows += 1
+
+    return hit_rows, filled
