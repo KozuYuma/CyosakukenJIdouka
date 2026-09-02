@@ -797,6 +797,66 @@ def _rank_by_composer(results: list[dict], composer_hint: str) -> list[dict]:
     return matched + unmatched
 
 
+#: 作家名がだいたい同じかどうか。呼び出し側からも使えるようにした名前
+composer_matches = _composer_partial_match
+
+
+def split_nextone_same_work(
+    nextone_results: list[dict],
+    jwid_results: list[dict] | None = None,
+    composer_hint: str = "",
+) -> tuple[list[dict], list[dict]]:
+    """NexTone の検索結果を「同じ曲らしいもの」と「別の曲らしいもの」に分ける。
+
+    NexTone は曲名（freeWord）でしか引けないので、同じ題名の別の曲が
+    そのまま混ざって返ってくる。その先頭をそのまま採ると、別の曲の
+    NexTone管理番号を申告に載せてしまう。
+
+    同じ曲かどうかは作家名で見分ける。J-WID の検索結果には著作者名が
+    出ているので、それと作曲者が一致する NexTone の行だけを「同じ曲」
+    とみなす。つまり残るのは
+
+      * JASRAC にも NexTone にもある曲（作家名がそろっている）
+      * NexTone にしかない曲（J-WID が0件なので、比べる相手がいない）
+
+    の2通り。手元に作曲者が分かっているときは、それも照合の相手に
+    加える（J-WID 側がその曲を持っていない場合の取りこぼしを防ぐため）。
+
+    Returns: (同じ曲らしい行, 別の曲らしい行)
+    """
+    items = list(nextone_results or [])
+    if not items:
+        return [], []
+
+    # J-WID が0件＝比べる相手がいない。NexTone にしかない曲として通す
+    jw = list(jwid_results or [])
+    hint = str(composer_hint or "").strip()
+    if hint.lower() == "nan":
+        hint = ""
+    if not jw and not hint:
+        return items, []
+
+    names = [str(r.get("著作者名", "") or "").strip() for r in jw]
+    names = [n for n in names if n]
+    if hint:
+        names.append(hint)
+    if not names:
+        # J-WID 側に作家名が無いと見分けようがない。黙って捨てない
+        return items, []
+
+    same, other = [], []
+    for r in items:
+        comp = str(r.get("作曲者", "") or "").strip()
+        if not comp:
+            # 作家名が空の行は判断材料が無い。捨てずに残す
+            same.append(r)
+        elif any(_composer_partial_match(comp, n) for n in names):
+            same.append(r)
+        else:
+            other.append(r)
+    return same, other
+
+
 # =====================================================================
 # まとめて検索
 # =====================================================================

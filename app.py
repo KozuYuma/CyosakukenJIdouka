@@ -70,7 +70,8 @@ from modules.musicforest import (
 )
 from modules.normalizer import normalize_for_match
 from modules.pipeline import run_pipeline
-from modules.scraper import search_all
+from modules.scraper import (composer_matches, search_all,
+                             split_nextone_same_work)
 from modules.search_helper import JWID_BASE, generate_search_terms
 from modules.spotify import is_available as spotify_available, spotify_search_url
 from modules.ui import (
@@ -1951,6 +1952,18 @@ def _run_bulk_search() -> None:
                 except Exception:
                     pass
 
+        # NexTone は曲名でしか引けないので、同じ題名の別の曲が混ざる。
+        # JASRAC 側で曲が決まったときは、その曲と作家名がそろう行だけを
+        # 見る（＝JASRACにもNexToneにもある曲）。J-WIDが0件のときは
+        # 比べる相手がいないので、NexToneにしかない曲としてそのまま見る
+        _jw_ref = ([jwid_r[0]] if _auto_apply(jwid_r, jwid_comp_n) else jwid_r)
+        nt_r, _nt_other = split_nextone_same_work(nt_r, _jw_ref, _comp_known)
+        if _nt_other:
+            stats["NexTone別曲除外"] = stats.get("NexTone別曲除外", 0) + len(_nt_other)
+        nt_comp_n = sum(
+            1 for _x in nt_r if composer_matches(_x.get("作曲者", ""), _comp_known)
+        ) if _comp_known else 0
+
         if _auto_apply(nt_r, nt_comp_n):
             r = nt_r[0]
             if r.get("作曲者") and not updates.get("作曲者"):
@@ -2280,6 +2293,12 @@ def _run_bulk_search() -> None:
         + f" ／ 複数候補 {stats['複数候補']} 件 ／ "
         f"ヒットなし {stats['ヒットなし']} 件"
     )
+    if stats.get("NexTone別曲除外"):
+        result_msg += (
+            f"  \n💡 NexTone は同じ題名の別の曲が混ざるので、"
+            f"JASRAC側と作家名がそろわない {stats['NexTone別曲除外']} 件は"
+            f"入れていません。"
+        )
     if stats["エラー"]:
         result_msg += f" ／ エラー {stats['エラー']} 件"
     if stats.get("_last_error"):
@@ -3438,6 +3457,30 @@ with tabs[0]:
                         _nt = _pip["nextone_results"]
                         _nt_r = _nt.get("results") or []
                         _nt_comp_n = _nt.get("composer_matched_count", 0)
+                        # NexTone は曲名でしか引けず、同じ題名の別の曲が
+                        # 混ざる。JASRAC 側で曲が決まったなら、その曲と
+                        # 作家名がそろう行だけを見る。J-WIDが0件のときは
+                        # 比べる相手がいないので、そのまま見る
+                        _nt_hint = str(
+                            st.session_state.songs_df.at[_mb_idx, "作曲者"] or ""
+                        ).strip()
+                        if _nt_hint.lower() == "nan":
+                            _nt_hint = ""
+                        _nt_r, _nt_other = split_nextone_same_work(
+                            _nt_r,
+                            ([_jw_r[0]] if _jw_r and (len(_jw_r) == 1
+                                                      or _jw_comp_n == 1)
+                             else _jw_r),
+                            _nt_hint,
+                        )
+                        if _nt_other:
+                            _mb_stats["NexTone別曲除外"] = (
+                                _mb_stats.get("NexTone別曲除外", 0) + len(_nt_other)
+                            )
+                        _nt_comp_n = sum(
+                            1 for _x in _nt_r
+                            if composer_matches(_x.get("作曲者", ""), _nt_hint)
+                        ) if _nt_hint else 0
                         if _nt_r and (len(_nt_r) == 1 or _nt_comp_n == 1):
                             _mb_stats["NexTone命中"] += 1
                             _rn = _nt_r[0]
@@ -3464,6 +3507,9 @@ with tabs[0]:
                     f"J-WID: {_mb_stats['JWID命中']}件　"
                     f"NexTone: {_mb_stats['NexTone命中']}件　"
                     f"エラー: {_mb_stats['エラー']}件"
+                    + (f"　（NexTone は JASRAC 側と作家名がそろわない "
+                       f"{_mb_stats['NexTone別曲除外']}件を別の曲として除外）"
+                       if _mb_stats.get("NexTone別曲除外") else "")
                 )
                 st.info("「楽曲まとめ」タブで結果を確認・修正してください。")
                 # 一括検索と同じ理由でここでも保存する。この後に rerun しない
@@ -5860,12 +5906,45 @@ with tabs[0]:
                     elif not ntone_r.get("results"):
                         st.warning("NexTone: 該当なし")
                     else:
-                        st.success(f"{len(ntone_r['results'])} 件")
+                        # NexTone は曲名でしか引けないので、同じ題名の別の曲が
+                        # そのまま混ざって出てくる。JASRAC 側と作家名がそろう
+                        # 行（＝JASRACにもNexToneにもある曲）と、J-WIDが0件で
+                        # 比べる相手がいない行（＝NexToneにしかない曲）だけを
+                        # 既定で出す。外した行も見たいときは下の印で出せる
+                        _nt_hint2 = str(
+                            st.session_state.songs_df.at[row_idx, "作曲者"] or ""
+                        ).strip()
+                        if _nt_hint2.lower() == "nan":
+                            _nt_hint2 = ""
+                        _nt_same, _nt_diff = split_nextone_same_work(
+                            ntone_r["results"], jwid_r.get("results") or [],
+                            _nt_hint2,
+                        )
+                        _nt_showall = False
+                        if _nt_diff:
+                            st.caption(
+                                f"同じ題名の別の曲らしい候補を {len(_nt_diff)} 件"
+                                "隠しています（JASRAC側の作家名とそろわないもの）。"
+                            )
+                            _nt_showall = st.checkbox(
+                                "別の曲らしい候補も出す",
+                                key=f"nf_showall_{selected_no}",
+                            )
+                        _nt_view = (_nt_same + _nt_diff) if _nt_showall else _nt_same
+                        # 印を切り替えると並びが変わる。欄の key に混ぜて
+                        # おかないと、前の並びの値が灰色の欄に残る
+                        _nt_kv = "1" if _nt_showall else "0"
+                        if not _nt_view:
+                            st.warning(
+                                "JASRAC側の作家名とそろう候補がありません。"
+                                "上の印を入れると、隠している候補も出せます。"
+                            )
+                        st.success(f"{len(_nt_view)} 件")
                         _nfc1, _nfc2 = st.columns(2)
                         _nf_title  = _nfc1.text_input("曲名で絞り込み",          placeholder="作品名の一部",    key=f"nf_title_{selected_no}")
                         _nf_artist = _nfc2.text_input("アーティスト名で絞り込み", placeholder="アーティスト名",  key=f"nf_artist_{selected_no}")
                         _nf_disp = 0
-                        for i, item in enumerate(ntone_r["results"]):
+                        for i, item in enumerate(_nt_view):
                             if _nf_title  and _nkfc(_nf_title)  not in _nkfc(item.get("作品名",       "")): continue
                             if _nf_artist and _nkfc(_nf_artist) not in _nkfc(item.get("アーティスト", "")): continue
                             _nf_disp += 1
@@ -5874,12 +5953,12 @@ with tabs[0]:
                                 expanded=(_nf_disp == 1),
                             ):
                                 nc1, nc2 = st.columns(2)
-                                nc1.text_input("管理番号",    value=item.get("管理番号",""),    key=f"pip_n_id_{selected_no}_{i}",    disabled=True)
-                                nc1.text_input("作品名",      value=item.get("作品名",""),      key=f"pip_n_title_{selected_no}_{i}", disabled=True)
-                                nc1.text_input("作曲者",      value=item.get("作曲者",""),      key=f"pip_n_comp_{selected_no}_{i}",  disabled=True)
-                                nc2.text_input("作詞者",      value=item.get("作詞者",""),      key=f"pip_n_lyric_{selected_no}_{i}", disabled=True)
-                                nc2.text_input("アーティスト", value=item.get("アーティスト",""), key=f"pip_n_art_{selected_no}_{i}",   disabled=True)
-                                if st.button("✅ 申告フォーマットに反映", key=f"pip_apply_n_{selected_no}_{i}", use_container_width=True):
+                                nc1.text_input("管理番号",    value=item.get("管理番号",""),    key=f"pip_n_id_{selected_no}_{_nt_kv}_{i}",    disabled=True)
+                                nc1.text_input("作品名",      value=item.get("作品名",""),      key=f"pip_n_title_{selected_no}_{_nt_kv}_{i}", disabled=True)
+                                nc1.text_input("作曲者",      value=item.get("作曲者",""),      key=f"pip_n_comp_{selected_no}_{_nt_kv}_{i}",  disabled=True)
+                                nc2.text_input("作詞者",      value=item.get("作詞者",""),      key=f"pip_n_lyric_{selected_no}_{_nt_kv}_{i}", disabled=True)
+                                nc2.text_input("アーティスト", value=item.get("アーティスト",""), key=f"pip_n_art_{selected_no}_{_nt_kv}_{i}",   disabled=True)
+                                if st.button("✅ 申告フォーマットに反映", key=f"pip_apply_n_{selected_no}_{_nt_kv}_{i}", use_container_width=True):
                                     _pip_n_apply = {
                                         "作曲者": item.get("作曲者",""),
                                         "作詞者": item.get("作詞者",""),
