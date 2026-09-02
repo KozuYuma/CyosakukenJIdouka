@@ -626,9 +626,17 @@ def _cds_cand_label(_hit: dict) -> str:
 
 
 def _render_cd_results(
-    _cp_res: dict | None, row_idx: int, key_prefix: str, artist_filter: str = ""
+    _cp_res: dict | None, row_idx: int, key_prefix: str, artist_filter: str = "",
+    cd_name_filter: str = "", hinban_filter: str = "",
 ) -> None:
-    """search_cds_by_jasrac の結果（CD商品リスト全件）を一覧＋反映UIとして描画する。"""
+    """search_cds_by_jasrac の結果（CD商品リスト全件）を一覧＋反映UIとして描画する。
+
+    artist_filter / cd_name_filter / hinban_filter は検索のときに指定された
+    絞り込み。表の上の絞り込み欄より前に効かせる（1曲が何十枚ものCDに入って
+    いることがあり、まず持っているCDまで減らしてから見たいため）。
+    どれも、一致が0件になるときは全件表示に戻す（打ち間違いや、オムニバス盤
+    の (V.A.) 表記で、表ごと消えてしまわないようにするため）。
+    """
     if not _cp_res:
         return
 
@@ -656,7 +664,16 @@ def _render_cd_results(
         st.warning(f"⚠️ 一部エラー: {_cp_res['error']}")
 
     _cp_items = _cp_res["cds"]
-    _cp_head = [f"💿 「{_cp_res.get('作品名', '')}」（{_cp_res.get('作品コード', '')}）"]
+    # 品番から直接引いたときは作品名も作品コードも無い。空の「」（）を
+    # 出すと壊れて見えるので、何で引いた一覧かを書く
+    _cp_wname = str(_cp_res.get("作品名", "") or "")
+    _cp_wcode = str(_cp_res.get("作品コード", "") or "")
+    if _cp_wname or _cp_wcode:
+        _cp_head = [f"💿 「{_cp_wname}」" + (f"（{_cp_wcode}）" if _cp_wcode else "")]
+    elif _cp_res.get("品番"):
+        _cp_head = [f"💿 品番「{_cp_res['品番']}」で引いたCD商品"]
+    else:
+        _cp_head = ["💿 CD商品リスト"]
     for _cp_k in ("作曲者", "作詞者"):
         if _cp_res.get(_cp_k):
             _cp_head.append(f"{_cp_k}: {_cp_res[_cp_k]}")
@@ -665,21 +682,37 @@ def _render_cd_results(
         + f"　／　CD商品 **{_cp_res.get('件数', len(_cp_items))} 件**"
     )
 
-    # ── 検索時に指定されたアーティストで事前に絞り込む ──────────────────────
-    #   0件になる場合（オムニバス盤は (V.A.) 表記）は全件表示にフォールバック
-    _cp_art = str(artist_filter or "").strip()
-    if _cp_art.lower() == "nan":
-        _cp_art = ""
-    if _cp_art:
-        _cp_artl = _cp_art.lower()
-        _cp_hit = [c for c in _cp_items if _cp_artl in c.get("アーティスト", "").lower()]
+    # ── 検索時に指定された条件で事前に絞り込む ────────────────────────────
+    #   0件になる場合は全件表示にフォールバック（オムニバス盤は (V.A.) 表記）
+    def _cp_clean(v) -> str:
+        v = str(v or "").strip()
+        return "" if v.lower() == "nan" else v
+
+    # 品番はハイフンや全角の有無を気にせず比べる。CD名・アーティストは
+    # 大文字小文字だけそろえた部分一致（表記ゆれまでは追わない）
+    for _cp_icon, _cp_lbl, _cp_val, _cp_key, _cp_norm, _cp_note in (
+        ("🎤", "アーティスト", _cp_clean(artist_filter), "アーティスト",
+         str.lower, "（オムニバス盤は (V.A.) 表記です）"),
+        ("💿", "CD名", _cp_clean(cd_name_filter), "CD商品タイトル",
+         str.lower, ""),
+        ("🔢", "CD番号", _cp_clean(hinban_filter), "品番",
+         _norm_hinban, "（ハイフンの有無は気にしません）"),
+    ):
+        if not _cp_val:
+            continue
+        _cp_needle = _cp_norm(_cp_val)
+        _cp_hit = [c for c in _cp_items
+                   if _cp_needle in _cp_norm(str(c.get(_cp_key, "") or ""))]
         if _cp_hit:
-            st.caption(f"🎤 アーティスト「{_cp_art}」で絞り込み: **{len(_cp_hit)}** / {len(_cp_items)} 件")
+            st.caption(
+                f"{_cp_icon} {_cp_lbl}「{_cp_val}」で絞り込み: "
+                f"**{len(_cp_hit)}** / {len(_cp_items)} 件"
+            )
             _cp_items = _cp_hit
         else:
             st.caption(
-                f"🎤 アーティスト「{_cp_art}」に一致するCDが無いため全件表示しています"
-                "（オムニバス盤は (V.A.) 表記です）"
+                f"{_cp_icon} {_cp_lbl}「{_cp_val}」に一致するCDが無いため"
+                f"全件表示しています{_cp_note}"
             )
 
     # ── 絞り込み（品番／CD商品タイトル／アーティスト／会社名の部分一致）────────
@@ -5168,7 +5201,12 @@ with tabs[0]:
         st.markdown('<a id="sec-cd-search"></a>', unsafe_allow_html=True)
         st.markdown("#### 💿 CD情報検索")
         st.caption(
-            "JASRACコードまたは曲名でMINCを検索し、収録CDリストから品番・レコード会社名を申告フォーマットに反映します。"
+            "JASRACコードまたは曲名でMINCを検索し、収録CDリストから品番・"
+            "レコード会社名を申告フォーマットに反映します。"
+            "1曲が何十枚ものCDに入っていることがあるので、"
+            "CD名・CD番号（品番）でも先に絞り込めます。"
+            "JASRACコードも曲名も分からないときは、品番だけ入れて"
+            "「品番のCDを直接開く」からCDを引けます。"
         )
         if not _mf_ok:
             st.info("⚠️ MINCにログインするとCD情報検索が使えます。")
@@ -5224,6 +5262,29 @@ with tabs[0]:
                     ),
                 )
 
+            # 1曲が何十枚ものCDに入っていることがあるので、手元のCDまで
+            # 先に減らせるようにする。どちらも一致0件なら全件表示に戻す
+            _cds_c4, _cds_c5 = st.columns(2)
+            with _cds_c4:
+                _cds_cdname_input = st.text_input(
+                    "CD名（任意・絞り込み用）",
+                    key=f"cds_cdname_{selected_no}",
+                    placeholder="例: ベスト・オブ",
+                    help="CD商品リストを、CD商品タイトルの一部で絞り込みます。"
+                         "一致が0件のときは全件表示します。",
+                )
+            with _cds_c5:
+                _cds_hinban_input = st.text_input(
+                    "CD番号／品番（任意・絞り込み用）",
+                    key=f"cds_hinban_{selected_no}",
+                    placeholder="例: BVCC-8108",
+                    help="CD商品リストを品番で絞り込みます。"
+                         "ハイフンや全角の有無は気にしません。"
+                         "一致が0件のときは全件表示します。\n\n"
+                         "JASRACコードも曲名も分からないときは、"
+                         "下の「この品番のCDを直接開く」からCDそのものを引けます。",
+                )
+
             if st.button("🔍 CDリストを検索", key=f"cds_search_{selected_no}", type="primary", use_container_width=True):
                 with st.spinner("MINCからCDリストを取得中..."):
                     try:
@@ -5239,7 +5300,14 @@ with tabs[0]:
                             _cds_term = _cds_title_input.strip() or _cds_title_default
                             if not _cds_term:
                                 st.session_state.pop(_cds_cand_key, None)
-                                _cds_raw = {"cds": [], "error": "JASRACコードまたは曲名を入力してください。"}
+                                _cds_raw = {
+                                    "cds": [],
+                                    "error": (
+                                        "JASRACコードまたは曲名を入力してください。"
+                                        "品番しか分からないときは、CD番号を入れて"
+                                        "下の「品番のCDを直接開く」を押してください。"
+                                    ),
+                                }
                             else:
                                 # 曲名のみ → まず作品を検索する。MINCは曲名の部分一致
                                 # で探すので「きらきら星」で「きらきら星変奏曲より」も
@@ -5347,14 +5415,45 @@ with tabs[0]:
                                         ),
                                     }
                         if _cds_raw is not None:
-                            # 検索時点のアーティスト指定を結果と一緒に保持する
+                            # 検索時点の絞り込み指定を結果と一緒に持たせる
                             _cds_raw["_artist_filter"] = _cds_artist_input.strip()
+                            _cds_raw["_cdname_filter"] = _cds_cdname_input.strip()
+                            _cds_raw["_hinban_filter"] = _cds_hinban_input.strip()
                             st.session_state[f"cds_results_{selected_no}"] = _cds_raw
                             for _cds_ck in list(st.session_state.keys()):
                                 if _cds_ck.startswith(f"cds_detail_{selected_no}_"):
                                     del st.session_state[_cds_ck]
                     except MusicForestError as _cds_ce:
                         st.session_state[f"cds_results_{selected_no}"] = {"cds": [], "error": str(_cds_ce)}
+
+            # ── 品番からCDそのものを引く ──────────────────────────────
+            # JASRACコードも曲名も手がかりにならない曲（童謡・企画盤など）は、
+            # CDの番号しか分からないことがある。MINCのCD商品検索（品番）を
+            # そのまま引いて、そのCDの収録曲から逆引きできるようにする
+            _cds_hb_q = _cds_hinban_input.strip()
+            if _cds_hb_q and st.button(
+                f"🔢 品番「{_cds_hb_q}」のCDを直接開く",
+                key=f"cds_hinban_go_{selected_no}",
+                use_container_width=True,
+                help="作品コードを介さずにCDを引きます。"
+                     "そのCDの「🎵 収録曲を表示」から曲を逆引きできます。",
+            ):
+                with st.spinner(f"MINCで品番「{_cds_hb_q}」を検索中..."):
+                    try:
+                        _cds_hb_raw = _get_mf_client().search_cds_by_hinban(_cds_hb_q)
+                    except MusicForestError as _cds_hb_e:
+                        _cds_hb_raw = {"cds": [], "error": str(_cds_hb_e)}
+                # 品番で引いた一覧をさらに品番で絞る意味は無い。
+                # アーティストは、その品番のCDが消えてしまうので効かせない
+                _cds_hb_raw["_artist_filter"] = ""
+                _cds_hb_raw["_hinban_filter"] = ""
+                _cds_hb_raw["_cdname_filter"] = _cds_cdname_input.strip()
+                st.session_state[f"cds_results_{selected_no}"] = _cds_hb_raw
+                st.session_state.pop(f"cds_cands_{selected_no}", None)
+                for _cds_ck in list(st.session_state.keys()):
+                    if _cds_ck.startswith(f"cds_detail_{selected_no}_"):
+                        del st.session_state[_cds_ck]
+                st.rerun()
 
             # ── 作品の候補（曲名だけで検索して2件以上見つかった場合）──────
             _cds_cand_st = st.session_state.get(f"cds_cands_{selected_no}") or {}
@@ -5399,6 +5498,8 @@ with tabs[0]:
                         except MusicForestError as _cds_cand_e:
                             _cds_cand_raw = {"cds": [], "error": str(_cds_cand_e)}
                     _cds_cand_raw["_artist_filter"] = _cds_artist_input.strip()
+                    _cds_cand_raw["_cdname_filter"] = _cds_cdname_input.strip()
+                    _cds_cand_raw["_hinban_filter"] = _cds_hinban_input.strip()
                     st.session_state[f"cds_results_{selected_no}"] = _cds_cand_raw
                     for _cds_ck in list(st.session_state.keys()):
                         if _cds_ck.startswith(f"cds_detail_{selected_no}_"):
@@ -5418,6 +5519,8 @@ with tabs[0]:
                 row_idx,
                 f"cds_{selected_no}",
                 artist_filter=(_cds_res_cur or {}).get("_artist_filter", ""),
+                cd_name_filter=(_cds_res_cur or {}).get("_cdname_filter", ""),
+                hinban_filter=(_cds_res_cur or {}).get("_hinban_filter", ""),
             )
 
         if selected_label:
