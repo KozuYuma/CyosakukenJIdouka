@@ -80,6 +80,7 @@ from modules.ui import (
     count_done,
     inject_css,
     issue_mark,
+    source_mark,
     status_bar,
 )
 
@@ -1231,6 +1232,8 @@ _SONG_DEFAULTS: dict[str, str] = {
     "配信J": "",
     "配信N": "",
     "自社楽曲ID": "",
+    # 値の出どころ。今は自社CDの台帳（TSP台帳）から入れた行にだけ書く
+    "情報元": "",
 }
 
 
@@ -3089,15 +3092,17 @@ with tabs[0]:
         except Exception as _e:
             st.warning(f"⚠️ 共有楽曲データの参照に失敗しました: {_e}")
 
-        # 自社CDの台帳で、まだ空いている欄を埋める。共有楽曲データより
-        # 後に置くこと。人が手で直した値のほうが強いので、先に入れさせる
+        # 自社CDの台帳（TSP）から入れる。管理番号で当たった行は、盤まわりの
+        # 情報が元々ここから出ているので台帳の値を優先して入れ替える。
+        # 番号が無くてトラック番号＋曲名で当てた行は空欄だけを埋める
         try:
             _c_df, _c_hits, _c_filled = cd_fill(st.session_state.songs_df)
             if _c_filled:
                 st.session_state.songs_df = _c_df
                 st.success(
-                    f"💿 自社CDの台帳から {_c_hits} 曲・{_c_filled} 欄を"
-                    f"自動補完しました。"
+                    f"💿 自社CDの台帳（TSP）から {_c_hits} 曲・{_c_filled} 欄を"
+                    f"反映しました。管理番号で当たった行は台帳の値を優先しています"
+                    f"（表の状態欄に 🔵 が付きます）。"
                 )
         except Exception as _e:
             st.warning(f"⚠️ 自社CDの台帳の参照に失敗しました: {_e}")
@@ -3748,8 +3753,18 @@ with tabs[0]:
             _shinkok_src = _shinkok_df[_preview_cols].copy()
             # 印は「どこまで調べたか」ではなく「このまま出せるか」で付ける。
             # 調べ方の途中経過は隣の確認ステータス列にそのまま出ている
+            # 出どころの印。TSP（自社CDの台帳）から入れた行は頭に 🔵 を
+            # 付けて、検索で引いてきた行と見分けられるようにする。
+            # 申告フォーマットの表には出どころの欄が無いので、
+            # イベント名で楽曲まとめ側を引く
+            _sh_src_by_ev: dict = {}
+            if {"イベント名", "情報元"} <= set(_shinkok_songs.columns):
+                _sh_src_by_ev = dict(zip(_shinkok_songs["イベント名"],
+                                         _shinkok_songs["情報元"]))
             _shinkok_src.insert(0, "状態", [
-                issue_mark(r) for _, r in _shinkok_src.iterrows()
+                source_mark(_sh_src_by_ev.get(r.get("イベント名", ""), ""))
+                + issue_mark(r)
+                for _, r in _shinkok_src.iterrows()
             ])
             # 印は「常に1つか0個」。控えてある行だけを付けた状態で描く
             _sel_keep = st.session_state.get("_shinkok_sel")
@@ -3766,6 +3781,9 @@ with tabs[0]:
                 "状態": st.column_config.TextColumn(
                     "状態", width="small",
                     help="このまま申告に出せるかどうかの印。\n\n"
+                         "🔵 TSP台帳から反映 … 自社CDの台帳（管理番号や"
+                         "曲名）で入れた値がある行。検索で引いて"
+                         "きた行には付かない\n\n"
                          "🔴 空欄あり … レコード会社名・レコード番号・"
                          "邦洋・I/V・作曲・アーティストのどれかが空、"
                          "ヴォーカルなのに作詞が空、JASRAC も NexTone も"

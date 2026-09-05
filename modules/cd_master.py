@@ -31,6 +31,13 @@ TRACK_STATUS = "台帳一致（曲名）"
 #: 当たりが複数あって1つに決められなかった行に書く確認ステータス
 AMBIGUOUS_STATUS = "複数候補あり"
 
+#: 台帳から値を入れた行に書き残す出どころ。表では 🔵 の印になる
+SOURCE_COL = "情報元"
+SOURCE_LABEL = "TSP台帳"
+
+#: この確認ステータスの行は人が確定させたものなので、台帳でも上書きしない
+CONFIRMED_STATUS = "確定"
+
 #: 1つのキーに対して見比べる台帳の行数の上限。同名の曲が何百枚のCDに
 #: 入っているようなキーは、どのみち1つに決められないので早めに諦める
 MAX_CANDIDATES = 60
@@ -121,11 +128,16 @@ def _agreed(rows: list[dict], src_col: str) -> tuple[str, bool]:
     return vals[0], len(vals) == 1
 
 
-def _apply(df: pd.DataFrame, idx, rows: list[dict]) -> tuple[int, bool]:
-    """当たった台帳の行で空欄を埋める。(埋めた欄数, 迷った欄があるか)。
+def _apply(df: pd.DataFrame, idx, rows: list[dict],
+           overwrite: bool = False) -> tuple[int, bool]:
+    """当たった台帳の行で欄を埋める。(埋めた欄数, 迷った欄があるか)。
 
     当たりが複数あっても、その欄について全員が同じことを言っている
     なら埋めてよい。言うことが割れている欄だけ空けておく。
+
+    overwrite を立てると、既に入っている値も台帳の値で置き換える。
+    管理番号で当てたときだけ使う。番号は曲ごとに固有で、盤まわりの
+    情報は台帳が元なので、外から拾ってきた値より確かなため。
     """
     filled = 0
     conflicted = False
@@ -136,17 +148,36 @@ def _apply(df: pd.DataFrame, idx, rows: list[dict]) -> tuple[int, bool]:
         if not agreed:
             conflicted = True
             continue
-        if not val or _cell(df.at[idx, dst_col]):
+        if not val:
+            continue
+        cur = _cell(df.at[idx, dst_col])
+        if cur and not (overwrite and not _same(cur, val)):
             continue
         df.at[idx, dst_col] = val
         filled += 1
     return filled, conflicted
 
 
-def fill(songs_df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
-    """台帳の値で空欄を埋める。(埋めた後の df, 当たった曲数, 埋めた欄数)。
+def _confirmed(df: pd.DataFrame, idx) -> bool:
+    """人が確定させた行か。確定した行は台帳でも上書きしない。"""
+    if "確認ステータス" not in df.columns:
+        return False
+    return _cell(df.at[idx, "確認ステータス"]) == CONFIRMED_STATUS
 
-    埋めるのは空欄だけ。既に入っている値は触らない。
+
+def _mark_source(df: pd.DataFrame, idx) -> None:
+    """この行の値は台帳から入れた、と書き残す。表の 🔵 の印はこれを見る。"""
+    if SOURCE_COL not in df.columns:
+        df[SOURCE_COL] = ""
+    df.at[idx, SOURCE_COL] = SOURCE_LABEL
+
+
+def fill(songs_df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
+    """台帳の値で欄を埋める。(埋めた後の df, 当たった曲数, 埋めた欄数)。
+
+    管理番号で当たった行は、台帳の値を優先して入れ替える（人が
+    「確定」にした行は触らない）。番号が無くてトラック番号＋曲名で
+    当てた行は、今までどおり空欄だけを埋める。
 
     まず管理番号で当てる。当たらなかった行は、トラック番号＋曲名で
     もう一度当てにいく（管理番号が書かれていない曲を拾うため）。
@@ -175,11 +206,14 @@ def fill(songs_df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
         if mark_status(df, idx):
             filled += 1
             touched = True
-        _f, _ = _apply(df, idx, [hit])
+        # 管理番号で当たった行は、台帳の値を優先して入れ替える。
+        # 人が確定させた行だけは触らない
+        _f, _ = _apply(df, idx, [hit], overwrite=not _confirmed(df, idx))
         if _f:
             filled += _f
             touched = True
         if touched:
+            _mark_source(df, idx)
             hit_rows += 1
 
     _h2, _f2 = _fill_by_track(df, left)
@@ -235,6 +269,7 @@ def _fill_by_track(df: pd.DataFrame, positions: list[int]) -> tuple[int, int]:
         if _mark(df, idx, AMBIGUOUS_STATUS if conflicted else TRACK_STATUS):
             _f += 1
         if _f:
+            _mark_source(df, idx)
             filled += _f
             hit_rows += 1
 

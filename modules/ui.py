@@ -76,8 +76,12 @@ def status_tone(value) -> str:
 
 #: 状態欄の印の読み方。表の見出しと下に添えて出す
 ISSUE_MARK_LEGEND = (
-    "🔴 空欄あり　🟡 権利状態注意　（印なし＝そのまま出せる）"
+    "🔵 TSP台帳から反映　🔴 空欄あり　🟡 権利状態注意　（印なし＝そのまま出せる）"
 )
+
+#: 自社CDの台帳（TSP）から値を入れた行に付ける印。検索で引いてきた
+#: 行と見分けるためのもので、空欄や権利の印とは別に頭へ付ける
+LEDGER_MARK = "🔵"
 
 #: 空とみなす値。DB を通ると空欄が nan や None の字で戻ってくる
 _ISSUE_BLANKS = ("", "nan", "none")
@@ -136,6 +140,16 @@ def issue_mark(row) -> str:
     if any(cautions):
         return "🟡"
     return ""
+
+
+def source_mark(source) -> str:
+    """データの出どころの印。自社CDの台帳（TSP）から入れた行は 🔵。
+
+    値は cd_master が行に書き残す「情報元」欄。検索で引いてきた行には
+    何も書かれないので、印も付かない。
+    """
+    s = str(source or "").strip()
+    return LEDGER_MARK if s and s.lower() not in _ISSUE_BLANKS else ""
 
 
 def inject_css() -> None:
