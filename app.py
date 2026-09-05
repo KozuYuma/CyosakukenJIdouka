@@ -1236,6 +1236,9 @@ _SONG_DEFAULTS: dict[str, str] = {
     "情報元": "",
     # MP3 の ID3 タグに入っていた曲名。検索語の控えとして使う
     "MP3検出タイトル": "",
+    # MusicBrainz / Spotify が尺つきで当てた正式な曲名。
+    # 曲名は人が直すことがあるので、そちらは触らずここに残す
+    "正式タイトル": "",
 }
 
 
@@ -1706,6 +1709,19 @@ def _full_duration(row) -> str:
     return ""
 
 
+def _search_title(row) -> str:
+    """一括検索で使う曲名。正式タイトル → 曲名 → 検出タイトルの順。
+
+    正式タイトルは MusicBrainz / Spotify が尺つきで当てた名前なので、
+    表記ゆれのある曲名より確かなものとして先に使う。
+    """
+    for col in ("正式タイトル", "曲名"):
+        v = str(row.get(col, "")).strip()
+        if v and v.lower() != "nan":
+            return v
+    return _detected_title(row)
+
+
 def _detected_title(row) -> str:
     """ファイル側で分かっている曲名。WAV のファイル名 → MP3 の ID3 の順。"""
     for col in ("WAV検出タイトル", "MP3検出タイトル"):
@@ -1959,6 +1975,16 @@ def _master_learn() -> int:
 # =====================================================================
 # ヘッダー
 # =====================================================================
+def _bulk_target_mask(songs, target: str):
+    """一括検索の対象行。ボタンの表示と実行の両方で同じ決め方を使う。"""
+    if target == "正式タイトルのある曲のみ" and "正式タイトル" in songs.columns:
+        vals = songs["正式タイトル"].astype(str).str.strip()
+        return ~vals.isin(("", "nan", "None"))
+    if target == "未調査のみ" and "確認ステータス" in songs.columns:
+        return songs["確認ステータス"].isin(["未調査", "MP3補助確認"])
+    return pd.Series([True] * len(songs), index=songs.index)
+
+
 def _run_bulk_search() -> None:
     """一括検索の中身。画面を全部描き終えてから、いちばん最後に回す。
 
@@ -1972,11 +1998,8 @@ def _run_bulk_search() -> None:
     if _songs is None or _songs.empty:
         return
     # 対象はボタンを押した時と同じ決め方で出し直す
-    target_mask = (
-        _songs["確認ステータス"].isin(["未調査", "MP3補助確認"])
-        if st.session_state.get("bulk_search_target") == "未調査のみ"
-        else pd.Series([True] * len(_songs), index=_songs.index)
-    )
+    target_mask = _bulk_target_mask(
+        _songs, st.session_state.get("bulk_search_target"))
     target_indices = st.session_state.songs_df[target_mask].index.tolist()
     total = len(target_indices)
     # 進み具合は、一括検索の欄に用意しておいた場所へ出す。
@@ -2006,11 +2029,7 @@ def _run_bulk_search() -> None:
         event_name = str(row.get("イベント名", ""))
 
         # 検索語: 曲名 → WAV検出タイトル → イベント名（管理番号は使わない）
-        search_term = (
-            str(row.get("曲名", "")).strip()
-            or _detected_title(row)
-            or event_name
-        )
+        search_term = _search_title(row) or event_name
         if search_term.lower() == "nan":
             search_term = event_name
 
@@ -3386,17 +3405,15 @@ with tabs[0]:
         ):
             bulk_target = st.radio(
                 "検索対象",
-                ["未調査のみ", "全曲"],
+                ["未調査のみ", "正式タイトルのある曲のみ", "全曲"],
                 horizontal=True,
                 key="bulk_search_target",
                 on_change=_keep_bulk_open,
+                help="「正式タイトルのある曲のみ」は、MusicBrainz / Spotify の"
+                     "一括補完で尺の裏が取れた曲だけを回します。",
             )
-            target_mask = (
-                st.session_state.songs_df["確認ステータス"].isin(["未調査", "MP3補助確認"])
-                if bulk_target == "未調査のみ"
-                else pd.Series([True] * len(st.session_state.songs_df),
-                               index=st.session_state.songs_df.index)
-            )
+            target_mask = _bulk_target_mask(
+                st.session_state.songs_df, bulk_target)
             target_count = int(target_mask.sum())
             _mf_ok_info, _ = st.session_state.get("mf_auth_state", (False, ""))
             # 1曲あたりの目安。3つのサイトを同時に調べるようにした後の実測
@@ -3578,6 +3595,19 @@ with tabs[0]:
                         _mb_best = _pip.get("mb_best")
                         if _mb_best and _mb_best.get("score", 0) >= int(mb_bulk_thresh):
                             _mb_stats["MB命中"] += 1
+
+                        # 尺の裏が取れた正式な曲名を残しておく。あとの
+                        # MINC / J-WID 一括検索はここを最優先の検索語にする
+                        _pip_title = str(_pip.get("jwid_search_term", "")).strip()
+                        _pip_from_db = bool(
+                            _mb_best and _mb_best.get("score", 0) >= int(mb_bulk_thresh)
+                        ) or bool(
+                            (_pip.get("sp_best") or {}).get("score", 0) >= 70
+                        )
+                        if (_pip_title and _pip_from_db
+                                and "正式タイトル" in st.session_state.songs_df.columns):
+                            st.session_state.songs_df.at[
+                                _mb_idx, "正式タイトル"] = _pip_title
 
                         # Spotify 結果で補完（MusicBrainz 未取得 or 低スコアのとき）
                         _sp_best = _pip.get("sp_best")
@@ -4368,6 +4398,7 @@ with tabs[0]:
             term_candidates: list[tuple[str, str]] = []
             _tc_seen: set[str] = set()
             for field, label in [
+                ("正式タイトル",   "正式タイトル"),
                 ("WAV検出タイトル", "WAV検出タイトル"),
                 ("曲名",           "曲名"),
                 ("アーティスト",   "アーティスト"),
