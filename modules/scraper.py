@@ -280,11 +280,46 @@ def _parse_jwid_table(soup: BeautifulSoup) -> list[dict]:
     return results
 
 
+def _mgmt_icon(svg) -> str:
+    """管理状況のアイコン（SVG）を ○ / △ / × に読み分ける。
+
+    J-WID は形を SVG で描いていて、文字は入っていない。
+      ○（管理あり）  … <circle>
+      △（一部管理）  … 三角。<polygon>、または頂点3つの <path>
+                        （M で始まり L が3本の区切りを持つ。緑 #2ea092）
+      ×（管理なし）  … バツ。線が8本つながった <path>（赤 #bf0000）
+    三角もバツも <path> なので、区切りごとの L（線を引く命令）の数で
+    見分ける。形で決められないときだけ色を見る。アイコンが無いときは
+    「管理なし」とみなす（今までどおり）。
+    """
+    if svg is None:
+        return "×"
+    if svg.find(["circle", "ellipse"]) is not None:
+        return "○"
+    poly = svg.find(["polygon", "polyline"])
+    if poly is not None:
+        pts = re.findall(r"[-\d.]+\s*[, ]\s*[-\d.]+", poly.get("points", ""))
+        return "△" if len(pts) <= 4 else "×"
+    path = svg.find("path")
+    if path is not None:
+        d = path.get("d", "")
+        # 「M …」ごとに区切って、その中の L の数を数える。三角は3本
+        for sub in re.split(r"[Mm]", d)[1:]:
+            if len(re.findall(r"[Ll]", sub)) == 3:
+                return "△"
+        color = (path.get("fill", "") or path.get("stroke", "")).lower()
+        if color.startswith("#") and len(color) >= 7:
+            r_, g_, b_ = (int(color[k:k + 2], 16) for k in (1, 3, 5))
+            if g_ > r_:          # 緑寄りは「一部管理」の色
+                return "△"
+    return "×"
+
+
 def _parse_management_status(soup: BeautifulSoup) -> dict[str, str]:
     """
     J-WID 詳細ページの 管理状況(利用分野) セクションから ○△× を抽出する。
 
-    SVG形状: circle → ○, polygon → △, line/path → ×, 要素なし → ×
+    形の読み分けは _mgmt_icon() を参照（circle→○、三角→△、バツ→×）。
 
     Returns: {"演奏会等": "○", "上映/BGM": "○", "放送": "○", ...}
     """
@@ -314,17 +349,7 @@ def _parse_management_status(soup: BeautifulSoup) -> dict[str, str]:
                 continue
 
             # SVG形状で管理状況を判定
-            svg = li.find("svg")
-            if svg:
-                child_names = [c.name for c in svg.children if hasattr(c, "name") and c.name]
-                if "circle" in child_names:
-                    icon = "○"
-                elif "polygon" in child_names:
-                    icon = "△"
-                else:
-                    icon = "×"
-            else:
-                icon = "×"
+            icon = _mgmt_icon(li.find("svg"))
 
             status[field_name] = icon
 
