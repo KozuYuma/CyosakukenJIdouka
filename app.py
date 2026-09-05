@@ -3754,6 +3754,13 @@ with tabs[0]:
                 "原・訳詞区分":  st.column_config.TextColumn("原・訳詞区分", width="small"),
                 "確認ステータス": st.column_config.TextColumn("確認ステータス", width="medium"),
                 "委任者":        st.column_config.TextColumn("委任者", width="small"),
+                # MusicBrainz / Spotify が尺つきで当てた正式な曲名。
+                # 一括検索はここが入っていればこの名前で引く
+                "正式タイトル": st.column_config.TextColumn(
+                    "正式タイトル", width="medium",
+                    help="MusicBrainz / Spotify の一括補完で尺の裏が取れた"
+                         "曲名です。入っている行は、MINC / J-WID の一括検索が"
+                         "この名前で引きます（曲名より優先）。"),
                 # 放送・配信は J-WID と NexTone の管理状況を写した欄。人が
                 # 書き換えるものではないので編集できないようにしてある
                 "放送": st.column_config.TextColumn(
@@ -3870,7 +3877,7 @@ with tabs[0]:
                 height=460,
                 key=_shinkok_key,
                 column_config=_SHINKOK_COL_CFG,
-                disabled=["状態", *JWID_MGMT_COLS],
+                disabled=["状態", "正式タイトル", *JWID_MGMT_COLS],
                 on_change=_sync_shinkok_to_songs,
             )
 
