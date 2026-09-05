@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 
 from modules.database import cd_fetch, cd_fetch_by_track
@@ -42,6 +44,14 @@ CONFIRMED_STATUS = "確定"
 #: 入っているようなキーは、どのみち1つに決められないので早めに諦める
 MAX_CANDIDATES = 60
 
+#: 管理番号の英字2文字がこれならヴォーカル。TSP の Excel 版と同じ決まりで、
+#: それ以外は全部インストとして扱う。JI/FI/ST/AN の歌モノは人が直す
+VOCAL_SERIES = ("VO", "VJ")
+
+#: ハイフンを落とした管理番号（1EX-545-04 → 1EX54504）。
+#: トラック番号が無い盤番号だけの形も拾う
+_SERIES_RE = re.compile(r"^\d([A-Z]{2})\d{3}(?:\d{2})?$")
+
 # 台帳の列 → 楽曲まとめの列
 COLUMN_MAP: dict[str, str] = {
     "title": "曲名",
@@ -52,6 +62,35 @@ COLUMN_MAP: dict[str, str] = {
     "label": "レコード会社名",
     "jasrac": "JASRAC作品コード",
 }
+
+
+def iv_of(mgmt) -> str:
+    """管理番号から I/V区分 を決める。決められなければ空文字。
+
+    台帳を引かずに番号だけで決まるので、台帳に無い新規入庫の曲でも書ける。
+    VO・VJ をヴォーカル、それ以外をインストとするのは TSP の Excel 版と
+    同じ決まり。例外（サントラの歌モノなど）は人が直す前提。
+    """
+    m = _SERIES_RE.match(norm_id(mgmt))
+    if not m:
+        return ""
+    return "ヴォーカル" if m.group(1) in VOCAL_SERIES else "インスト"
+
+
+def houyo_of(jasrac) -> str:
+    """JASRACコードの2文字目から邦洋区分を決める（数字→邦楽、英字→洋楽）。
+
+    これも TSP の Excel 版と同じ決まり。例外があるので人が直す前提。
+    """
+    code = _cell(jasrac)
+    if len(code) < 2:
+        return ""
+    c = code[1]
+    if c.isdigit():
+        return "邦楽"
+    if c.isalpha():
+        return "洋楽"
+    return ""
 
 
 def keys_of(row) -> list[str]:
@@ -217,7 +256,46 @@ def fill(songs_df: pd.DataFrame) -> tuple[pd.DataFrame, int, int]:
             hit_rows += 1
 
     _h2, _f2 = _fill_by_track(df, left)
-    return df, hit_rows + _h2, filled + _f2
+    _h3, _f3 = _fill_derived(df)
+    return df, hit_rows + _h2 + _h3, filled + _f2 + _f3
+
+
+def _fill_derived(df: pd.DataFrame) -> tuple[int, int]:
+    """管理番号と JASRACコードから決まる欄を埋める。(当たった曲数, 埋めた欄数)。
+
+    I/V区分 は管理番号だけで決まるので、台帳に当たらなかった行にも入れる。
+    邦洋区分 は JASRACコードを見るので、台帳から番号が入った行で効く。
+
+    どちらも決まりで機械的に決めているだけの推定なので、既に値が入って
+    いる行は触らない（人が直した値を消さないため）。
+    """
+    hit_rows = 0
+    filled = 0
+    for pos in range(len(df)):
+        idx = df.index[pos]
+        row = df.iloc[pos]
+        vals = (
+            ("I/V区分", iv_of(row.get("元管理番号"))),
+            ("邦洋区分", houyo_of(row.get("JASRAC作品コード"))),
+        )
+        n = 0
+        for col, val in vals:
+            if not val or col not in df.columns:
+                continue
+            if _cell(df.at[idx, col]):
+                continue
+            df.at[idx, col] = val
+            n += 1
+        if not n:
+            continue
+        filled += n
+        # 台帳で既に当たっている行は、曲数を二重に数えない
+        already = (SOURCE_COL in df.columns
+                   and _cell(df.at[idx, SOURCE_COL]) == SOURCE_LABEL)
+        if not already:
+            hit_rows += 1
+        _mark_source(df, idx)
+    return hit_rows, filled
 
 
 def _fill_by_track(df: pd.DataFrame, positions: list[int]) -> tuple[int, int]:
