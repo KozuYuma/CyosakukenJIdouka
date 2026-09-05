@@ -194,9 +194,14 @@ def build_song_list(
         if matched_mp3:
             mp3_filename = matched_mp3.get("FileName") or matched_mp3.get("ファイル名", "")
             mp3_duration = matched_mp3.get("Duration") or matched_mp3.get("再生時間", "")
+            # ID3 の曲名。無ければファイル名から拾う。検索語の控えになる
+            mp3_title = str(matched_mp3.get("タイトル(ID3)", "") or "").strip()
+            if not mp3_title or mp3_title.lower() == "nan":
+                mp3_title = detect_title_from_filename(mp3_filename) if mp3_filename else ""
         else:
             mp3_filename = ""
             mp3_duration = ""
+            mp3_title = ""
 
         # --- 確認ステータス初期値 ---
         if wav_status == MATCH_NONE and not matched_mp3:
@@ -238,6 +243,7 @@ def build_song_list(
                 "WAV照合ステータス": wav_status,
                 "MP3一致ファイル名": mp3_filename,
                 "MP3フル尺": mp3_duration,
+                "MP3検出タイトル": mp3_title,
                 "使用形態": "背景",
                 "音源区分": "CD",
                 "I/V区分": "",

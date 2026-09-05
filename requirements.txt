@@ -7,6 +7,9 @@ beautifulsoup4>=4.12.0
 lxml>=5.0.0
 anthropic>=0.30.0
 
+# MP3 の再生時間と ID3 タグを読む（フォルダスキャン用）
+mutagen>=1.47.0
+
 # DB接続。DATABASE_URL 未設定なら SQLite、設定時は Supabase/Render の PostgreSQL
 sqlalchemy>=2.0.0
 psycopg[binary]>=3.1.0

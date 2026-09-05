@@ -37,6 +37,10 @@ def generate_search_terms(songs_df: pd.DataFrame) -> pd.DataFrame:
         if row.get("WAV検出タイトル") and str(row["WAV検出タイトル"]).strip():
             term_candidates.append(("WAV検出タイトル", str(row["WAV検出タイトル"]).strip()))
 
+        if row.get("MP3検出タイトル") and str(row["MP3検出タイトル"]).strip():
+            term_candidates.append(
+                ("MP3検出タイトル", str(row["MP3検出タイトル"]).strip()))
+
         if row.get("曲名") and str(row["曲名"]).strip():
             term_candidates.append(("管理番号除去後曲名", str(row["曲名"]).strip()))
 

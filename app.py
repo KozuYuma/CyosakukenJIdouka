@@ -1234,6 +1234,8 @@ _SONG_DEFAULTS: dict[str, str] = {
     "自社楽曲ID": "",
     # 値の出どころ。今は自社CDの台帳（TSP台帳）から入れた行にだけ書く
     "情報元": "",
+    # MP3 の ID3 タグに入っていた曲名。検索語の控えとして使う
+    "MP3検出タイトル": "",
 }
 
 
@@ -1676,6 +1678,10 @@ def _import_mp3finder_id3(
             return True
 
         changed = any([
+            _fill("タイトル(ID3)",     "MP3検出タイトル"),
+            # 曲名がまだ空なら、ID3 の曲名をそのまま入れておく。
+            # 一括検索はここを最優先の検索語にしているため
+            _fill("タイトル(ID3)",     "曲名"),
             _fill("アーティスト(ID3)", "アーティスト"),
             _fill("作曲者(ID3)",       "作曲者"),
             _fill("アルバム(ID3)",     "CD名"),
@@ -1686,6 +1692,28 @@ def _import_mp3finder_id3(
             updated += 1
 
     return songs_df, updated
+
+def _full_duration(row) -> str:
+    """その曲のフル尺。WAV が無いときは MP3（ID3）の再生時間を使う。
+
+    MusicBrainz / Spotify は尺で候補を絞れるので、WAV を配っていない
+    案件でも MP3 の長さが分かるなら同じように絞り込める。
+    """
+    for col in ("WAVフル尺", "MP3フル尺"):
+        v = str(row.get(col, "")).strip()
+        if v and v.lower() != "nan":
+            return v
+    return ""
+
+
+def _detected_title(row) -> str:
+    """ファイル側で分かっている曲名。WAV のファイル名 → MP3 の ID3 の順。"""
+    for col in ("WAV検出タイトル", "MP3検出タイトル"):
+        v = str(row.get(col, "")).strip()
+        if v and v.lower() != "nan":
+            return v
+    return ""
+
 
 def _import_master_db(
     master_df: pd.DataFrame,
@@ -1980,7 +2008,7 @@ def _run_bulk_search() -> None:
         # 検索語: 曲名 → WAV検出タイトル → イベント名（管理番号は使わない）
         search_term = (
             str(row.get("曲名", "")).strip()
-            or str(row.get("WAV検出タイトル", "")).strip()
+            or _detected_title(row)
             or event_name
         )
         if search_term.lower() == "nan":
@@ -3538,8 +3566,8 @@ with tabs[0]:
                             _mb_composer = ""
                         _pip = run_pipeline(
                             event_name=_mb_name,
-                            wav_full_duration=str(_mb_row.get("WAVフル尺", "")),
-                            wav_detected_title=str(_mb_row.get("WAV検出タイトル", "")),
+                            wav_full_duration=_full_duration(_mb_row),
+                            wav_detected_title=_detected_title(_mb_row),
                             song_title=str(_mb_row.get("曲名", "")),
                             composer=_mb_composer,
                             tolerance_sec=float(mb_bulk_tol),
@@ -5710,10 +5738,16 @@ with tabs[0]:
                 ),
             )
 
-            wav_dur_raw = str(row.get("WAVフル尺", "")).strip()
+            # WAV が無い案件でも、MP3 の再生時間が分かればそれで絞り込む
+            wav_dur_raw = _full_duration(row)
             wav_dur_sec_val = _hms_to_sec(wav_dur_raw)
-            if wav_dur_raw and wav_dur_raw.lower() != "nan":
-                st.caption(f"WAV フル尺: {wav_dur_raw}（{wav_dur_sec_val:.1f} 秒）をMusicBrainz の尺絞り込みに使用します。")
+            if wav_dur_raw:
+                _dur_src = ("WAV" if str(row.get("WAVフル尺", "")).strip()
+                            not in ("", "nan") else "MP3")
+                st.caption(
+                    f"{_dur_src} フル尺: {wav_dur_raw}"
+                    f"（{wav_dur_sec_val:.1f} 秒）を"
+                    f"MusicBrainz の尺絞り込みに使用します。")
             else:
                 st.caption("WAV フル尺が未取得のため MusicBrainz は尺絞り込みなしで検索します。")
 
@@ -5762,7 +5796,7 @@ with tabs[0]:
                     pip_result = run_pipeline(
                         event_name=str(row.get("イベント名", "")),
                         wav_full_duration=wav_dur_raw,
-                        wav_detected_title=str(row.get("WAV検出タイトル", "")),
+                        wav_detected_title=_detected_title(row),
                         song_title=_pip_search_term or _pip_song_title,
                         jwid_artist=st.session_state.get(f"jf_artist_{selected_no}", ""),
                         tolerance_sec=float(pip_tolerance),
