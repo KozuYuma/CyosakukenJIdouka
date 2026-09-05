@@ -6,17 +6,31 @@ import re
 
 # --- 有効なライブラリ系列の定義 ---
 # キー: 英字2文字, 値: 使用可能な数字（先頭1桁）の集合
+# 系列を増やすときはここだけ直す（下の LIBRARY_PATTERN はここから作る）
 VALID_LIBRARY_SERIES: dict[str, set[int]] = {
-    "ST": {1, 2, 3, 4, 5, 6, 7},
     "AN": {1, 2, 3, 4, 5},
-    "VO": {1, 2},
+    "CL": {1},
+    "EX": {1, 2},
+    "FI": {1, 2, 3},
+    "JI": {1, 2, 3, 4, 5},
+    "JS": {1},
+    "SP": {1},
+    "ST": {1, 2, 3, 4, 5, 6, 7},
+    # VO・VJ はヴォーカル系。VJ は 1VJ・2VJ の実物がある
     "VJ": {1, 2},
+    "VO": {1},
 }
 
 # ライブラリ管理番号パターン（厳密版）: 数字1桁 + 英字2文字 - 3桁 - 2桁
 # 例: 6ST-653-09
+# 系列と数字は VALID_LIBRARY_SERIES から組み立てる。ここでは大まかに拾って、
+# 数字がその系列にある番号かは parse_library_number 側で確かめる
 LIBRARY_PATTERN = re.compile(
-    r"\b([1-7])(ST|AN|VO|VJ)-(\d{3})-(\d{2})\b",
+    r"\b([{digits}])({series})-(\d{{3}})-(\d{{2}})\b".format(
+        digits="".join(sorted(
+            {str(d) for ds in VALID_LIBRARY_SERIES.values() for d in ds})),
+        series="|".join(sorted(VALID_LIBRARY_SERIES)),
+    ),
     re.IGNORECASE,
 )
 
